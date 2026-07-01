@@ -228,6 +228,11 @@ export function runPostProcessor(input: PostProcessorInput): PostProcessorResult
       }
 
       state.currentToolId = tool.id
+      // Tool ran raw G-code commands (probe, Z retract, etc.) that moved the
+      // machine without the post-processor tracking them.  Reset position so
+      // the first move of this operation emits a full G0 to safe Z before
+      // any cut/plunge, preventing a long feed-rate diagonal through air.
+      state.currentPosition = null
     } else if (toolChanged && !options.emitToolChanges && opIndex > 0) {
       warnings.push(`Operation "${operation.name}" uses a different tool ("${tool.name}") than previous, but tool changes are disabled.`)
     }
@@ -389,9 +394,27 @@ export function runPostProcessor(input: PostProcessorInput): PostProcessorResult
         moveCount++
         const mPoint = projectToMachinePoint(move.to, project.origin, definition)
 
-        const feed = (move.kind === 'plunge')
-          ? (operation.plungeFeed || tool.defaultPlungeFeed)
-          : (operation.feed || tool.defaultFeed)
+        const plungeFeedVal = operation.plungeFeed || tool.defaultPlungeFeed
+        const opFeedVal = operation.feed || tool.defaultFeed
+
+        let feed: number
+        if (move.kind === 'plunge') {
+          feed = plungeFeedVal
+        } else if (move.kind === 'cut' && move.from) {
+          // Limit diagonal feed so Z speed ≤ plunge feed rate.
+          // F_vector ≤ plungeFeed * |move| / |dz|
+          const dz = Math.abs(move.to.z - move.from.z)
+          if (dz > 1e-6) {
+            const dx = move.to.x - move.from.x
+            const dy = move.to.y - move.from.y
+            const totalDist = Math.hypot(dx, dy, dz)
+            feed = Math.min(opFeedVal, plungeFeedVal * totalDist / dz)
+          } else {
+            feed = opFeedVal
+          }
+        } else {
+          feed = opFeedVal
+        }
 
         if (move.kind === 'rapid') {
           const current = state.currentPosition

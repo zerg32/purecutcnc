@@ -341,6 +341,8 @@ function drillTypeLabel(type: DrillType): string {
       return 'Dwell (G82)'
     case 'chip_breaking':
       return 'Chip breaking (G73)'
+    case 'helical':
+      return 'Helical'
   }
 }
 
@@ -1374,6 +1376,44 @@ export function CAMPanel({
                       />
                     </label>
                   ) : null}
+                  {(selectedOperation.kind === 'pocket'
+                    || selectedOperation.kind === 'edge_route_inside'
+                    || selectedOperation.kind === 'edge_route_outside') ? (
+                    <>
+                      <label className="properties-check">
+                        <input
+                          type="checkbox"
+                          checked={selectedOperation.rampEntry ?? false}
+                          onChange={(event) => updateOperation(selectedOperation.id, { rampEntry: event.target.checked })}
+                        />
+                        <span>Ramp Entry</span>
+                      </label>
+                      {selectedOperation.rampEntry ? (
+                        <>
+                          <label className="properties-field">
+                            <span>Ramp Angle (°)</span>
+                            <DraftNumberInput
+                              value={selectedOperation.rampAngle ?? 5}
+                              min={1}
+                              max={45}
+                              onCommit={(value) => updateOperation(selectedOperation.id, { rampAngle: value })}
+                            />
+                          </label>
+                          <label className="properties-field">
+                            <span>Ramp Type</span>
+                            <Select
+                              value={selectedOperation.rampType ?? 'zigzag'}
+                              options={[
+                                { value: 'zigzag', label: 'Zigzag' },
+                                { value: 'spiral', label: 'Spiral' },
+                              ]}
+                              onChange={(value) => updateOperation(selectedOperation.id, { rampType: value })}
+                            />
+                          </label>
+                        </>
+                      ) : null}
+                    </>
+                  ) : null}
                   {selectedOperation.kind === 'drilling' ? (
                     <>
                       <label className="properties-field">
@@ -1385,6 +1425,7 @@ export function CAMPanel({
                             { value: 'peck', label: drillTypeLabel('peck') },
                             { value: 'dwell', label: drillTypeLabel('dwell') },
                             { value: 'chip_breaking', label: drillTypeLabel('chip_breaking') },
+                            { value: 'helical', label: drillTypeLabel('helical') },
                           ]}
                           onChange={(value) => updateOperation(selectedOperation.id, { drillType: value })}
                         />
@@ -1409,6 +1450,28 @@ export function CAMPanel({
                             onCommit={(value) => updateOperation(selectedOperation.id, { dwellTime: value })}
                           />
                         </label>
+                      ) : null}
+                      {selectedOperation.drillType === 'helical' ? (
+                        <>
+                          <label className="properties-field">
+                            <span>Helix Diameter</span>
+                            <DraftLengthInput
+                              value={selectedOperation.helixDiameter ?? 0}
+                              units={project.meta.units}
+                              min={0}
+                              onCommit={(value) => updateOperation(selectedOperation.id, { helixDiameter: value })}
+                            />
+                          </label>
+                          <label className="properties-field">
+                            <span>Helix Pitch</span>
+                            <DraftLengthInput
+                              value={selectedOperation.helixPitch ?? 0}
+                              units={project.meta.units}
+                              min={0}
+                              onCommit={(value) => updateOperation(selectedOperation.id, { helixPitch: value })}
+                            />
+                          </label>
+                        </>
                       ) : null}
                       <label className="properties-field">
                         <span>Retract Height</span>

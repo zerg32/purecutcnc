@@ -15,6 +15,9 @@ Older plans for shipped features and historical bug analyses live in [`archive/`
 - [G-code_Export_Design.md](G-code_Export_Design.md) — post-processor architecture and machine-definition model.
 - [DESKTOP_Implementation_Plan.md](DESKTOP_Implementation_Plan.md) — Tauri desktop packaging design (partially realized via `src-tauri/`). Remaining work is tracked on the board.
 
+## CAM features
+- [SMOOTH_TABS_HELICAL_RAMP_Plan.md](SMOOTH_TABS_HELICAL_RAMP_Plan.md) — smooth tab gaussian Z profile, helical drilling, and ramp entry strategies.
+
 ## V-carve
 - [RECURSIVE_SKELETON_design.md](RECURSIVE_SKELETON_design.md) — core algorithm design for V-carve recursive.
 - [VCARVE_ClipperSkeleton_Design.md](VCARVE_ClipperSkeleton_Design.md) — hybrid skeleton algorithm.

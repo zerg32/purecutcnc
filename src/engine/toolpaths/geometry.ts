@@ -31,6 +31,8 @@ import type {
   NormalizedTool,
   ResolvedFeatureZSpan,
   ResolvedToolpathOperation,
+  ToolpathMove,
+  ToolpathPoint,
 } from './types'
 
 export const DEFAULT_CLIPPER_SCALE = 10_000
@@ -250,6 +252,128 @@ export function toClipperPath(points: Point[], scale = DEFAULT_CLIPPER_SCALE): C
 
 export function fromClipperPath(path: ClipperPath, scale = DEFAULT_CLIPPER_SCALE): Point[] {
   return path.map((p) => ({ x: p.X / scale, y: p.Y / scale }))
+}
+
+export function pushRampOrPlunge(
+  moves: ToolpathMove[],
+  from: ToolpathPoint | null,
+  toXY: ToolpathPoint,
+  safeZ: number,
+  rampEntry?: boolean,
+  rampAngle?: number,
+  rampType?: 'zigzag' | 'spiral',
+): ToolpathPoint {
+  const startZ = from ? from.z : safeZ
+  const start = from ?? { x: toXY.x, y: toXY.y, z: safeZ }
+
+  const xyDist = Math.hypot(toXY.x - start.x, toXY.y - start.y)
+  const zDrop = startZ - toXY.z
+
+  if (from && (from.x !== toXY.x || from.y !== toXY.y)) {
+    moves.push({
+      kind: 'rapid',
+      from: start,
+      to: { x: toXY.x, y: toXY.y, z: startZ },
+    })
+  } else if (!from && (!rampEntry || zDrop <= 0 || (rampAngle ?? 5) <= 0)) {
+    moves.push({
+      kind: 'rapid',
+      from: start,
+      to: { x: toXY.x, y: toXY.y, z: safeZ },
+    })
+  }
+
+  if (rampEntry && zDrop > 0 && (rampAngle ?? 5) > 0) {
+    const useSpiral = rampType === 'spiral'
+    const angleRad = ((rampAngle ?? 5) * Math.PI) / 180
+
+    if (useSpiral) {
+      const angleSteps = 12
+      const desiredHorizontal = zDrop / Math.tan(angleRad)
+      const radius = Math.max(xyDist * 0.3, desiredHorizontal * angleSteps / (Math.PI * (angleSteps + 1)), 0.1)
+      const zPerStep = zDrop / angleSteps
+      const anglePerStep = (Math.PI * 2) / angleSteps
+      let current: ToolpathPoint = { x: toXY.x + radius, y: toXY.y, z: startZ }
+
+      if (Math.abs(startZ - current.z) > 1e-9 || Math.abs(toXY.x - current.x) > 1e-9 || Math.abs(toXY.y - current.y) > 1e-9) {
+        moves.push({ kind: 'rapid', from: { x: toXY.x, y: toXY.y, z: startZ }, to: current })
+      }
+
+      for (let i = 1; i <= angleSteps; i += 1) {
+        const angle = anglePerStep * i
+        const t = i / angleSteps
+        const r = radius * (1 - t) + xyDist * t
+        const next: ToolpathPoint = {
+          x: toXY.x + Math.cos(angle) * r,
+          y: toXY.y + Math.sin(angle) * r,
+          z: startZ - zPerStep * i,
+        }
+        moves.push({ kind: 'cut', from: current, to: next })
+        current = next
+      }
+
+      if (Math.abs(current.x - toXY.x) > 1e-9 || Math.abs(current.y - toXY.y) > 1e-9) {
+        moves.push({ kind: 'cut', from: current, to: toXY })
+      }
+    } else {
+      const rampLength = zDrop / Math.tan(angleRad)
+
+      if (Math.abs(start.x - toXY.x) <= 1e-6 && Math.abs(start.y - toXY.y) <= 1e-6) {
+        if (rampLength > 0) {
+          const nudge: ToolpathPoint = { x: toXY.x + rampLength, y: toXY.y, z: startZ }
+          moves.push({ kind: 'rapid', from: start, to: nudge })
+          moves.push({ kind: 'cut', from: nudge, to: toXY })
+        }
+      } else {
+        const segments = Math.max(1, Math.ceil(rampLength / Math.max(xyDist, 0.001)))
+        let current: ToolpathPoint = { x: start.x, y: start.y, z: startZ }
+        if (Math.abs(current.x - toXY.x) > 1e-9 || Math.abs(current.y - toXY.y) > 1e-9) {
+          for (let i = 1; i <= segments; i += 1) {
+            const t = i / segments
+            const z = startZ - zDrop * t
+            const next: ToolpathPoint = {
+              x: toXY.x * t + start.x * (1 - t),
+              y: toXY.y * t + start.y * (1 - t),
+              z: Math.max(z, toXY.z),
+            }
+            moves.push({ kind: 'cut', from: current, to: next })
+            current = next
+          }
+        }
+        if (Math.abs(current.z - toXY.z) > 1e-9) {
+          moves.push({ kind: 'cut', from: current, to: toXY })
+        }
+      }
+    }
+  } else {
+    moves.push({
+      kind: 'plunge',
+      from: { x: toXY.x, y: toXY.y, z: startZ },
+      to: toXY,
+    })
+  }
+
+  return toXY
+}
+
+export function retractToSafe(
+  moves: ToolpathMove[],
+  from: ToolpathPoint | null,
+  safeZ: number,
+): ToolpathPoint | null {
+  if (!from) {
+    return null
+  }
+
+  const safePoint = { x: from.x, y: from.y, z: safeZ }
+  if (from.z !== safeZ) {
+    moves.push({
+      kind: 'rapid',
+      from,
+      to: safePoint,
+    })
+  }
+  return safePoint
 }
 
 export function checkMaxCutDepthWarning(tool: NormalizedTool, cutDepth: number): string | null {

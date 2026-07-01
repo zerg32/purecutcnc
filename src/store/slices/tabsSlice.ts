@@ -32,17 +32,16 @@ export type TabsSlice = Pick<
   | 'autoPlaceTabsForOperation'
 >
 
-function nextAutoTabName(baseName: string, tabs: Tab[]): string {
-  const preferred = `${baseName} Tab`
-  if (!tabs.some((tab) => tab.name === preferred)) {
-    return preferred
+function nextTabName(tabs: Tab[]): string {
+  if (!tabs.some((tab) => tab.name === 'Tab 1')) {
+    return 'Tab 1'
   }
 
   let index = 2
-  while (tabs.some((tab) => tab.name === `${preferred} ${index}`)) {
+  while (tabs.some((tab) => tab.name === `Tab ${index}`)) {
     index += 1
   }
-  return `${preferred} ${index}`
+  return `Tab ${index}`
 }
 
 function defaultAutoTabZTop(project: Project): number {
@@ -112,7 +111,7 @@ function buildAutoTabsForFeature(
         },
         'tb',
       ),
-      name: nextAutoTabName(feature.name, [...existingTabs, ...created]),
+      name: nextTabName([...existingTabs, ...created]),
       x: entry.x,
       y: entry.y,
       w: entry.w,
@@ -120,6 +119,7 @@ function buildAutoTabsForFeature(
       z_top: zTop,
       z_bottom: zBottom,
       visible: true,
+      shape: 'smooth',
     })
   }
 
