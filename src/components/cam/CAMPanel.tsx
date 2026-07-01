@@ -341,6 +341,8 @@ function drillTypeLabel(type: DrillType): string {
       return 'Dwell (G82)'
     case 'chip_breaking':
       return 'Chip breaking (G73)'
+    case 'helical':
+      return 'Helical'
   }
 }
 
@@ -1385,6 +1387,7 @@ export function CAMPanel({
                             { value: 'peck', label: drillTypeLabel('peck') },
                             { value: 'dwell', label: drillTypeLabel('dwell') },
                             { value: 'chip_breaking', label: drillTypeLabel('chip_breaking') },
+                            { value: 'helical', label: drillTypeLabel('helical') },
                           ]}
                           onChange={(value) => updateOperation(selectedOperation.id, { drillType: value })}
                         />
@@ -1409,6 +1412,28 @@ export function CAMPanel({
                             onCommit={(value) => updateOperation(selectedOperation.id, { dwellTime: value })}
                           />
                         </label>
+                      ) : null}
+                      {selectedOperation.drillType === 'helical' ? (
+                        <>
+                          <label className="properties-field">
+                            <span>Helix Diameter</span>
+                            <DraftLengthInput
+                              value={selectedOperation.helixDiameter ?? 0}
+                              units={project.meta.units}
+                              min={0}
+                              onCommit={(value) => updateOperation(selectedOperation.id, { helixDiameter: value })}
+                            />
+                          </label>
+                          <label className="properties-field">
+                            <span>Helix Pitch</span>
+                            <DraftLengthInput
+                              value={selectedOperation.helixPitch ?? 0}
+                              units={project.meta.units}
+                              min={0}
+                              onCommit={(value) => updateOperation(selectedOperation.id, { helixPitch: value })}
+                            />
+                          </label>
+                        </>
                       ) : null}
                       <label className="properties-field">
                         <span>Retract Height</span>

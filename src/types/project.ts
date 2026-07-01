@@ -451,7 +451,7 @@ export type OperationKind =
 export type OperationPass = 'rough' | 'finish'
 export type PocketPattern = 'offset' | 'parallel' | 'waterline'
 export type CutDirection = 'conventional' | 'climb'
-export type DrillType = 'simple' | 'peck' | 'dwell' | 'chip_breaking'
+export type DrillType = 'simple' | 'peck' | 'dwell' | 'chip_breaking' | 'helical'
 export type MachiningOrder = 'level_first' | 'feature_first'
 
 export type OperationTarget =
@@ -493,6 +493,8 @@ export interface Operation {
   peckDepth?: number
   dwellTime?: number
   retractHeight?: number
+  helixDiameter?: number
+  helixPitch?: number
   debugShowRejectedCorners?: boolean
   waterlineAdaptiveRefinement?: boolean
   waterlineMicroStepover?: number
