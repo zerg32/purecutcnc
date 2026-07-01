@@ -1374,6 +1374,44 @@ export function CAMPanel({
                       />
                     </label>
                   ) : null}
+                  {(selectedOperation.kind === 'pocket'
+                    || selectedOperation.kind === 'edge_route_inside'
+                    || selectedOperation.kind === 'edge_route_outside') ? (
+                    <>
+                      <label className="properties-check">
+                        <input
+                          type="checkbox"
+                          checked={selectedOperation.rampEntry ?? false}
+                          onChange={(event) => updateOperation(selectedOperation.id, { rampEntry: event.target.checked })}
+                        />
+                        <span>Ramp Entry</span>
+                      </label>
+                      {selectedOperation.rampEntry ? (
+                        <>
+                          <label className="properties-field">
+                            <span>Ramp Angle (°)</span>
+                            <DraftNumberInput
+                              value={selectedOperation.rampAngle ?? 5}
+                              min={1}
+                              max={45}
+                              onCommit={(value) => updateOperation(selectedOperation.id, { rampAngle: value })}
+                            />
+                          </label>
+                          <label className="properties-field">
+                            <span>Ramp Type</span>
+                            <Select
+                              value={selectedOperation.rampType ?? 'zigzag'}
+                              options={[
+                                { value: 'zigzag', label: 'Zigzag' },
+                                { value: 'spiral', label: 'Spiral' },
+                              ]}
+                              onChange={(value) => updateOperation(selectedOperation.id, { rampType: value })}
+                            />
+                          </label>
+                        </>
+                      ) : null}
+                    </>
+                  ) : null}
                   {selectedOperation.kind === 'drilling' ? (
                     <>
                       <label className="properties-field">

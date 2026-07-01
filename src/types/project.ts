@@ -488,6 +488,9 @@ export interface Operation {
   peckDepth?: number
   dwellTime?: number
   retractHeight?: number
+  rampEntry?: boolean
+  rampAngle?: number
+  rampType?: 'zigzag' | 'spiral'
   debugShowRejectedCorners?: boolean
   waterlineAdaptiveRefinement?: boolean
   waterlineMicroStepover?: number
