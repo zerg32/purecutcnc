@@ -275,6 +275,7 @@ export function createPendingAddSlice(
               state.project.stock.thickness,
             ),
             visible: true,
+            shape: 'smooth',
           }
 
           set((s) => ({

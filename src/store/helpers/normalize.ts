@@ -259,6 +259,7 @@ export function normalizeTab(tab: Tab, units: Project['meta']['units'], index: n
     z_top: Math.max(zTop, zBottom),
     z_bottom: Math.min(zTop, zBottom),
     visible: tab.visible ?? true,
+    shape: tab.shape ?? 'smooth',
   }
 }
 
