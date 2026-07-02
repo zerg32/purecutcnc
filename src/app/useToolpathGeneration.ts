@@ -258,27 +258,15 @@ export function useToolpathGeneration(project: Project, selectedOperation: Opera
     return ids
   }, [selectedOperation, project.operations])
 
-  // Derived during render by checking cache validity — the spinner shows on
-  // the very first render after a parameter change, not one frame late.
-  // toolpathMap is included as a dependency so the memo recomputes when the
-  // async pipeline finishes and updates the map (which also updates the cache).
   const generatingOperationIds = useMemo(() => {
     const ids = new Set<string>()
     for (const id of neededOperationIds) {
-      const op = project.operations.find((o) => o.id === id)
-      if (!op) continue
-      const entry = toolpathCacheRef.current.get(id)
-      if (!entry || !isCacheHit(entry, op, project)) {
+      if (!toolpathMap.has(id)) {
         ids.add(id)
       }
     }
     return ids
-  // toolpathMap is load-bearing, not unnecessary: the memo reads cache state via
-  // toolpathCacheRef (a ref the rule can't see) which is updated in lockstep with
-  // toolpathMap when the async pipeline finishes. Dropping it would leave the
-  // generating spinner stuck on. `project` does not change when generation completes.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [neededOperationIds, project, toolpathMap])
+  }, [neededOperationIds, toolpathMap])
 
   // Async toolpath pipeline: resolves cached results immediately, defers
   // uncached operations one-per-frame with a paint gap in between so the

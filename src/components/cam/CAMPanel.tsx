@@ -705,8 +705,27 @@ export function CAMPanel({
       return
     }
 
-    void ensureBundledLibraryLoaded()
-  }, [ensureBundledLibraryLoaded, libraryError, libraryLoading, libraryTools.length, mode])
+    let cancelled = false
+    queueMicrotask(() => {
+      if (!cancelled) setLibraryLoading(true)
+    })
+    loadBundledToolLibrary()
+      .then((library) => {
+        if (cancelled) return
+        setLibraryTools(library.tools)
+        setLibraryError(null)
+        setLibraryLoading(false)
+      })
+      .catch((error) => {
+        if (cancelled) return
+        setLibraryError(error instanceof Error ? error.message : 'Failed to load tool library.')
+        setLibraryLoading(false)
+      })
+    return () => { cancelled = true }
+    // libraryLoading omitted from deps: the microtask-delayed set would re-trigger
+    // the effect and cancel the inflight load via cancelled flag.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, libraryTools.length, libraryError])
   // Close expanded section modal on Escape.
   useEffect(() => {
     if (!expandedCamSection) return

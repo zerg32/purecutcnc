@@ -59,8 +59,12 @@ export function ModelExportDialog({ onClose }: ModelExportDialogProps) {
   // assembled mesh is the only piece of state that depends on that option.
   useEffect(() => {
     let cancelled = false
-    setAssembling(true)
-    setErrorMessage(null)
+    queueMicrotask(() => {
+      if (!cancelled) {
+        setAssembling(true)
+        setErrorMessage(null)
+      }
+    })
     assembleModelExportMesh(project, {
       includeImportedMeshes: stlOptions.includeImportedMeshes,
       curveQuality,
