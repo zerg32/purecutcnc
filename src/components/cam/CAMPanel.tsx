@@ -1403,7 +1403,10 @@ export function CAMPanel({
                         <input
                           type="checkbox"
                           checked={selectedOperation.rampEntry ?? false}
-                          onChange={(event) => updateOperation(selectedOperation.id, { rampEntry: event.target.checked })}
+                          onChange={(event) => updateOperation(selectedOperation.id, {
+                            rampEntry: event.target.checked,
+                            ...(event.target.checked && !selectedOperation.rampType ? { rampType: 'zigzag' } : {}),
+                          })}
                         />
                         <span>Ramp Entry</span>
                       </label>

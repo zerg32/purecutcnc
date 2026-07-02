@@ -215,6 +215,7 @@ export function normalizeOperation(operation: Operation, project: Project, index
     waterlineRefinementThreshold: operation.waterlineRefinementThreshold ?? 0,
     waterlineMaxRingsPerBand: operation.waterlineMaxRingsPerBand ?? 0,
     waterlineTipStepdown: operation.waterlineTipStepdown ?? 0,
+    rampType: operation.rampEntry && !operation.rampType ? 'zigzag' : operation.rampType,
   }
 
   if (!isOperationTargetValid(project, normalized.kind, normalized.target)) {

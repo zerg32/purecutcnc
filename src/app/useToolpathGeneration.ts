@@ -92,6 +92,9 @@ export function operationComputationEquals(a: Operation, b: Operation): boolean 
     && a.waterlineRefinementThreshold === b.waterlineRefinementThreshold
     && a.waterlineMaxRingsPerBand === b.waterlineMaxRingsPerBand
     && a.waterlineTipStepdown === b.waterlineTipStepdown
+    && a.rampEntry === b.rampEntry
+    && a.rampAngle === b.rampAngle
+    && a.rampType === b.rampType
   )
 }
 

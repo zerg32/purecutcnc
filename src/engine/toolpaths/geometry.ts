@@ -315,35 +315,18 @@ export function pushRampOrPlunge(
       if (Math.abs(current.x - toXY.x) > 1e-9 || Math.abs(current.y - toXY.y) > 1e-9) {
         moves.push({ kind: 'cut', from: current, to: toXY })
       }
-    } else {
+    } else if (rampType === 'zigzag') {
+      // After the initial rapid (lines 272-277), the tool is at
+      // (toXY.x, toXY.y, startZ) — same XY as target.  To get the
+      // back-and-forth horizontal motion of a zigzag, nudge sideways
+      // first, then zigzag between the nudge point and target.
       const rampLength = zDrop / Math.tan(angleRad)
+      const nudgeDist = rampLength / 2
+      const nudge: ToolpathPoint = { x: toXY.x + nudgeDist, y: toXY.y, z: startZ }
+      moves.push({ kind: 'rapid', from: { x: toXY.x, y: toXY.y, z: startZ }, to: nudge })
 
-      if (Math.abs(start.x - toXY.x) <= 1e-6 && Math.abs(start.y - toXY.y) <= 1e-6) {
-        if (rampLength > 0) {
-          const nudge: ToolpathPoint = { x: toXY.x + rampLength, y: toXY.y, z: startZ }
-          moves.push({ kind: 'rapid', from: start, to: nudge })
-          moves.push({ kind: 'cut', from: nudge, to: toXY })
-        }
-      } else {
-        const segments = Math.max(1, Math.ceil(rampLength / Math.max(xyDist, 0.001)))
-        let current: ToolpathPoint = { x: start.x, y: start.y, z: startZ }
-        if (Math.abs(current.x - toXY.x) > 1e-9 || Math.abs(current.y - toXY.y) > 1e-9) {
-          for (let i = 1; i <= segments; i += 1) {
-            const t = i / segments
-            const z = startZ - zDrop * t
-            const next: ToolpathPoint = {
-              x: toXY.x * t + start.x * (1 - t),
-              y: toXY.y * t + start.y * (1 - t),
-              z: Math.max(z, toXY.z),
-            }
-            moves.push({ kind: 'cut', from: current, to: next })
-            current = next
-          }
-        }
-        if (Math.abs(current.z - toXY.z) > 1e-9) {
-          moves.push({ kind: 'cut', from: current, to: toXY })
-        }
-      }
+      const maxZPerSeg = nudgeDist * Math.tan(angleRad)
+      pushZigzagRamp(moves, nudge, toXY, startZ, toXY.z, maxZPerSeg)
     }
   } else {
     moves.push({
@@ -374,6 +357,53 @@ export function retractToSafe(
     })
   }
   return safePoint
+}
+
+/**
+ * Append a zigzag ramp between `from` and `to`, alternating direction each
+ * segment while descending from `startZ` to `endZ`. Each segment covers the
+ * full `from`→`to` (or `to`→`from`) XY distance at a Z drop no greater than
+ * `maxZPerSeg`, which is derived from the ramp angle.
+ */
+function pushZigzagRamp(
+  moves: ToolpathMove[],
+  rampsFrom: ToolpathPoint,
+  rampsTo: ToolpathPoint,
+  startZ: number,
+  endZ: number,
+  maxZPerSeg: number,
+): void {
+  const zDrop = startZ - endZ
+  const segments = Math.max(2, Math.ceil(zDrop / Math.max(maxZPerSeg, 1e-12)))
+  const zPerSegment = zDrop / segments
+
+  let current: ToolpathPoint = { x: rampsFrom.x, y: rampsFrom.y, z: startZ }
+
+  for (let i = 0; i < segments; i++) {
+    const goingForward = i % 2 === 0
+    const nextZ = Math.max(endZ, startZ - (i + 1) * zPerSegment)
+    const next: ToolpathPoint = {
+      x: goingForward ? rampsTo.x : rampsFrom.x,
+      y: goingForward ? rampsTo.y : rampsFrom.y,
+      z: nextZ,
+    }
+    if (
+      Math.abs(current.x - next.x) > 1e-9
+      || Math.abs(current.y - next.y) > 1e-9
+      || Math.abs(current.z - next.z) > 1e-9
+    ) {
+      moves.push({ kind: 'cut', from: current, to: next })
+      current = next
+    }
+  }
+
+  if (
+    Math.abs(current.x - rampsTo.x) > 1e-9
+    || Math.abs(current.y - rampsTo.y) > 1e-9
+    || Math.abs(current.z - endZ) > 1e-9
+  ) {
+    moves.push({ kind: 'cut', from: current, to: { x: rampsTo.x, y: rampsTo.y, z: endZ } })
+  }
 }
 
 export function checkMaxCutDepthWarning(tool: NormalizedTool, cutDepth: number): string | null {

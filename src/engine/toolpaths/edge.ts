@@ -266,7 +266,7 @@ function appendContoursAtLevels(
       // Z (or safeZ) without a perpendicular nudge, then ramp diagonally along
       // the first contour segment instead of nudging away and back.
       const rampAlongCut = rampEntry
-        && (rampType === 'zigzag' || rampType === undefined)
+        && rampType === 'zigzag'
         && contour.length >= 2
         && (sameXY || !nextPosition)
         && z < (nextPosition?.z ?? safeZ)
