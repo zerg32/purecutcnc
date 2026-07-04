@@ -1070,6 +1070,24 @@ export function PropertiesPanel() {
             />
           </label>
           <label className="properties-field">
+            <span>Size</span>
+            <DraftNumberInput
+              key={`tab-size-${selectedTab.id}-${selectedTab.w}`}
+              value={selectedTab.w}
+              units={units}
+              min={0.1}
+              onCommit={(next) => {
+                const cx = selectedTab.x + selectedTab.w / 2
+                const cy = selectedTab.y + selectedTab.h / 2
+                updateTab(selectedTab.id, {
+                  w: next, h: next,
+                  x: cx - next / 2,
+                  y: cy - next / 2,
+                })
+              }}
+            />
+          </label>
+          <label className="properties-field">
             <span>Shape</span>
             <Select
               value={selectedTab.shape ?? 'rect'}
