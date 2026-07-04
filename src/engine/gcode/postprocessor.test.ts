@@ -326,8 +326,8 @@ function grblDefinition(): MachineDefinition {
 
 function runDrillingFixture(
   definition: MachineDefinition,
-  drillType: 'simple' | 'peck' | 'dwell' | 'chip_breaking',
-  overrides?: { peckDepth?: number; dwellTime?: number },
+  drillType: 'simple' | 'peck' | 'dwell' | 'chip_breaking' | 'helical',
+  overrides?: { peckDepth?: number; dwellTime?: number; helixDiameter?: number; helixPitch?: number },
 ): { gcode: string; warnings: string[] } {
   const project = newProject('Canned Test', 'mm')
   const toolRecord = { ...defaultTool('mm', 1), id: 't1', name: '3 mm Drill', type: 'drill' as const, diameter: 3, defaultPlungeFeed: 150 }
@@ -379,6 +379,8 @@ function runDrillingFixture(
     drillType,
     peckDepth: overrides?.peckDepth,
     dwellTime: overrides?.dwellTime,
+    helixDiameter: overrides?.helixDiameter,
+    helixPitch: overrides?.helixPitch,
   }
 
   const toolpath = generateDrillingToolpath(project, operation)
@@ -401,6 +403,15 @@ function runDrillingFixture(
     },
   })
   return { gcode: result.gcode, warnings: result.warnings }
+}
+
+function testHelicalG1Moves(): void {
+  console.log('Testing helical drilling G1 moves (no canned cycle)...')
+  const { gcode } = runDrillingFixture(cannedCycleDefinition(), 'helical', { helixDiameter: 3, helixPitch: 2 })
+  assert(gcode.includes('G1'), 'helical G-code should contain G1 moves')
+  assert(!gcode.includes('G81'), 'helical G-code should NOT contain G81')
+  assert(!gcode.includes('G80'), 'helical G-code should NOT contain G80 (no canned cycle to cancel)')
+  assert(gcode.includes('M30'), 'helical G-code should contain program end')
 }
 
 function testCannedSimpleG81(): void {
@@ -516,6 +527,7 @@ function testLegacyCannedCycleDefaults(): void {
   assert(validated.cannedCycles!.cancelCommand === 'G80', 'cancelCommand should default to G80')
 }
 
+testHelicalG1Moves()
 testCannedSimpleG81()
 testCannedDwellG82()
 testCannedPeckG83()
