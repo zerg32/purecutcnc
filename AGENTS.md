@@ -1,5 +1,7 @@
 # AGENTS.md — PureCutCNC
 
+> **User override:** [`AGENTS.user.md`](AGENTS.user.md) contains per-user instructions that take precedence over this file.
+
 ## What This Is
 
 PureCutCNC is a browser-based 2.5D CAD/CAM application for CNC hobbyists. It collapses CAD sketching and CAM operation definition into a single workflow. Built with Vite + React + TypeScript, state managed by Zustand, with a Tauri wrapper for desktop builds.
