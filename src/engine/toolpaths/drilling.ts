@@ -145,6 +145,23 @@ function getCircleCenter(profile: SketchProfile): Point | null {
   return null
 }
 
+function getCircleRadius(profile: SketchProfile): number | null {
+  if (profile.segments.length === 1 && profile.segments[0].type === 'circle') {
+    const seg = profile.segments[0]
+    return Math.hypot(profile.start.x - seg.center.x, profile.start.y - seg.center.y)
+  }
+
+  if (profile.segments.length === 4 && profile.segments.every((s) => s.type === 'arc')) {
+    const first = profile.segments[0]
+    if (first.type === 'arc') {
+      const r = Math.hypot(profile.start.x - first.center.x, profile.start.y - first.center.y)
+      return r
+    }
+  }
+
+  return null
+}
+
 function emitDrillCycle(
   moves: ToolpathMove[],
   current: ToolpathPoint | null,
@@ -223,6 +240,7 @@ function emitHelicalDrill(
   retractZ: number,
   helixDiameter: number,
   helixPitch: number,
+  toolDiameter: number,
 ): ToolpathPoint {
   const aboveSafe: ToolpathPoint = { x: center.x, y: center.y, z: safeZ }
   if (current && (current.x !== aboveSafe.x || current.y !== aboveSafe.y || current.z !== aboveSafe.z)) {
@@ -234,7 +252,7 @@ function emitHelicalDrill(
     moves.push({ kind: 'rapid', from: aboveSafe, to: rapidStart })
   }
 
-  const helixRadius = helixDiameter / 2
+  const helixRadius = Math.max(0, (helixDiameter - toolDiameter) / 2)
   const startAngle = 0
   const zDrop = retractZ - bottomZ
   const revolutions = Math.max(1, zDrop / helixPitch)
@@ -377,7 +395,6 @@ export function generateDrillingToolpath(project: Project, operation: Operation)
   let currentPosition: ToolpathPoint | null = null
 
   const dwellTime = operation.dwellTime ?? 0
-  const helixDiameter = operation.helixDiameter ?? tool.diameter
   const helixPitch = operation.helixPitch ?? operation.stepdown
 
   for (const target of sortedTargets) {
@@ -390,6 +407,9 @@ export function generateDrillingToolpath(project: Project, operation: Operation)
     }
 
     if (isHelical) {
+      const featureRadius = getCircleRadius(target.feature.sketch.profile)
+      const helixDiameter = operation.helixDiameter ?? (featureRadius != null ? featureRadius * 2 : tool.diameter * 2)
+
       currentPosition = emitHelicalDrill(
         moves,
         currentPosition,
@@ -400,6 +420,7 @@ export function generateDrillingToolpath(project: Project, operation: Operation)
         retractZ,
         helixDiameter,
         helixPitch,
+        tool.diameter,
       )
     } else {
       currentPosition = emitDrillCycle(
