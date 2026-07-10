@@ -27,7 +27,7 @@
  * Run with: npx tsx src/engine/toolpaths/camOperationSmoke.test.ts
  */
 
-import type { Operation, Project, SketchFeature, Tool } from '../../types/project'
+import type { DrillType, Operation, Project, SketchFeature, Tool } from '../../types/project'
 import { circleProfile, defaultTool, newProject, rectProfile } from '../../types/project'
 import { runPostProcessor } from '../gcode/postprocessor'
 import { validateMachineDefinition } from '../gcode/types'
@@ -455,7 +455,7 @@ test('drilling chip_breaking: multiple plunges with small retracts', () => {
 })
 
 test('drilling helical: G1 helical interpolation path + rapid retract', () => {
-  const { project, operation } = drillingFixture('helical', undefined, { helixDiameter: 3, helixPitch: 2 })
+  const { project, operation } = drillingFixture('helical', undefined, { helixDiameter: 6, helixPitch: 2 })
   const result = generateDrillingToolpath(project, operation)
   assert(result.moves.length > 0, 'helical drilling should produce moves')
 
@@ -469,7 +469,7 @@ test('drilling helical: G1 helical interpolation path + rapid retract', () => {
 
   // First cut move should start at helix radius from centre (not at centre)
   const firstCut = cuts[0]
-  const helixRadius = 3 / 2 // helixDiameter / 2
+  const helixRadius = (6 - 3) / 2 // (helixDiameter - tool.diameter) / 2 = desired hole radius
   const centreX = 20
   const centreY = 20
   assert(
