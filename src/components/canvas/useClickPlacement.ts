@@ -181,7 +181,7 @@ export interface ClickPlacementCtx {
   deleteDimensionAnnotation: (id: string) => void
   selectAnnotation: (id: string | null) => void
   selectFeature: (id: string | null, additive?: boolean) => void
-  selectTab: (id: string) => void
+  selectTab: (id: string, additive?: boolean) => void
   selectClamp: (id: string) => void
   selectBackdrop: () => void
   setConstraintAnchor: (anchor: { point: Point; snapMode: ResolvedSnap['mode'] }) => void
@@ -921,7 +921,8 @@ export function useClickPlacement(ctx: ClickPlacementCtx): UseClickPlacementRetu
 
     const hitTabId = findHitTabId(world, project.tabs)
     if (hitTabId) {
-      selectTab(hitTabId)
+      const additive = event.metaKey || event.ctrlKey || event.shiftKey
+      selectTab(hitTabId, additive)
       return
     }
 

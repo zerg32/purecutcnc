@@ -199,6 +199,7 @@ export const PropertiesPanel = memo(function PropertiesPanel() {
   const setStock = useProjectStore((s) => s.setStock)
   const setStockSourceFeature = useProjectStore((s) => s.setStockSourceFeature)
   const updateTab = useProjectStore((s) => s.updateTab)
+  const updateTabs = useProjectStore((s) => s.updateTabs)
   const updateClamp = useProjectStore((s) => s.updateClamp)
   const updateFeatureFolder = useProjectStore((s) => s.updateFeatureFolder)
   const updateFeature = useProjectStore((s) => s.updateFeature)
@@ -242,9 +243,12 @@ export const PropertiesPanel = memo(function PropertiesPanel() {
       ? project.clamps.find((clamp) => clamp.id === selectedNode.clampId) ?? null
       : null
   const selectedTab =
-    selectedNode?.type === 'tab'
-      ? project.tabs.find((tab) => tab.id === selectedNode.tabId) ?? null
-      : null
+    selection.selectedTabIds.length === 1
+      ? project.tabs.find((tab) => tab.id === selection.selectedTabIds[0]) ?? null
+      : selectedNode?.type === 'tab'
+        ? project.tabs.find((tab) => tab.id === selectedNode.tabId) ?? null
+        : null
+  const allSelectedTabs = project.tabs.filter((tab) => selection.selectedTabIds.includes(tab.id))
   const allSelectedFeatures = features.filter((feature) => selectedFeatureIds.includes(feature.id))
   const commonSelectedFolderId =
     allSelectedFeatures.length > 0 &&
@@ -1076,6 +1080,85 @@ export const PropertiesPanel = memo(function PropertiesPanel() {
           </button>
           <button className="feat-btn feat-btn--delete" type="button" onClick={() => { deleteClamp(selectedClamp.id); closeExpanded() }}>
             {t('featureTree.properties.actions.deleteClamp')}
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  if (allSelectedTabs.length > 1) {
+    const commonSize = allSelectedTabs.every((tab) => tab.w === allSelectedTabs[0].w) ? allSelectedTabs[0].w : null
+    const commonZTop = allSelectedTabs.every((tab) => tab.z_top === allSelectedTabs[0].z_top) ? allSelectedTabs[0].z_top : null
+    const commonZBottom = allSelectedTabs.every((tab) => tab.z_bottom === allSelectedTabs[0].z_bottom) ? allSelectedTabs[0].z_bottom : null
+    const commonShape = allSelectedTabs.every((tab) => (tab.shape ?? 'rect') === (allSelectedTabs[0].shape ?? 'rect')) ? (allSelectedTabs[0].shape ?? 'rect') : null
+
+    return (
+      <div className="properties-panel">
+        <div className="properties-group">
+          <label className="properties-field">
+            <span>Selection</span>
+            <DraftTextInput value={`${allSelectedTabs.length} Tabs`} disabled />
+          </label>
+          <label className="properties-field">
+            <span>Size</span>
+            <DraftNumberInput
+              value={commonSize}
+              placeholder="Mixed values"
+              units={units}
+              min={0.1}
+              onCommit={(next) => {
+                for (const tab of allSelectedTabs) {
+                  const cx = tab.x + tab.w / 2
+                  const cy = tab.y + tab.h / 2
+                  updateTab(tab.id, {
+                    w: next, h: next,
+                    x: cx - next / 2,
+                    y: cy - next / 2,
+                  })
+                }
+              }}
+            />
+          </label>
+          <label className="properties-field">
+            <span>Z Top</span>
+            <DraftNumberInput
+              value={commonZTop}
+              placeholder="Mixed values"
+              units={units}
+              min={0}
+              onCommit={(next) => updateTabs(allSelectedTabs.map((t) => t.id), { z_top: next })}
+            />
+          </label>
+          <label className="properties-field">
+            <span>Z Bottom</span>
+            <DraftNumberInput
+              value={commonZBottom}
+              placeholder="Mixed values"
+              units={units}
+              min={0}
+              onCommit={(next) => updateTabs(allSelectedTabs.map((t) => t.id), { z_bottom: next })}
+            />
+          </label>
+          <label className="properties-field">
+            <span>Shape</span>
+            <Select
+              value={commonShape ?? 'rect'}
+              options={[
+                { value: 'rect', label: commonShape === null ? 'Mixed' : 'Rectangle' },
+                { value: 'smooth', label: 'Smooth' },
+              ]}
+              onChange={(value) => updateTabs(allSelectedTabs.map((t) => t.id), { shape: value as 'rect' | 'smooth' })}
+            />
+          </label>
+        </div>
+        <div className="properties-actions">
+          <button className="feat-btn feat-btn--delete" type="button" onClick={() => {
+            for (const tab of allSelectedTabs) {
+              deleteTab(tab.id)
+            }
+            closeExpanded()
+          }}>
+            Delete Selected
           </button>
         </div>
       </div>

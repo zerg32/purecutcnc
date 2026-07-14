@@ -1152,7 +1152,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
 
     for (const tab of project.tabs) {
       if (!tab.visible) continue
-      const selected = selection.selectedNode?.type === 'tab' && selection.selectedNode.tabId === tab.id
+      const selected = selection.selectedTabIds.includes(tab.id)
       drawTabFootprint(ctx, tab, vt, selected)
       if (selection.mode === 'sketch_edit' && selection.selectedNode?.type === 'tab' && selection.selectedNode.tabId === tab.id) {
         drawSketchControls(ctx, rectProfile(tab.x, tab.y, tab.w, tab.h), vt, selection.activeControl, canvasPalette)
