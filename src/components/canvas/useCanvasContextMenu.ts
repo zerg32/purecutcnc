@@ -50,7 +50,7 @@ export interface CanvasContextMenuCtx {
   zoomWindowActive: boolean
   stopPan: () => void
   selectClamp: (id: string) => void
-  selectTab: (id: string) => void
+  selectTab: (id: string, additive?: boolean) => void
   selectFeature: (id: string) => void
   onFeatureContextMenu?: (featureId: string, clientX: number, clientY: number) => void
   onTabContextMenu?: (tabId: string, clientX: number, clientY: number) => void
@@ -112,7 +112,9 @@ export function useCanvasContextMenu(ctx: CanvasContextMenuCtx): UseCanvasContex
 
     const hitTabId = findHitTabId(world, project.tabs)
     if (hitTabId) {
-      selectTab(hitTabId)
+      if (!selection.selectedTabIds.includes(hitTabId)) {
+        selectTab(hitTabId)
+      }
       onTabContextMenu?.(hitTabId, clientX, clientY)
       return
     }

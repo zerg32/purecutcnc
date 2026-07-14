@@ -326,6 +326,7 @@ export function createPendingCompletionSlice(
                     ...s.selection,
                     selectedFeatureId: null,
                     selectedFeatureIds: [],
+                    selectedTabIds: createdTabs.at(-1) ? [createdTabs.at(-1)!.id] : [],
                     selectedNode: createdTabs.at(-1)
                       ? { type: 'tab', tabId: createdTabs.at(-1)!.id }
                       : s.selection.selectedNode,

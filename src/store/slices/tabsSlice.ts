@@ -27,6 +27,7 @@ export type TabsSlice = Pick<
   ProjectStore,
   | 'moveTabControl'
   | 'updateTab'
+  | 'updateTabs'
   | 'deleteTab'
   | 'setAllTabsVisible'
   | 'autoPlaceTabsForOperation'
@@ -151,6 +152,30 @@ export function createTabsSlice(
         }
       }),
 
+    updateTabs: (ids, patch) =>
+      set((s) => {
+        if (ids.length === 0) {
+          return {}
+        }
+        const idSet = new Set(ids)
+        const nextProject = {
+          ...s.project,
+          tabs: s.project.tabs.map((tab) => (idSet.has(tab.id) ? { ...tab, ...patch } : tab)),
+          meta: { ...s.project.meta, modified: new Date().toISOString() },
+        }
+        if (projectsEqual(nextProject, s.project)) {
+          return {}
+        }
+        return {
+          project: nextProject,
+          history: {
+            past: [...s.history.past, cloneProject(s.project)].slice(-100),
+            future: [],
+            transactionStart: null,
+          },
+        }
+      }),
+
     deleteTab: (id) =>
       set((s) => {
         const nextProject = {
@@ -162,7 +187,7 @@ export function createTabsSlice(
           return {}
         }
         const nextSelection =
-          s.selection.selectedNode?.type === 'tab' && s.selection.selectedNode.tabId === id
+          s.selection.selectedTabIds.includes(id) && s.selection.selectedTabIds.length <= 1
             ? emptySelection()
             : sanitizeSelection(nextProject, s.selection)
         return {
@@ -286,6 +311,7 @@ export function createTabsSlice(
             ...s.selection,
             selectedFeatureId: null,
             selectedFeatureIds: [],
+            selectedTabIds: [],
             selectedNode: { type: 'tab', tabId: createdTabs[createdTabs.length - 1].id },
             mode: 'feature',
             hoveredFeatureId: null,
