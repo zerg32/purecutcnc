@@ -52,8 +52,9 @@ import {
   findHitTabId,
 } from './hitTest'
 import { anchorPointForIndex } from './profilePrimitives'
-import { pickDimensionAt } from './dimensionRendering'
-import { offsetForCursor } from '../../sketch/dimensions'
+import { pickDimensionAt, pickDimensionLabelAt } from './dimensionRendering'
+import { offsetForCursor, isDimensionDangling } from '../../sketch/dimensions'
+import { resolveDrivingDimensionEdit } from '../../sketch/drivingDimensionResolver'
 import { useStableEvent } from '../../hooks/useStableEvent'
 import { useEventListener } from '../../hooks/useEventListener'
 import {
@@ -182,6 +183,7 @@ export interface PointerGesturesCtx {
   // Shell closures
   scheduleDraw: () => void
   applyLock: (point: Point, reference: Point) => Point
+  pendingPreviewPointRef: MutableRefObject<PendingPreviewPoint | null>
   setPendingPreviewPointRef: (nextPoint: PendingPreviewPoint | null) => void
   setPendingMovePreviewPointRef: (nextPoint: PendingPreviewPoint | null) => void
   setPendingTransformPreviewPointRef: (nextPoint: PendingPreviewPoint | null) => void
@@ -312,6 +314,7 @@ export function usePointerGestures(ctx: PointerGesturesCtx): UsePointerGesturesR
     stopNodeDrag,
     scheduleDraw,
     applyLock,
+    pendingPreviewPointRef,
     setPendingPreviewPointRef,
     setPendingMovePreviewPointRef,
     setPendingTransformPreviewPointRef,
@@ -393,6 +396,30 @@ export function usePointerGestures(ctx: PointerGesturesCtx): UsePointerGesturesR
     const world = canvasToWorld(point.cx, point.cy, vt)
 
     // ── Begin dragging a dimension annotation to reposition it ──
+    // First, check for label-only hits: if a drive-capable label was clicked,
+    // let the click handler open the driving edit (don't start a drag).
+    if (
+      event.button === 0 && selection.mode === 'feature'
+      && !pendingAddRef.current && !pendingMoveRef.current && !pendingTransformRef.current
+      && !pendingOffset && !pendingShapeAction && !pendingConstraintRef.current
+      && !tapeMeasureRef.current && !pendingDimensionRef.current
+      && !dimensionDeleteArmedRef.current
+      && project.meta.showDimensions
+    ) {
+      const hitLabel = pickDimensionLabelAt(project, vt, point, 10)
+      if (hitLabel) {
+        const dim = project.annotations.find((d) => d.id === hitLabel)
+        if (dim && !dim.locked && !isDimensionDangling(dim, project)) {
+          const resolved = resolveDrivingDimensionEdit(dim, project)
+          if (resolved && !('disabled' in resolved)) {
+            // Drive-capable label click — let the click handler open the edit
+            selectAnnotation(hitLabel)
+            return
+          }
+        }
+      }
+    }
+
     if (
       event.button === 0 && selection.mode === 'feature'
       && !pendingAddRef.current && !pendingMoveRef.current && !pendingTransformRef.current
@@ -633,6 +660,15 @@ export function usePointerGestures(ctx: PointerGesturesCtx): UsePointerGesturesR
       if (pendingAdd.shape === 'origin') {
         originPreviewPointRef.current = { point: snapped, session: pendingAdd.session }
         scheduleDraw()
+        return
+      }
+      if (pendingAdd.shape === 'gear' && pendingAdd.anchor && pendingAdd.outsideRadius !== null) {
+        if (pendingPreviewPointRef.current?.session !== pendingAdd.session) {
+          setPendingPreviewPointRef({
+            point: { x: pendingAdd.anchor.x + pendingAdd.outsideRadius, y: pendingAdd.anchor.y },
+            session: pendingAdd.session,
+          })
+        }
         return
       }
       // Apply axis lock to preview for polygon/spline/composite
@@ -1030,6 +1066,14 @@ export function usePointerGestures(ctx: PointerGesturesCtx): UsePointerGesturesR
       scheduleDraw()
     } else if ((pendingAdd?.shape === 'rect' || pendingAdd?.shape === 'circle' || pendingAdd?.shape === 'ellipse' || pendingAdd?.shape === 'tab' || pendingAdd?.shape === 'clamp') && pendingAdd.anchor) {
       setPendingPreviewPointRef({ point: pendingAdd.anchor, session: pendingAdd.session })
+    } else if (pendingAdd?.shape === 'gear' && pendingAdd.anchor && pendingAdd.outsideRadius !== null) {
+      const currentGearPreview = pendingPreviewPointRef.current?.session === pendingAdd.session
+        ? pendingPreviewPointRef.current.point
+        : { x: pendingAdd.anchor.x + pendingAdd.outsideRadius, y: pendingAdd.anchor.y }
+      setPendingPreviewPointRef({
+        point: currentGearPreview,
+        session: pendingAdd.session,
+      })
     } else {
       setPendingPreviewPointRef(null)
     }

@@ -16,15 +16,20 @@
 
 import type { StateCreator } from 'zustand'
 import type { ProjectStore } from '../types'
+import { isConstruction } from '../helpers/featureRoles'
 import { cloneProject, projectsEqual } from '../helpers/normalize'
+import { resolvedFeatureMap } from '../helpers/resolveFeatures'
 
 export type TreeVisibilitySlice = Pick<
   ProjectStore,
   | 'setAllRegionsVisible'
+  | 'setAllConstructionVisible'
   | 'toggleFolderVisible'
   | 'toggleRegionFolderVisible'
+  | 'toggleConstructionFolderVisible'
   | 'selectFolderFeatures'
   | 'toggleFolderGrouped'
+  | 'revealFeatureFolder'
 >
 
 export function createTreeVisibilitySlice(
@@ -34,10 +39,36 @@ export function createTreeVisibilitySlice(
   return {
   setAllRegionsVisible: (visible) =>
     set((s) => {
+      const resolved = resolvedFeatureMap(s.project)
       const nextProject = {
         ...s.project,
         features: s.project.features.map((feature) => (
-          feature.operation === 'region' ? { ...feature, visible } : feature
+          resolved.get(feature.id)?.operation === 'region' ? { ...feature, visible } : feature
+        )),
+        meta: { ...s.project.meta, modified: new Date().toISOString() },
+      }
+      if (projectsEqual(nextProject, s.project)) {
+        return {}
+      }
+      return {
+        project: nextProject,
+        history: {
+          past: [...s.history.past, cloneProject(s.project)].slice(-100),
+          future: [],
+          transactionStart: null,
+        },
+      }
+    }),
+
+  setAllConstructionVisible: (visible) =>
+    set((s) => {
+      const resolved = resolvedFeatureMap(s.project)
+      const nextProject = {
+        ...s.project,
+        features: s.project.features.map((feature) => (
+          resolved.get(feature.id) && isConstruction(resolved.get(feature.id)!)
+            ? { ...feature, visible }
+            : feature
         )),
         meta: { ...s.project.meta, modified: new Date().toISOString() },
       }
@@ -81,13 +112,48 @@ export function createTreeVisibilitySlice(
 
   toggleRegionFolderVisible: (folderId) =>
     set((s) => {
-      const folderFeatures = s.project.features.filter((f) => f.folderId === folderId && f.operation === 'region')
+      const resolved = resolvedFeatureMap(s.project)
+      const folderFeatures = s.project.features.filter((f) => f.folderId === folderId && resolved.get(f.id)?.operation === 'region')
       const anyVisible = folderFeatures.some((f) => f.visible)
       const nextVisible = !anyVisible
       const nextProject = {
         ...s.project,
         features: s.project.features.map((f) =>
-          f.folderId === folderId && f.operation === 'region' ? { ...f, visible: nextVisible } : f
+          f.folderId === folderId && resolved.get(f.id)?.operation === 'region' ? { ...f, visible: nextVisible } : f
+        ),
+        meta: { ...s.project.meta, modified: new Date().toISOString() },
+      }
+      if (projectsEqual(nextProject, s.project)) {
+        return {}
+      }
+      return {
+        project: nextProject,
+        history: {
+          past: [...s.history.past, cloneProject(s.project)].slice(-100),
+          future: [],
+          transactionStart: null,
+        },
+      }
+    }),
+
+  toggleConstructionFolderVisible: (folderId) =>
+    set((s) => {
+      const resolved = resolvedFeatureMap(s.project)
+      const folderFeatures = s.project.features.filter((f) => {
+        const feature = resolved.get(f.id)
+        return f.folderId === folderId && feature !== undefined && isConstruction(feature)
+      })
+      const anyVisible = folderFeatures.some((f) => f.visible)
+      const nextVisible = !anyVisible
+      const nextProject = {
+        ...s.project,
+        features: s.project.features.map((f) =>
+          (() => {
+            const feature = resolved.get(f.id)
+            return f.folderId === folderId && feature !== undefined && isConstruction(feature)
+              ? { ...f, visible: nextVisible }
+              : f
+          })()
         ),
         meta: { ...s.project.meta, modified: new Date().toISOString() },
       }
@@ -176,6 +242,26 @@ export function createTreeVisibilitySlice(
       return selectionChanged
         ? { ...base, selection: { ...s.selection, groupFolderId: nextGroupFolderId } }
         : base
+    }),
+
+  // Selection-driven reveal (#276): expands a collapsed folder WITHOUT pushing
+  // undo history — Cmd+Z after clicking a feature in the sketch must undo a
+  // real edit, not this UI-state change.
+  revealFeatureFolder: (folderId) =>
+    set((s) => {
+      const folder = s.project.featureFolders.find((f) => f.id === folderId)
+      if (!folder || !folder.collapsed) {
+        return {}
+      }
+      return {
+        project: {
+          ...s.project,
+          featureFolders: s.project.featureFolders.map((f) =>
+            f.id === folderId ? { ...f, collapsed: false } : f
+          ),
+          meta: { ...s.project.meta, modified: new Date().toISOString() },
+        },
+      }
     }),
 
   }

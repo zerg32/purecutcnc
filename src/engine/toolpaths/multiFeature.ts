@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+import { isConstruction } from '../../store/helpers/featureRoles'
+import { resolvedFeatureMap } from '../../store/helpers/resolveFeatures'
 import type { Operation, Project } from '../../types/project'
 import type { PocketToolpathResult, ToolpathBounds, ToolpathPoint, ToolpathResult } from './types'
 
@@ -31,12 +33,23 @@ interface IndexedToolpathPart<T extends ToolpathResult> {
 export function perFeatureOperations(operation: Operation, project?: Project): Operation[] {
   if (operation.target.source !== 'features') return [operation]
   if (operation.target.featureIds.length <= 1) return [operation]
-  const regionFeatureIds = project
+  const featuresById = project ? resolvedFeatureMap(project) : null
+  const regionFeatureIds = featuresById
     ? operation.target.featureIds.filter((featureId) => (
-      project.features.find((feature) => feature.id === featureId)?.operation === 'region'
+      featuresById.get(featureId)?.operation === 'region'
     ))
     : []
-  const machiningFeatureIds = operation.target.featureIds.filter((featureId) => !regionFeatureIds.includes(featureId))
+  // Construction geometry is neither a machining target nor a region mask —
+  // drop it from the per-feature split entirely (issue #199).
+  const constructionFeatureIds = featuresById
+    ? operation.target.featureIds.filter((featureId) => {
+      const feature = featuresById.get(featureId)
+      return feature !== undefined && isConstruction(feature)
+    })
+    : []
+  const machiningFeatureIds = operation.target.featureIds.filter(
+    (featureId) => !regionFeatureIds.includes(featureId) && !constructionFeatureIds.includes(featureId),
+  )
   if (machiningFeatureIds.length <= 1) return [operation]
   return machiningFeatureIds.map((featureId) => ({
     ...operation,

@@ -21,7 +21,9 @@ import { ToolpathVisibilityPanel } from '../ToolpathVisibilityPanel'
 import type { ToolpathVisibility } from '../toolpathVisibility'
 import type { ToolpathResult } from '../../engine/toolpaths/types'
 import { useProjectStore } from '../../store/projectStore'
-import { buildOriginTriad, buildScene } from '../../engine/csg'
+import { modelFeatures } from '../../store/helpers/featureRoles'
+import { resolvedProjectFeatures } from '../../store/helpers/resolveFeatures'
+import { applyClampHighlight, applyTabHighlight, buildOriginTriad, buildScene } from '../../engine/csg'
 import { getStockBounds, rectProfile } from '../../types/project'
 import { getFeatureGeometryProfiles } from '../../text'
 import { buildToolpathLinePositionChunks, toolpathPointToWorldTuple } from './toolpathOverlay'
@@ -675,6 +677,10 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
   const controlsRef = useRef<ReturnType<typeof createOrbitControls> | null>(null)
   const frameRef = useRef<number>(0)
   const objectsRef = useRef<THREE.Object3D[]>([])
+  // The most recently built fixture meshes, keyed by id, so selection/collision
+  // highlight can recolor them in place without a full scene rebuild (issue #261).
+  const clampMeshesRef = useRef<Map<string, THREE.Mesh>>(new Map())
+  const tabMeshesRef = useRef<Map<string, THREE.Mesh>>(new Map())
   const toolpathObjectsRef = useRef<THREE.Object3D[]>([])
   const originObjectRef = useRef<THREE.Object3D | null>(null)
   const buildRequestRef = useRef(0)
@@ -790,6 +796,11 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
       cancelAnimationFrame(frameRef.current)
       controls.dispose()
       ro.disconnect()
+      for (const object of objectsRef.current) {
+        scene.remove(object)
+        disposeObject3D(object)
+      }
+      objectsRef.current = []
       renderer.dispose()
       mount.removeChild(renderer.domElement)
     }
@@ -871,6 +882,34 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
     originObjectRef.current = null
   }, [])
 
+  // Selection/collision only tint fixtures — recolor the already-built clamp/tab
+  // meshes in place rather than rebuilding the CSG model (issue #261). Keyed on
+  // primitives so this stays cheap and never triggers the scene-build effect.
+  const selectedClampId = selection.selectedNode?.type === 'clamp' ? selection.selectedNode.clampId : null
+  const selectedTabId = selection.selectedNode?.type === 'tab' ? selection.selectedNode.tabId : null
+  const applyFixtureHighlights = useCallback(() => {
+    const collidingClampIdSet = new Set(collidingClampIds)
+    for (const [id, mesh] of clampMeshesRef.current) {
+      applyClampHighlight(mesh, id === selectedClampId, collidingClampIdSet.has(id))
+    }
+    for (const [id, mesh] of tabMeshesRef.current) {
+      applyTabHighlight(mesh, id === selectedTabId)
+    }
+  }, [collidingClampIds, selectedClampId, selectedTabId])
+
+  // Mirror the latest highlighter into a ref so the async scene-build callback can
+  // apply the CURRENT selection/collision to freshly-built fixtures without listing
+  // it as a dependency (which would rebuild the model on every selection change).
+  const applyFixtureHighlightsRef = useRef(applyFixtureHighlights)
+  useEffect(() => {
+    applyFixtureHighlightsRef.current = applyFixtureHighlights
+  }, [applyFixtureHighlights])
+
+  // Recolor fixtures whenever selection/collision changes — no model rebuild.
+  useEffect(() => {
+    applyFixtureHighlights()
+  }, [applyFixtureHighlights])
+
   useEffect(() => {
     const scene = sceneRef.current
     if (!scene) return
@@ -881,12 +920,7 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
 
     const timeout = window.setTimeout(() => {
       void (async () => {
-        const nextSceneObjects = await buildScene(
-          project,
-          selection.selectedNode?.type === 'clamp' ? selection.selectedNode.clampId : null,
-          selection.selectedNode?.type === 'tab' ? selection.selectedNode.tabId : null,
-          collidingClampIds,
-        )
+        const nextSceneObjects = await buildScene(project)
 
         if (cancelled || buildRequestRef.current !== buildRequestId) {
           nextSceneObjects.stockMesh.geometry.dispose()
@@ -908,6 +942,9 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
             clampMesh.geometry.dispose()
             disposeObjectMaterial(clampMesh.material)
           }
+          for (const line of nextSceneObjects.batchedLines) {
+            disposeObject3D(line)
+          }
           return
         }
 
@@ -927,9 +964,9 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
           objectsRef.current.push(featureMesh)
         }
 
-        for (const openLine of nextSceneObjects.openFeatureLines.values()) {
-          scene.add(openLine)
-          objectsRef.current.push(openLine)
+        for (const line of nextSceneObjects.batchedLines) {
+          scene.add(line)
+          objectsRef.current.push(line)
         }
 
         for (const tabMesh of nextSceneObjects.tabMeshes.values()) {
@@ -942,9 +979,18 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
           objectsRef.current.push(clampMesh)
         }
 
+        // Track the freshly-built fixtures and immediately tint them to the
+        // current selection/collision — buildScene builds them unhighlighted,
+        // and selection may not have changed since the last rebuild (issue #261).
+        clampMeshesRef.current = nextSceneObjects.clampMeshes
+        tabMeshesRef.current = nextSceneObjects.tabMeshes
+        applyFixtureHighlightsRef.current()
+
           const controls = controlsRef.current
         if (controls) {
-          const visibleFeatures = project.features.filter((feature) => feature.visible)
+          // Construction geometry is absent from the 3D scene — keep it out of
+          // the camera-fit bounds as well (issue #199).
+          const visibleFeatures = modelFeatures(resolvedProjectFeatures(project)).filter((feature) => feature.visible)
           const visibleTabs = project.tabs.filter((tab) => tab.visible)
           const visibleClamps = project.clamps.filter((clamp) => clamp.visible)
           const profiles =
@@ -1003,7 +1049,10 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
       cancelled = true
       window.clearTimeout(timeout)
     }
-  }, [clearRenderedObjects, collidingClampIds, disposeObjectMaterial, originVisible, project, rebuildGridHelpers, selection.selectedNode])
+    // Keyed on geometry inputs only. Selection and collision no longer rebuild
+    // the CSG model — a separate effect recolors fixtures via applyFixtureHighlights
+    // (issue #261). applyFixtureHighlightsRef is a stable ref, so it's omitted.
+  }, [clearRenderedObjects, disposeObjectMaterial, originVisible, project, rebuildGridHelpers])
 
   useEffect(() => {
     const scene = sceneRef.current

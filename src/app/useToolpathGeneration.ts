@@ -27,17 +27,17 @@ import {
   generatePocketToolpath,
   generateRoughSurfaceToolpath,
   generateSurfaceCleanToolpath,
-  generateVCarveRecursiveToolpath,
+  generateVCarveMedialToolpath,
   generateVCarveToolpath,
   type ToolpathResult,
 } from '../engine/toolpaths'
-import type { Clamp, Operation, Project, SketchFeature, Stock, Tab, Tool } from '../types/project'
+import type { Clamp, FeatureInstance, Operation, Project, Stock, Tab, Tool } from '../types/project'
 
 export interface ToolpathCacheEntry {
   result: ToolpathResult
   operation: Operation
   stock: Stock
-  features: SketchFeature[]
+  features: FeatureInstance[]
   tools: Tool[]
   tabs: Tab[]
   clamps: Clamp[]
@@ -73,6 +73,8 @@ export function operationComputationEquals(a: Operation, b: Operation): boolean 
     && a.rpm === b.rpm
     && a.pocketPattern === b.pocketPattern
     && a.pocketAngle === b.pocketAngle
+    && a.pocketSlotFeedPercent === b.pocketSlotFeedPercent
+    && a.roundOutsideCorners === b.roundOutsideCorners
     && a.stockToLeaveRadial === b.stockToLeaveRadial
     && a.stockToLeaveAxial === b.stockToLeaveAxial
     && a.finishWalls === b.finishWalls
@@ -207,8 +209,8 @@ export function useToolpathGeneration(project: Project, selectedOperation: Opera
         result = applyClampWarnings(project, applyTabWarnings(project, operation, generatePocketToolpath(project, operation)), operation)
       } else if (operation.kind === 'v_carve') {
         result = applyClampWarnings(project, generateVCarveToolpath(project, operation), operation)
-      } else if (operation.kind === 'v_carve_recursive') {
-        result = applyClampWarnings(project, generateVCarveRecursiveToolpath(project, operation), operation)
+      } else if (operation.kind === 'v_carve_medial') {
+        result = applyClampWarnings(project, generateVCarveMedialToolpath(project, operation), operation)
       } else if (operation.kind === 'edge_route_inside' || operation.kind === 'edge_route_outside') {
         const tabAware = applyTabsToEdgeRoute(project, operation, generateEdgeRouteToolpath(project, operation))
         result = applyClampWarnings(project, applyTabWarnings(project, operation, tabAware), operation)

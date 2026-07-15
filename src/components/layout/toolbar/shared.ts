@@ -22,6 +22,7 @@ interface ToolbarProps {
   zoomWindowActive?: boolean
   onImportComplete?: () => void
   onExportModel: () => void
+  onPrintDesign?: () => void
 }
 
 interface SnapToolbarProps {
@@ -45,6 +46,7 @@ const CREATION_SHAPE_OPTIONS = [
   { value: 'text', icon: 'text', noun: 'text', tier: 'primary' },
   { value: 'slot', icon: 'slot', noun: 'slot', tier: 'secondary' },
   { value: 'ngon', icon: 'ngon', noun: 'regular polygon', tier: 'secondary' },
+  { value: 'gear', icon: 'gear', noun: 'gear', tier: 'secondary' },
   { value: 'roundrect', icon: 'roundrect', noun: 'rounded rectangle', tier: 'secondary' },
   { value: 'chamferrect', icon: 'chamferrect', noun: 'chamfered rectangle', tier: 'secondary' },
 ] as const

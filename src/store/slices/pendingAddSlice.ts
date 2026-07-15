@@ -19,9 +19,11 @@ import { convertLength } from '../../utils/units'
 import type { Clamp, Segment, SketchFeature, Tab } from '../../types/project'
 import { cloneProject, syncFeatureTreeProject } from '../helpers/normalize'
 import { nextPlacementSession, nextUniqueGeneratedId } from '../helpers/ids'
-import { createDefinitionForFeature } from '../helpers/featureDefinitions'
-import { IDENTITY_MATRIX } from '../../types/project'
+import { createDefinitionForFeature, createFeatureInstance } from '../helpers/featureDefinitions'
+import { buildShapeFeature } from '../helpers/buildShapeFeature'
 import { createTextFeatureAt } from '../helpers/naming'
+import { isConstruction } from '../helpers/featureRoles'
+import { resolvedProjectFeatures } from '../helpers/resolveFeatures'
 import { clonePoint, pointsEqual } from '../helpers/geometry'
 import {
   appendSplineDraftSegment,
@@ -31,6 +33,10 @@ import {
   resolveOpenCompositeDraftSegments,
 } from '../helpers/profileEdit'
 import type { CompositeSegmentMode, ProjectStore } from '../types'
+import {
+  defaultGearCreationParams,
+  normalizeGearCreationParams,
+} from '../../sketch/gearProfile'
 
 export type PendingAddSlice = Pick<
   ProjectStore,
@@ -46,6 +52,7 @@ export type PendingAddSlice = Pick<
   | 'startAddTextPlacement'
   | 'startAddSlotPlacement'
   | 'startAddNgonPlacement'
+  | 'startAddGearPlacement'
   | 'startAddRoundRectPlacement'
   | 'startAddChamferRectPlacement'
   | 'cancelPendingAdd'
@@ -63,6 +70,9 @@ export type PendingAddSlice = Pick<
   | 'completePendingComposite'
   | 'completePendingOpenComposite'
   | 'setPendingNgonSides'
+  | 'setPendingGearParams'
+  | 'setPendingGearRadiusAt'
+  | 'completePendingGear'
   | 'setPendingRectCorner'
   | 'placePendingSlotAt'
   | 'placePendingNgonAt'
@@ -205,6 +215,22 @@ export function createPendingAddSlice(
     startAddNgonPlacement: () =>
       set((s) => ({
         pendingAdd: { shape: 'ngon', anchor: null, sides: 6, session: nextPlacementSession() },
+        pendingMove: null,
+        pendingTransform: null,
+        pendingOffset: null,
+        sketchEditSession: null,
+        selection: resetFeaturePlacementSelection(s.selection),
+      })),
+
+    startAddGearPlacement: () =>
+      set((s) => ({
+        pendingAdd: {
+          shape: 'gear',
+          anchor: null,
+          outsideRadius: null,
+          params: defaultGearCreationParams(s.project.meta.units === 'mm' ? 20 : 1),
+          session: nextPlacementSession(),
+        },
         pendingMove: null,
         pendingTransform: null,
         pendingOffset: null,
@@ -380,11 +406,7 @@ export function createPendingAddSlice(
       // creation path. Without this, reference copies point at a missing
       // definition and become un-resolvable / un-selectable (issue #228).
       const minted = createDefinitionForFeature(state.project, baseFeature)
-      const createdFeature: SketchFeature = {
-        ...baseFeature,
-        definitionId: minted.definitionId,
-        transform: IDENTITY_MATRIX,
-      } as SketchFeature & { definitionId: string; transform: typeof IDENTITY_MATRIX }
+      const createdFeature = createFeatureInstance(baseFeature, minted.definitionId)
 
       set((s) => {
         const nextProject = syncFeatureTreeProject({
@@ -466,6 +488,7 @@ export function createPendingAddSlice(
       if (state.creationTarget === 'region') return
 
       const depth = Math.min(state.project.stock.thickness, 10)
+      const openPathOperation = state.creationTarget === 'construction' ? 'construction' as const : 'line' as const
       if (state.pendingAdd.shape === 'spline') {
         if (state.pendingAdd.points.length < 2) return
         const id = nextUniqueGeneratedId(state.project, 'f')
@@ -477,7 +500,9 @@ export function createPendingAddSlice(
 
         const feature: SketchFeature = {
           id,
-          name: `Spline ${state.project.features.length + 1}`,
+          name: openPathOperation === 'construction'
+            ? `Construction ${resolvedProjectFeatures(state.project).filter(isConstruction).length + 1}`
+            : `Spline ${state.project.features.length + 1}`,
           kind: 'spline',
           folderId: null,
           sketch: {
@@ -491,7 +516,7 @@ export function createPendingAddSlice(
             dimensions: [],
             constraints: [],
           },
-          operation: 'line',
+          operation: openPathOperation,
           z_top: depth,
           z_bottom: 0,
           visible: true,
@@ -508,7 +533,9 @@ export function createPendingAddSlice(
         }))
         const feature: SketchFeature = {
           id,
-          name: `Polyline ${state.project.features.length + 1}`,
+          name: openPathOperation === 'construction'
+            ? `Construction ${resolvedProjectFeatures(state.project).filter(isConstruction).length + 1}`
+            : `Polyline ${state.project.features.length + 1}`,
           kind: 'polygon',
           folderId: null,
           sketch: {
@@ -522,7 +549,7 @@ export function createPendingAddSlice(
             dimensions: [],
             constraints: [],
           },
-          operation: 'line',
+          operation: openPathOperation,
           z_top: depth,
           z_bottom: 0,
           visible: true,
@@ -696,32 +723,18 @@ export function createPendingAddSlice(
       }
 
       const depth = Math.min(state.project.stock.thickness, 10)
-      const id = nextUniqueGeneratedId(state.project, 'f')
-      const operation = state.creationTarget === 'region' ? 'region' : 'subtract'
-      const feature: SketchFeature = {
-        id,
-        name: operation === 'region'
-          ? `Region ${state.project.features.filter((feature) => feature.operation === 'region').length + 1}`
-          : `Composite ${state.project.features.length + 1}`,
-        kind: 'composite',
-        folderId: null,
-        sketch: {
-          profile: {
-            start: clonePoint(state.pendingAdd.start),
-            segments: closedSegments.map(cloneSegment),
-            closed: true,
-          },
-          origin: { x: 0, y: 0 },
-          orientationAngle: 90,
-          dimensions: [],
-          constraints: [],
+      const feature = buildShapeFeature(
+        state.project,
+        state.creationTarget,
+        'composite',
+        {
+          start: clonePoint(state.pendingAdd.start),
+          segments: closedSegments.map(cloneSegment),
+          closed: true,
         },
-        operation,
-        z_top: depth,
-        z_bottom: 0,
-        visible: true,
-        locked: false,
-      }
+        `Composite ${state.project.features.length + 1}`,
+        depth,
+      )
 
       state.addFeature(feature)
       set({ pendingAdd: null })
@@ -741,9 +754,12 @@ export function createPendingAddSlice(
 
       const depth = Math.min(state.project.stock.thickness, 10)
       const id = nextUniqueGeneratedId(state.project, 'f')
+      const openCompositeOperation = state.creationTarget === 'construction' ? 'construction' as const : 'line' as const
       const feature: SketchFeature = {
         id,
-        name: `Composite ${state.project.features.length + 1}`,
+        name: openCompositeOperation === 'construction'
+          ? `Construction ${resolvedProjectFeatures(state.project).filter(isConstruction).length + 1}`
+          : `Composite ${state.project.features.length + 1}`,
         kind: 'composite',
         folderId: null,
         sketch: {
@@ -757,7 +773,7 @@ export function createPendingAddSlice(
           dimensions: [],
           constraints: [],
         },
-        operation: 'line',
+        operation: openCompositeOperation,
         z_top: depth,
         z_bottom: 0,
         visible: true,
@@ -775,6 +791,60 @@ export function createPendingAddSlice(
             ? { ...s.pendingAdd, sides: Math.max(3, Math.min(50, Math.round(n))) }
             : s.pendingAdd,
       })),
+
+    setPendingGearParams: (patch) =>
+      set((s) => ({
+        pendingAdd:
+          s.pendingAdd?.shape === 'gear'
+            ? {
+                ...s.pendingAdd,
+                params: normalizeGearCreationParams({
+                  ...s.pendingAdd.params,
+                  ...patch,
+                }),
+              }
+            : s.pendingAdd,
+      })),
+
+    setPendingGearRadiusAt: (point) =>
+      set((s) => {
+        if (s.pendingAdd?.shape !== 'gear' || !s.pendingAdd.anchor) {
+          return {}
+        }
+        const minSize = convertLength(0.01, 'mm', s.project.meta.units)
+        const outsideRadius = Math.max(
+          minSize,
+          Math.hypot(point.x - s.pendingAdd.anchor.x, point.y - s.pendingAdd.anchor.y),
+        )
+        return {
+          pendingAdd: {
+            ...s.pendingAdd,
+            outsideRadius,
+            params: s.pendingAdd.outsideRadius === null
+              ? defaultGearCreationParams(outsideRadius)
+              : s.pendingAdd.params,
+          },
+        }
+      }),
+
+    completePendingGear: () => {
+      const state = get()
+      if (state.pendingAdd?.shape !== 'gear' || !state.pendingAdd.anchor || state.pendingAdd.outsideRadius === null) {
+        return []
+      }
+      const depth = Math.min(state.project.stock.thickness, 10)
+      const createdIds = state.addGearFeature(
+        `Gear ${state.project.features.length + 1}`,
+        state.pendingAdd.anchor,
+        state.pendingAdd.outsideRadius,
+        state.pendingAdd.params,
+        depth,
+      )
+      if (createdIds.length > 0) {
+        set({ pendingAdd: null })
+      }
+      return createdIds
+    },
 
     setPendingRectCorner: (n) =>
       set((s) => ({

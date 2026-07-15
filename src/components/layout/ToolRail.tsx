@@ -184,6 +184,15 @@ export function ToolRail({ onZoomToModel: _onZoomToModel, onImportComplete: _onI
               <Icon id="plus" />
             </button>
             <button
+              className={`tool-rail__target-btn tool-rail__target-btn--line ${creationCommands.creationTarget === 'line' ? 'tool-rail__target-btn--active' : ''}`}
+              type="button"
+              aria-label="Create lines"
+              aria-pressed={creationCommands.creationTarget === 'line'}
+              onClick={() => creationCommands.setCreationTarget('line')}
+            >
+              <Icon id="snap-line" />
+            </button>
+            <button
               className={`tool-rail__target-btn tool-rail__target-btn--region ${creationCommands.creationTarget === 'region' ? 'tool-rail__target-btn--active' : ''}`}
               type="button"
               aria-label="Create regions"
@@ -191,6 +200,15 @@ export function ToolRail({ onZoomToModel: _onZoomToModel, onImportComplete: _onI
               onClick={() => creationCommands.setCreationTarget('region')}
             >
               <Icon id="pocket" />
+            </button>
+            <button
+              className={`tool-rail__target-btn tool-rail__target-btn--construction ${creationCommands.creationTarget === 'construction' ? 'tool-rail__target-btn--active' : ''}`}
+              type="button"
+              aria-label="Create construction geometry"
+              aria-pressed={creationCommands.creationTarget === 'construction'}
+              onClick={() => creationCommands.setCreationTarget('construction')}
+            >
+              <Icon id="construction" />
             </button>
           </div>
         </div>

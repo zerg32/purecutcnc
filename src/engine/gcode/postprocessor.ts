@@ -395,7 +395,7 @@ export function runPostProcessor(input: PostProcessorInput): PostProcessorResult
         const mPoint = projectToMachinePoint(move.to, project.origin, definition)
 
         const plungeFeedVal = operation.plungeFeed || tool.defaultPlungeFeed
-        const opFeedVal = operation.feed || tool.defaultFeed
+        const opFeedVal = (operation.feed || tool.defaultFeed) * (move.feedScale ?? 1)
 
         let feed: number
         if (move.kind === 'plunge') {

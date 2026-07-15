@@ -25,7 +25,7 @@ function operationKindLabel(kind: OperationKind): string {
   switch (kind) {
     case 'pocket': return 'Pocket'
     case 'v_carve': return 'V-carve'
-    case 'v_carve_recursive': return 'V-carve Recursive'
+    case 'v_carve_medial': return 'V-carve Medial'
     case 'edge_route_inside': return 'Inside Edge Route'
     case 'edge_route_outside': return 'Outside Edge Route'
     case 'surface_clean': return 'Surface Clean'
@@ -64,6 +64,13 @@ function operationSupportsCutDirection(kind: OperationKind): boolean {
 
 function operationSupportsMachiningOrder(kind: OperationKind): boolean {
   return kind === 'pocket' || kind === 'edge_route_inside' || kind === 'edge_route_outside'
+}
+
+function operationUsesRoundOutsideCorners(operation: Operation): boolean {
+  return (
+    operation.kind === 'edge_route_outside'
+    || (operation.kind === 'pocket' && operation.pass === 'finish' && operation.finishWalls)
+  )
 }
 
 function targetSummary(project: Project, target: OperationTarget): string {
@@ -150,14 +157,19 @@ function feedControlledTimeSeconds(
     switch (move.kind) {
       case 'cut':
       case 'lead_in':
-      case 'lead_out':
+      case 'lead_out': {
         feedDistance += distance
-        if (operation.feed > 0) {
-          seconds += (distance / operation.feed) * 60
+        // Slot-feed pocket fragments carry a feedScale multiplier and run
+        // slower than the operation feed — price them at the effective feed
+        // the postprocessor emits.
+        const effectiveFeed = operation.feed * (move.feedScale ?? 1)
+        if (effectiveFeed > 0) {
+          seconds += (distance / effectiveFeed) * 60
         } else {
           hasInvalidFeed = true
         }
         break
+      }
       case 'plunge':
         feedDistance += distance
         if (operation.plungeFeed > 0) {
@@ -233,11 +245,19 @@ function settingRows(operation: Operation, project: Project): OperationBookletRo
     rows.push({ label: 'Machining Order', value: machiningOrderLabel(operation.machiningOrder ?? 'level_first') })
   }
 
+  if ((operation.roundOutsideCorners ?? false) && operationUsesRoundOutsideCorners(operation)) {
+    rows.push({ label: 'Round Outside Corners', value: 'Enabled' })
+  }
+
   if (operation.kind === 'pocket' || operation.kind === 'surface_clean' || operation.kind === 'finish_surface' || operation.kind === 'finish_surface_cleanup') {
     rows.push(
       { label: 'Pattern', value: operation.pocketPattern },
       { label: 'Pocket Angle', value: `${formatNumber(operation.pocketAngle, 2)} deg` },
     )
+  }
+
+  if (operation.kind === 'pocket' && (operation.pocketSlotFeedPercent ?? 100) < 100) {
+    rows.push({ label: 'Slot Feed', value: `${formatNumber(operation.pocketSlotFeedPercent ?? 100, 0)} % of feed` })
   }
 
   if (operation.kind === 'drilling') {

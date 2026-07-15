@@ -14,14 +14,15 @@ Application source. React + TypeScript + Zustand. Tauri-wrapped for desktop.
 - [components/](components/INDEX.md) — React UI (canvas, viewport3d, simulation, panels)
 - [import/](import/) — DXF / SVG / STL / OBJ parsers that normalize into `.camj`; `camj.ts` adds partial-import (merge selected folders from another `.camj` into the current project)
 - [text/](text/) — text-to-geometry (font → machinable paths); `index.ts` is the public API, `fontData.ts` the typed `parseFontJson` font-parse seam
-- [sketch/](sketch/) — sketch geometry helpers (segment math, profile ops)
+- [sketch/](sketch/) — sketch geometry helpers (segment math, profile ops, visible-scene bounds in `sceneBounds.ts`, gear profile generation)
 - [hooks/](hooks/INDEX.md) — shared cross-cutting React hooks (`useStableEvent`, `useWindowEvent`/`useEventListener`)
 - [commands/](commands/INDEX.md) — shared desktop/tablet command descriptors and store-backed command predicates
 - [types/](types/) — core data model. `project.ts` is the canonical `.camj` schema
 - [utils/](utils/) — units, analytics, icons, version, misc helpers
-- [platform/](platform/) — platform abstraction (web vs Tauri), desktop integration, and feature clipboard helpers
+- [platform/](platform/) — platform abstraction (web vs Tauri), desktop integration, feature clipboard helpers, and hidden-iframe HTML printing (`printDocument.ts`)
 - [styles/](styles/) — shared CSS (incl. `tablet.css` for touch UX)
 - [assets/](assets/) — editable per-icon SVG sources in `icons/` (see `icons/README.md`), fonts, etc.
+- [test/](test/INDEX.md) — shared helpers for constructing strict current-format test projects
 
 ## Loose files
 - `toolLibrary.ts` — built-in tool definitions and tool-library helpers

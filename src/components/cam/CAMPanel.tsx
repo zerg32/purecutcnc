@@ -22,6 +22,7 @@ import { useProjectStore } from '../../store/projectStore'
 import { loadBundledToolLibrary, type ToolLibraryEntry } from '../../toolLibrary'
 import { Select } from '../Select'
 import { OperationAddMenu } from './OperationAddMenu'
+import { OperationParameterReference } from './OperationParameterReference'
 import { DisclosureSection } from '../common/DisclosureSection'
 import type {
   DrillType,
@@ -39,18 +40,23 @@ import { normalizeToolForProject } from '../../engine/toolpaths/geometry'
 import { createOperationBookletPdf } from '../../engine/operationBooklet'
 import { renderOperationSnapshotPng } from '../canvas/operationSnapshot'
 import { platform } from '../../platform'
+import { isConstruction, isMachinable, isRegion } from '../../store/helpers/featureRoles'
+import { isVCarveCompatibleFeature } from '../../store/helpers/vcarveTargets'
 import { featureHasClosedGeometry } from '../../text'
 import { getOperationAddHint, operationKindLabel, operationRequiresClosedProfiles, operationTargetsRegion, selectAllCompatibleFeatureIds } from './operationValidity'
 import { convertToolUnits, formatLength, parseLengthInput } from '../../utils/units'
 import { Icon } from '../Icon'
 import { isTabletMode, useShellMode } from '../layout/useShellMode'
 import { PanelSplit } from './PanelSplit'
+import { resolveFeatureInstance, resolveFeatureInstances } from '../../store/helpers/resolveFeatures'
 
 interface CAMPanelProps {
   mode: 'operations' | 'tools'
   selectedOperationId: string | null
   onSelectedOperationIdChange: (operationId: string | null) => void
   onExport: () => void
+  /** Open the Export G-code dialog scoped to a single operation. */
+  onExportOperation: (operationId: string) => void
   generateToolpath: (operation: Operation) => ToolpathResult | null
   toolpathWarnings?: string[] | null
   generatingOperationIds?: Set<string>
@@ -300,8 +306,8 @@ function operationAddButtonLabel(kind: OperationKind): string {
       return 'Pocket'
     case 'v_carve':
       return 'V-Carve offset'
-    case 'v_carve_recursive':
-      return 'V-Carve skeleton'
+    case 'v_carve_medial':
+      return 'V-Carve medial'
     case 'edge_route_inside':
       return 'Edge in'
     case 'edge_route_outside':
@@ -324,7 +330,7 @@ function operationAddButtonLabel(kind: OperationKind): string {
 function operationSupportsPassSelection(kind: OperationKind): boolean {
   return kind !== 'follow_line'
     && kind !== 'v_carve'
-    && kind !== 'v_carve_recursive'
+    && kind !== 'v_carve_medial'
     && kind !== 'drilling'
     && kind !== 'rough_surface'
     && kind !== 'finish_surface'
@@ -351,14 +357,12 @@ function operationTargetSummary(project: Project, target: OperationTarget): stri
     return 'Stock'
   }
 
-  const features = target.featureIds
-    .map((featureId) => project.features.find((feature) => feature.id === featureId) ?? null)
-    .filter((feature): feature is Project['features'][number] => feature !== null)
+  const features = resolveFeatureInstances(project, target.featureIds)
   const names = features
-    .filter((feature) => feature.operation !== 'region')
+    .filter(isMachinable)
     .map((feature) => feature.name)
   const regionNames = features
-    .filter((feature) => feature.operation === 'region')
+    .filter(isRegion)
     .map((feature) => feature.name)
 
   if (names.length === 0 && regionNames.length === 0) {
@@ -385,7 +389,7 @@ function pocketPatternLabel(pattern: PocketPattern): string {
 function showStepdown(operation: Project['operations'][number]): boolean {
   if (
     operation.kind === 'v_carve'
-    || operation.kind === 'v_carve_recursive'
+    || operation.kind === 'v_carve_medial'
     || operation.kind === 'drilling'
     || operation.kind === 'finish_surface_cleanup'
   ) {
@@ -398,21 +402,27 @@ function showStepdown(operation: Project['operations'][number]): boolean {
 }
 
 function getValidOperationTarget(project: Project, selection: SelectionState, kind: OperationKind): OperationTarget | null {
+  // Construction geometry can never be part of an operation target (issue #199).
+  if (selection.selectedFeatureIds.some((featureId) => {
+    const feature = resolveFeatureInstance(project, featureId)
+    return feature !== null && isConstruction(feature)
+  })) {
+    return null
+  }
+
   if (kind === 'drilling') {
     if (selection.selectedFeatureIds.length === 0) {
       return null
     }
 
-    const features = selection.selectedFeatureIds
-      .map((featureId) => project.features.find((feature) => feature.id === featureId) ?? null)
-      .filter((feature): feature is Project['features'][number] => feature !== null)
+    const features = resolveFeatureInstances(project, selection.selectedFeatureIds)
 
     if (features.length !== selection.selectedFeatureIds.length) {
       return null
     }
 
-    const machiningFeatures = features.filter((feature) => feature.operation !== 'region')
-    const regionFeatures = features.filter((feature) => feature.operation === 'region')
+    const machiningFeatures = features.filter(isMachinable)
+    const regionFeatures = features.filter(isRegion)
     return machiningFeatures.length > 0
       && machiningFeatures.every((feature) => feature.kind === 'circle')
       && regionFeatures.every((feature) => featureHasClosedGeometry(feature))
@@ -425,12 +435,10 @@ function getValidOperationTarget(project: Project, selection: SelectionState, ki
       return null
     }
 
-    const features = selection.selectedFeatureIds
-      .map((featureId) => project.features.find((feature) => feature.id === featureId) ?? null)
-      .filter((feature): feature is Project['features'][number] => feature !== null)
+    const features = resolveFeatureInstances(project, selection.selectedFeatureIds)
 
-    const machiningFeatures = features.filter((feature) => feature.operation !== 'region')
-    const regionFeatures = features.filter((feature) => feature.operation === 'region')
+    const machiningFeatures = features.filter(isMachinable)
+    const regionFeatures = features.filter(isRegion)
     return features.length === selection.selectedFeatureIds.length
       && machiningFeatures.length > 0
       && regionFeatures.every((feature) => featureHasClosedGeometry(feature))
@@ -443,16 +451,14 @@ function getValidOperationTarget(project: Project, selection: SelectionState, ki
       return null
     }
 
-    const features = selection.selectedFeatureIds
-      .map((featureId) => project.features.find((feature) => feature.id === featureId) ?? null)
-      .filter((feature): feature is Project['features'][number] => feature !== null)
+    const features = resolveFeatureInstances(project, selection.selectedFeatureIds)
 
     if (features.length !== selection.selectedFeatureIds.length) {
       return null
     }
 
-    const machiningFeatures = features.filter((feature) => feature.operation !== 'region')
-    const regionFeatures = features.filter((feature) => feature.operation === 'region')
+    const machiningFeatures = features.filter(isMachinable)
+    const regionFeatures = features.filter(isRegion)
     return machiningFeatures.length > 0
       && machiningFeatures.every((feature) => (feature.operation === 'add' || feature.operation === 'model') && (!operationRequiresClosedProfiles(kind) || featureHasClosedGeometry(feature)))
       && regionFeatures.every((feature) => featureHasClosedGeometry(feature))
@@ -460,23 +466,21 @@ function getValidOperationTarget(project: Project, selection: SelectionState, ki
       : null
   }
 
-  if (kind === 'v_carve' || kind === 'v_carve_recursive') {
+  if (kind === 'v_carve' || kind === 'v_carve_medial') {
     if (selection.selectedFeatureIds.length === 0) {
       return null
     }
 
-    const features = selection.selectedFeatureIds
-      .map((featureId) => project.features.find((feature) => feature.id === featureId) ?? null)
-      .filter((feature): feature is Project['features'][number] => feature !== null)
+    const features = resolveFeatureInstances(project, selection.selectedFeatureIds)
 
     if (features.length !== selection.selectedFeatureIds.length) {
       return null
     }
 
-    const machiningFeatures = features.filter((feature) => feature.operation !== 'region')
-    const regionFeatures = features.filter((feature) => feature.operation === 'region')
+    const machiningFeatures = features.filter(isMachinable)
+    const regionFeatures = features.filter(isRegion)
     return machiningFeatures.length > 0
-      && machiningFeatures.every((feature) => feature.operation === 'subtract' && featureHasClosedGeometry(feature))
+      && machiningFeatures.every((feature) => isVCarveCompatibleFeature(feature))
       && regionFeatures.every((feature) => featureHasClosedGeometry(feature))
       ? { source: 'features', featureIds: features.map((feature) => feature.id) }
       : null
@@ -487,16 +491,14 @@ function getValidOperationTarget(project: Project, selection: SelectionState, ki
       return null
     }
 
-    const features = selection.selectedFeatureIds
-      .map((featureId) => project.features.find((feature) => feature.id === featureId) ?? null)
-      .filter((feature): feature is Project['features'][number] => feature !== null)
+    const features = resolveFeatureInstances(project, selection.selectedFeatureIds)
 
     if (features.length !== selection.selectedFeatureIds.length) {
       return null
     }
 
-    const machiningFeatures = features.filter((feature) => feature.operation !== 'region')
-    const regionFeatures = features.filter((feature) => feature.operation === 'region')
+    const machiningFeatures = features.filter(isMachinable)
+    const regionFeatures = features.filter(isRegion)
     const hasModel = machiningFeatures.some((f) => f.operation === 'model' && f.kind === 'stl')
     return hasModel && regionFeatures.every((feature) => featureHasClosedGeometry(feature))
       ? { source: 'features', featureIds: features.map((f) => f.id) }
@@ -508,9 +510,7 @@ function getValidOperationTarget(project: Project, selection: SelectionState, ki
       return null
     }
 
-    const features = selection.selectedFeatureIds
-      .map((featureId) => project.features.find((feature) => feature.id === featureId) ?? null)
-      .filter((feature): feature is Project['features'][number] => feature !== null)
+    const features = resolveFeatureInstances(project, selection.selectedFeatureIds)
 
     if (features.length !== selection.selectedFeatureIds.length) {
       return null
@@ -530,9 +530,7 @@ function getValidOperationTarget(project: Project, selection: SelectionState, ki
     return null
   }
 
-  const features = selection.selectedFeatureIds
-    .map((featureId) => project.features.find((feature) => feature.id === featureId) ?? null)
-    .filter((feature): feature is Project['features'][number] => feature !== null)
+  const features = resolveFeatureInstances(project, selection.selectedFeatureIds)
 
   if (features.length !== selection.selectedFeatureIds.length) {
     return null
@@ -540,8 +538,8 @@ function getValidOperationTarget(project: Project, selection: SelectionState, ki
 
   const wantsSubtract = kind === 'pocket' || kind === 'edge_route_inside'
   const expectedOperation = wantsSubtract ? 'subtract' : 'add'
-  const machiningFeatures = features.filter((feature) => feature.operation !== 'region')
-  const regionFeatures = features.filter((feature) => feature.operation === 'region')
+  const machiningFeatures = features.filter(isMachinable)
+  const regionFeatures = features.filter(isRegion)
   if (machiningFeatures.length === 0) {
     return null
   }
@@ -577,6 +575,7 @@ export function CAMPanel({
   selectedOperationId: selectedOperationIdProp,
   onSelectedOperationIdChange,
   onExport,
+  onExportOperation,
   generateToolpath,
   toolpathWarnings,
   generatingOperationIds,
@@ -755,7 +754,7 @@ export function CAMPanel({
       return [
         button('pocket'),
         button('v_carve'),
-        button('v_carve_recursive'),
+        button('v_carve_medial'),
         button('edge_route_inside'),
         button('edge_route_outside'),
         button('surface_clean'),
@@ -879,7 +878,7 @@ export function CAMPanel({
     // Load the bundled library so addOperation can auto-pick/import a proper tool.
     const libraryTools = await ensureBundledLibraryLoaded()
 
-    if ((kind === 'follow_line' || kind === 'v_carve' || kind === 'v_carve_recursive' || kind === 'drilling' || kind === 'rough_surface' || kind === 'finish_surface') && mode === 'pair') {
+    if ((kind === 'follow_line' || kind === 'v_carve' || kind === 'v_carve_medial' || kind === 'drilling' || kind === 'rough_surface' || kind === 'finish_surface') && mode === 'pair') {
       const operationId = addOperation(kind, 'rough', target, libraryTools)
       if (operationId) {
         onSelectedOperationIdChange(operationId)
@@ -1104,7 +1103,7 @@ export function CAMPanel({
       return <div className="panel-empty">Select an operation to edit its parameters.</div>
     }
     return (
-      <div key={`${selectedOperation.id}-${selectedOperation.toolRef ?? ''}`} className="properties-panel cam-tool-properties">
+      <div key={`${selectedOperation.id}-${selectedOperation.toolRef ?? ''}`} className="properties-panel cam-tool-properties cam-operation-properties">
                     <div className="properties-group">
                   <label className="properties-field">
                     <span>Name</span>
@@ -1121,7 +1120,7 @@ export function CAMPanel({
                     <span>Kind</span>
                     <input type="text" value={operationKindLabel(selectedOperation.kind)} readOnly />
                   </label>
-                  {selectedOperation.kind !== 'v_carve' && selectedOperation.kind !== 'v_carve_recursive' && selectedOperation.kind !== 'drilling' && selectedOperation.kind !== 'rough_surface' && selectedOperation.kind !== 'finish_surface' && selectedOperation.kind !== 'finish_surface_cleanup' ? (
+                  {selectedOperation.kind !== 'v_carve' && selectedOperation.kind !== 'v_carve_medial' && selectedOperation.kind !== 'drilling' && selectedOperation.kind !== 'rough_surface' && selectedOperation.kind !== 'finish_surface' && selectedOperation.kind !== 'finish_surface_cleanup' ? (
                     <label className="properties-field">
                       <span>Pass</span>
                       <Select
@@ -1134,7 +1133,7 @@ export function CAMPanel({
                       />
                     </label>
                   ) : null}
-                  {selectedOperation.kind === 'v_carve' || selectedOperation.kind === 'v_carve_recursive' ? (
+                  {selectedOperation.kind === 'v_carve' || selectedOperation.kind === 'v_carve_medial' ? (
                     <label className="properties-field">
                       <span>Max Carve Depth</span>
                       <DraftLengthInput
@@ -1143,6 +1142,7 @@ export function CAMPanel({
                         min={0.0001}
                         onCommit={(value) => updateOperation(selectedOperation.id, { maxCarveDepth: value })}
                       />
+                      <OperationParameterReference kind="maxDepth" />
                     </label>
                   ) : null}
                   {selectedOperation.kind === 'follow_line' ? (
@@ -1154,6 +1154,7 @@ export function CAMPanel({
                         min={0.0001}
                         onCommit={(value) => updateOperation(selectedOperation.id, { carveDepth: value })}
                       />
+                      <OperationParameterReference kind="maxDepth" />
                     </label>
                   ) : null}
                   <label className="properties-field">
@@ -1235,7 +1236,7 @@ export function CAMPanel({
                       value={selectedOperation.toolRef ?? ''}
                       options={[
                         { value: '', label: 'No Tool' },
-                        ...(selectedOperation.kind === 'v_carve' || selectedOperation.kind === 'v_carve_recursive'
+                        ...(selectedOperation.kind === 'v_carve' || selectedOperation.kind === 'v_carve_medial'
                           ? project.tools.filter((tool) => tool.type === 'v_bit')
                           : project.tools
                         ).map((tool) => ({ value: tool.id, label: tool.name })),
@@ -1246,7 +1247,7 @@ export function CAMPanel({
                         const toolInProjectUnits = newTool && newTool.units !== project.meta.units
                           ? convertToolUnits(newTool, project.meta.units)
                           : newTool
-                        const isVCarve = selectedOperation.kind === 'v_carve' || selectedOperation.kind === 'v_carve_recursive'
+                        const isVCarve = selectedOperation.kind === 'v_carve' || selectedOperation.kind === 'v_carve_medial'
                         const waterlineSpacing = selectedOperation.kind === 'finish_surface' && selectedOperation.pocketPattern === 'waterline'
                           ? defaultWaterlineAdaptiveSpacing(newTool, project.meta.units)
                           : 0
@@ -1288,6 +1289,7 @@ export function CAMPanel({
                         min={0.0001}
                         onCommit={(value) => updateOperation(selectedOperation.id, { stepdown: value })}
                       />
+                      <OperationParameterReference kind="stepdown" />
                     </label>
                   ) : null}
                   {selectedOperation.kind !== 'follow_line'
@@ -1295,7 +1297,7 @@ export function CAMPanel({
                     && !(selectedOperation.kind === 'finish_surface' && selectedOperation.pocketPattern === 'waterline') ? (
                     <label className="properties-field">
                       <span>
-                        {selectedOperation.kind === 'v_carve_recursive'
+                        {selectedOperation.kind === 'v_carve_medial'
                           ? 'Step Size'
                           : selectedOperation.kind === 'v_carve'
                             ? 'Contour Spacing'
@@ -1306,6 +1308,7 @@ export function CAMPanel({
                         min={0.001}
                         onCommit={(value) => updateOperation(selectedOperation.id, { stepover: value })}
                       />
+                      <OperationParameterReference kind="stepover" />
                     </label>
                   ) : null}
                   <DisclosureSection title="Advanced" storageKey="cam-operation-advanced">
@@ -1330,6 +1333,7 @@ export function CAMPanel({
                           })
                         }}
                       />
+                      <OperationParameterReference kind="pattern" variant={selectedOperation.pocketPattern} />
                     </label>
                   ) : null}
                   {selectedOperation.kind === 'finish_surface' ? (
@@ -1343,6 +1347,7 @@ export function CAMPanel({
                         ]}
                         onChange={(value) => updateOperation(selectedOperation.id, { pocketPattern: value })}
                       />
+                      <OperationParameterReference kind="pattern" variant={selectedOperation.pocketPattern} />
                     </label>
                   ) : null}
                   {selectedOperation.kind === 'finish_surface_cleanup' ? (
@@ -1356,6 +1361,7 @@ export function CAMPanel({
                         ]}
                         onChange={(value) => updateOperation(selectedOperation.id, { pocketPattern: value })}
                       />
+                      <OperationParameterReference kind="pattern" variant={selectedOperation.pocketPattern} />
                     </label>
                   ) : null}
                   {(selectedOperation.kind === 'pocket' || selectedOperation.kind === 'surface_clean' || selectedOperation.kind === 'finish_surface' || selectedOperation.kind === 'finish_surface_cleanup') && selectedOperation.pocketPattern === 'parallel' ? (
@@ -1365,6 +1371,7 @@ export function CAMPanel({
                         value={selectedOperation.pocketAngle}
                         onCommit={(value) => updateOperation(selectedOperation.id, { pocketAngle: value })}
                       />
+                      <OperationParameterReference kind="rasterAngle" />
                     </label>
                   ) : null}
                   {(selectedOperation.kind === 'pocket' || selectedOperation.kind === 'edge_route_inside' || selectedOperation.kind === 'edge_route_outside' || selectedOperation.kind === 'v_carve' || selectedOperation.kind === 'surface_clean' || selectedOperation.kind === 'rough_surface' || selectedOperation.kind === 'finish_surface' || selectedOperation.kind === 'finish_surface_cleanup') ? (
@@ -1378,6 +1385,7 @@ export function CAMPanel({
                         ]}
                         onChange={(value) => updateOperation(selectedOperation.id, { cutDirection: value })}
                       />
+                      <OperationParameterReference kind="cutDirection" variant={selectedOperation.cutDirection ?? 'conventional'} />
                     </label>
                   ) : null}
                   {(selectedOperation.kind === 'pocket'
@@ -1393,6 +1401,18 @@ export function CAMPanel({
                         ]}
                         onChange={(value) => updateOperation(selectedOperation.id, { machiningOrder: value })}
                       />
+                      <OperationParameterReference kind="machiningOrder" variant={selectedOperation.machiningOrder ?? 'level_first'} />
+                    </label>
+                  ) : null}
+                  {(selectedOperation.kind === 'edge_route_outside'
+                    || (selectedOperation.kind === 'pocket' && selectedOperation.pass === 'finish' && selectedOperation.finishWalls)) ? (
+                    <label className="properties-check">
+                      <input
+                        type="checkbox"
+                        checked={selectedOperation.roundOutsideCorners ?? false}
+                        onChange={(event) => updateOperation(selectedOperation.id, { roundOutsideCorners: event.target.checked })}
+                      />
+                      <span>Round outside corners</span>
                     </label>
                   ) : null}
                   {(selectedOperation.kind === 'pocket'
@@ -1451,6 +1471,7 @@ export function CAMPanel({
                           ]}
                           onChange={(value) => updateOperation(selectedOperation.id, { drillType: value })}
                         />
+                        <OperationParameterReference kind="drillType" variant={selectedOperation.drillType ?? 'simple'} />
                       </label>
                       {(selectedOperation.drillType === 'peck' || selectedOperation.drillType === 'chip_breaking') ? (
                         <label className="properties-field">
@@ -1461,6 +1482,7 @@ export function CAMPanel({
                             min={0}
                             onCommit={(value) => updateOperation(selectedOperation.id, { peckDepth: value })}
                           />
+                          <OperationParameterReference kind="peckDepth" />
                         </label>
                       ) : null}
                       {selectedOperation.drillType === 'dwell' ? (
@@ -1471,6 +1493,7 @@ export function CAMPanel({
                             min={0}
                             onCommit={(value) => updateOperation(selectedOperation.id, { dwellTime: value })}
                           />
+                          <OperationParameterReference kind="dwell" />
                         </label>
                       ) : null}
                       {selectedOperation.drillType === 'helical' ? (
@@ -1503,6 +1526,7 @@ export function CAMPanel({
                           min={0}
                           onCommit={(value) => updateOperation(selectedOperation.id, { retractHeight: value })}
                         />
+                        <OperationParameterReference kind="retractHeight" />
                       </label>
                     </>
                   ) : null}
@@ -1516,6 +1540,7 @@ export function CAMPanel({
                           onChange={(event) => updateOperation(selectedOperation.id, { finishWalls: event.target.checked })}
                         />
                         <span>Finish Walls</span>
+                        <OperationParameterReference kind="finishWalls" />
                       </label>
                       <label className="properties-check">
                         <input
@@ -1524,6 +1549,7 @@ export function CAMPanel({
                           onChange={(event) => updateOperation(selectedOperation.id, { finishFloor: event.target.checked })}
                         />
                         <span>Finish Floor</span>
+                        <OperationParameterReference kind="finishFloor" />
                       </label>
                     </>
                   ) : null}
@@ -1543,6 +1569,7 @@ export function CAMPanel({
                       min={0.0001}
                       onCommit={(value) => updateOperation(selectedOperation.id, { feed: value })}
                     />
+                    <OperationParameterReference kind="feed" />
                   </label>
                   <label className="properties-field">
                     <span>Plunge Feed</span>
@@ -1552,7 +1579,27 @@ export function CAMPanel({
                       min={0.0001}
                       onCommit={(value) => updateOperation(selectedOperation.id, { plungeFeed: value })}
                     />
+                    <OperationParameterReference kind="plungeFeed" />
                   </label>
+                  {selectedOperation.kind === 'pocket'
+                    && (selectedOperation.pass === 'rough'
+                      || (selectedOperation.pass === 'finish' && selectedOperation.finishFloor)) ? (
+                    <label
+                      className="properties-field"
+                      title="Feed percentage for fully engaged (slotting) cuts: each section's innermost loop, uncleared crossings, the parallel boundary pass, and the first fill line. 100 disables the reduction."
+                    >
+                      <span>Slot Feed (%)</span>
+                      <DraftNumberInput
+                        value={selectedOperation.pocketSlotFeedPercent ?? 100}
+                        min={1}
+                        max={100}
+                        onCommit={(value) => updateOperation(selectedOperation.id, {
+                          pocketSlotFeedPercent: Math.min(100, Math.max(1, Math.round(value))),
+                        })}
+                      />
+                      <OperationParameterReference kind="slotFeed" />
+                    </label>
+                  ) : null}
                   <label className="properties-field">
                     <span>RPM</span>
                     <DraftNumberInput
@@ -1560,10 +1607,11 @@ export function CAMPanel({
                       min={1}
                       onCommit={(value) => updateOperation(selectedOperation.id, { rpm: Math.round(value) })}
                     />
+                    <OperationParameterReference kind="rpm" />
                   </label>
                   {selectedOperation.kind !== 'follow_line'
                     && selectedOperation.kind !== 'v_carve'
-                    && selectedOperation.kind !== 'v_carve_recursive'
+                    && selectedOperation.kind !== 'v_carve_medial'
                     && selectedOperation.kind !== 'drilling'
                     && selectedOperation.kind !== 'finish_surface' ? (
                     <>
@@ -1575,6 +1623,7 @@ export function CAMPanel({
                           min={0}
                           onCommit={(value) => updateOperation(selectedOperation.id, { stockToLeaveRadial: value })}
                         />
+                        <OperationParameterReference kind="stockRadial" />
                       </label>
                       <label className="properties-field">
                         <span>Stock To Leave Axial</span>
@@ -1584,6 +1633,7 @@ export function CAMPanel({
                           min={0}
                           onCommit={(value) => updateOperation(selectedOperation.id, { stockToLeaveAxial: value })}
                         />
+                        <OperationParameterReference kind="stockAxial" />
                       </label>
                     </>
                   ) : null}
@@ -1599,6 +1649,7 @@ export function CAMPanel({
                               min={0}
                               onCommit={(value) => updateOperation(selectedOperation.id, { stockToLeaveRadial: value })}
                             />
+                            <OperationParameterReference kind="stockRadial" />
                           </label>
                           <label
                             className="properties-check"
@@ -1621,6 +1672,7 @@ export function CAMPanel({
                               }}
                             />
                             <span>Adaptive refinement</span>
+                            <OperationParameterReference kind="adaptiveRefinement" />
                           </label>
                           {(selectedOperation.waterlineAdaptiveRefinement ?? true) ? (
                             <>
@@ -1635,6 +1687,7 @@ export function CAMPanel({
                                   min={0.0001}
                                   onCommit={(value) => updateOperation(selectedOperation.id, { waterlineMicroStepover: value })}
                                 />
+                                <OperationParameterReference kind="adaptiveSpacing" />
                               </label>
                               <label
                                 className="properties-field"
@@ -1647,6 +1700,7 @@ export function CAMPanel({
                                   max={512}
                                   onCommit={(value) => updateOperation(selectedOperation.id, { waterlineMaxRingsPerBand: Math.floor(value) })}
                                 />
+                                <OperationParameterReference kind="maxRings" />
                               </label>
                             </>
                           ) : null}
@@ -1660,6 +1714,7 @@ export function CAMPanel({
                           min={0}
                           onCommit={(value) => updateOperation(selectedOperation.id, { stockToLeaveAxial: value })}
                         />
+                        <OperationParameterReference kind="stockAxial" />
                       </label>
                     </>
                   ) : null}
@@ -2013,15 +2068,33 @@ export function CAMPanel({
             <section className="cam-section cam-section--properties">
               <div className="cam-section-header">
                 <span>Properties</span>
-                <button
-                  className="tree-action-btn"
-                  type="button"
-                  title="Expand operation properties"
-                  aria-label="Expand operation properties"
-                  onClick={() => setExpandedCamSection('operation')}
-                >
-                  <Icon id="expand" />
-                </button>
+                <div className="cam-section-header-actions">
+                  <button
+                    className="tree-action-btn"
+                    type="button"
+                    title="Export G-code for this operation"
+                    aria-label={selectedOperation
+                      ? `Export G-code for ${selectedOperation.name}`
+                      : 'Export G-code for selected operation'}
+                    disabled={!selectedOperation}
+                    onClick={() => {
+                      if (selectedOperation) {
+                        onExportOperation(selectedOperation.id)
+                      }
+                    }}
+                  >
+                    <Icon id="gcode" />
+                  </button>
+                  <button
+                    className="tree-action-btn"
+                    type="button"
+                    title="Expand operation properties"
+                    aria-label="Expand operation properties"
+                    onClick={() => setExpandedCamSection('operation')}
+                  >
+                    <Icon id="expand" />
+                  </button>
+                </div>
               </div>
               <div className="cam-section-content cam-section-content--stack">
                 <div className="cam-section-body">

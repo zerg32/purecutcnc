@@ -26,14 +26,65 @@ import {
 import { roundedRectProfile, chamferedRectProfile } from '../../store/helpers/cannedRectProfiles'
 import type { Point, Segment, SketchFeature, SketchProfile } from '../../types/project'
 import { formatLength } from '../../utils/units'
+import { buildGearProfile, type GearCreationParams } from '../../sketch/gearProfile'
 import {
   drawLineLengthMeasurement,
 } from './measurements'
 import { appendSplineDraftSegment } from './draftGeometry'
 import { pointsEqual } from './hitTest'
-import { traceProfilePath } from './profilePrimitives'
+import { appendProfilePath, traceProfilePath } from './profilePrimitives'
 import { worldToCanvas } from './viewTransform'
 import type { ViewTransform } from './viewTransform'
+
+export function featureUsesSketchFill(operation: SketchFeature['operation']): boolean {
+  return operation !== 'line' && operation !== 'construction'
+}
+
+export function drawLineFeatureBatch(
+  ctx: CanvasRenderingContext2D,
+  features: SketchFeature[],
+  vt: ViewTransform,
+): void {
+  if (features.length === 0) return
+  const batchSize = 128
+  ctx.strokeStyle = '#4e8dc1'
+  ctx.lineWidth = 1.8
+  ctx.setLineDash([])
+  for (let start = 0; start < features.length; start += batchSize) {
+    ctx.beginPath()
+    const end = Math.min(start + batchSize, features.length)
+    for (let index = start; index < end; index += 1) {
+      for (const profile of getFeatureGeometryProfiles(features[index])) {
+        appendProfilePath(ctx, profile, vt)
+      }
+    }
+    ctx.stroke()
+  }
+}
+
+export function drawFeatureInfo(
+  ctx: CanvasRenderingContext2D,
+  feature: SketchFeature,
+  vt: ViewTransform,
+  units: 'mm' | 'inch',
+): void {
+  const zTop = typeof feature.z_top === 'number' ? feature.z_top : 5
+  const zBottom = typeof feature.z_bottom === 'number' ? feature.z_bottom : 0
+  const bounds = getFeatureGeometryBounds(feature)
+  const center = worldToCanvas(
+    { x: bounds.minX + (bounds.maxX - bounds.minX) / 2, y: bounds.minY + (bounds.maxY - bounds.minY) / 2 },
+    vt,
+  )
+
+  ctx.fillStyle = 'rgba(228, 236, 244, 0.9)'
+  ctx.font = '11px "IBM Plex Mono", "SFMono-Regular", Consolas, monospace'
+  ctx.textAlign = 'center'
+  ctx.fillText(feature.name, center.cx, center.cy - 5)
+  if (feature.operation !== 'construction') {
+    ctx.fillStyle = 'rgba(171, 194, 213, 0.9)'
+    ctx.fillText(`z ${formatLength(zTop, units)} → ${formatLength(zBottom, units)}`, center.cx, center.cy + 10)
+  }
+}
 
 export function translateProfile(profile: SketchProfile, dx: number, dy: number): SketchProfile {
   return {
@@ -79,9 +130,13 @@ export function drawFeature(
   const zTop = typeof feature.z_top === 'number' ? feature.z_top : 5
   const zBottom = typeof feature.z_bottom === 'number' ? feature.z_bottom : 0
   const depthWeight = Math.min(Math.max(Math.abs(zTop - zBottom) / 30, 0), 1)
+  // Construction geometry reads as reference marks: muted grey-blue, dashed,
+  // thinner, never filled — visibly "not material" next to regular features.
+  const construction = feature.operation === 'construction'
 
   let fill = 'rgba(78, 126, 170, 0.42)'
   let stroke = '#4e8dc1'
+  let lineDash: number[] = []
 
   if (feature.operation === 'add') {
     fill = 'rgba(92, 165, 115, 0.43)'
@@ -94,8 +149,14 @@ export function drawFeature(
   }
 
   if (feature.operation === 'region') {
-    fill = 'rgba(153, 102, 204, 0.30)'
-    stroke = '#9966cc'
+    const excludeRegion = feature.regionMaskMode === 'exclude'
+    fill = excludeRegion ? 'rgba(153, 102, 204, 0.10)' : 'rgba(153, 102, 204, 0.30)'
+    stroke = excludeRegion ? '#b58adf' : '#9966cc'
+    lineDash = excludeRegion ? [7, 5] : []
+  }
+
+  if (construction) {
+    stroke = '#8a9aab'
   }
 
   if (groupSelected) {
@@ -127,29 +188,22 @@ export function drawFeature(
   const profiles = getFeatureGeometryProfiles(feature)
   for (const profile of profiles) {
     traceProfilePath(ctx, profile, vt)
-    if (profile.closed) {
+    if (profile.closed && featureUsesSketchFill(feature.operation)) {
       ctx.fillStyle = fill
       ctx.fill()
     }
 
     ctx.strokeStyle = stroke
-    ctx.lineWidth = editing || selected ? 2.5 : 1.8
+    ctx.lineWidth = construction
+      ? editing || selected ? 1.8 : 1.2
+      : editing || selected ? 2.5 : 1.8
+    ctx.setLineDash(construction ? [6, 4] : lineDash)
     ctx.stroke()
+    ctx.setLineDash([])
   }
 
   if (showInfo) {
-    const bounds = getFeatureGeometryBounds(feature)
-    const center = worldToCanvas(
-      { x: bounds.minX + (bounds.maxX - bounds.minX) / 2, y: bounds.minY + (bounds.maxY - bounds.minY) / 2 },
-      vt,
-    )
-
-    ctx.fillStyle = 'rgba(228, 236, 244, 0.9)'
-    ctx.font = '11px "IBM Plex Mono", "SFMono-Regular", Consolas, monospace'
-    ctx.textAlign = 'center'
-    ctx.fillText(feature.name, center.cx, center.cy - 5)
-    ctx.fillStyle = 'rgba(171, 194, 213, 0.9)'
-    ctx.fillText(`z ${formatLength(zTop, units)} → ${formatLength(zBottom, units)}`, center.cx, center.cy + 10)
+    drawFeatureInfo(ctx, feature, vt, units)
   }
 }
 
@@ -801,6 +855,29 @@ export function drawPendingNgon(
   const firstVertexAngle = Math.atan2(cursorPoint.y - anchor.y, cursorPoint.x - anchor.x)
   const profile = ngonProfile(anchor.x, anchor.y, sides, circumradius, firstVertexAngle)
   drawPreviewProfile(ctx, profile, vt, `R = ${formatLength(circumradius, units)}`)
+  drawLineLengthMeasurement(ctx, anchor, cursorPoint, vt, units)
+}
+
+export function drawPendingGear(
+  ctx: CanvasRenderingContext2D,
+  anchor: Point,
+  cursorPoint: Point,
+  params: GearCreationParams,
+  vt: ViewTransform,
+  units: 'mm' | 'inch',
+): void {
+  const outsideRadius = Math.hypot(cursorPoint.x - anchor.x, cursorPoint.y - anchor.y)
+  if (outsideRadius < 1e-10) return
+  try {
+    const profile = buildGearProfile({
+      ...params,
+      center: anchor,
+      outsideRadius,
+    })
+    drawPreviewProfile(ctx, profile, vt, `OD R = ${formatLength(outsideRadius, units)}`)
+  } catch {
+    // Invalid parameter combinations are surfaced in the workflow panel.
+  }
   drawLineLengthMeasurement(ctx, anchor, cursorPoint, vt, units)
 }
 

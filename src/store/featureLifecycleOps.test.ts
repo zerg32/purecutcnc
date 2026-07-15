@@ -32,6 +32,7 @@ import {
   type Stock,
 } from '../types/project'
 import { useProjectStore } from './projectStore'
+import { resolveFeatureInstance, resolvedProjectFeatures } from './helpers/resolveFeatures'
 import type { ProjectStore } from './types'
 import { getProfileBounds } from '../types/project'
 
@@ -73,7 +74,7 @@ function getProject(): Project {
 }
 
 function getFeatures(): SketchFeature[] {
-  return getProject().features
+  return resolvedProjectFeatures(getProject())
 }
 
 // ── Test runner ──────────────────────────────────────────────────────
@@ -145,6 +146,86 @@ test('setStock is undoable', () => {
   assert(approx(getProject().stock.thickness, originalThickness), 'undo should restore original thickness')
 })
 
+test('setRectStockDimension resizes width while holding the requested side', () => {
+  resetStore()
+  const store = useProjectStore.getState()
+
+  store.setStock({
+    ...getProject().stock,
+    profile: rectProfile(10, 20, 100, 50),
+    sourceFeatureId: null,
+    sourceFeature: null,
+  })
+
+  store.setRectStockDimension('width', 125, 'left')
+  let bounds = getProfileBounds(getProject().stock.profile)
+  assert(approx(bounds.minX, 10), `left-held resize should keep minX 10, got ${bounds.minX}`)
+  assert(approx(bounds.maxX, 135), `left-held resize should set maxX 135, got ${bounds.maxX}`)
+
+  store.setRectStockDimension('width', 80, 'right')
+  bounds = getProfileBounds(getProject().stock.profile)
+  assert(approx(bounds.maxX, 135), `right-held resize should keep maxX 135, got ${bounds.maxX}`)
+  assert(approx(bounds.minX, 55), `right-held resize should set minX 55, got ${bounds.minX}`)
+})
+
+test('setRectStockDimension resizes height while holding the requested side', () => {
+  resetStore()
+  const store = useProjectStore.getState()
+
+  store.setStock({
+    ...getProject().stock,
+    profile: rectProfile(10, 20, 100, 50),
+    sourceFeatureId: null,
+    sourceFeature: null,
+  })
+
+  store.setRectStockDimension('height', 90, 'top')
+  let bounds = getProfileBounds(getProject().stock.profile)
+  assert(approx(bounds.minY, 20), `top-held resize should keep minY 20, got ${bounds.minY}`)
+  assert(approx(bounds.maxY, 110), `top-held resize should set maxY 110, got ${bounds.maxY}`)
+
+  store.setRectStockDimension('height', 40, 'bottom')
+  bounds = getProfileBounds(getProject().stock.profile)
+  assert(approx(bounds.maxY, 110), `bottom-held resize should keep maxY 110, got ${bounds.maxY}`)
+  assert(approx(bounds.minY, 70), `bottom-held resize should set minY 70, got ${bounds.minY}`)
+})
+
+test('setRectStockDimension rejects source-derived stock and non-positive values', () => {
+  resetStore()
+  const store = useProjectStore.getState()
+
+  const originalProfile = getProject().stock.profile
+  useProjectStore.setState({
+    project: {
+      ...getProject(),
+      stock: {
+        ...getProject().stock,
+        profile: rectProfile(0, 0, 100, 50),
+        sourceFeatureId: 'source-1',
+      },
+    },
+  } as unknown as Partial<ProjectStore>)
+  store.setRectStockDimension('width', 200, 'left')
+  let bounds = getProfileBounds(getProject().stock.profile)
+  assert(approx(bounds.maxX - bounds.minX, 100), 'source-derived stock should not resize')
+
+  useProjectStore.setState({
+    project: {
+      ...getProject(),
+      stock: {
+        ...getProject().stock,
+        profile: originalProfile,
+        sourceFeatureId: null,
+        sourceFeature: null,
+      },
+    },
+  } as unknown as Partial<ProjectStore>)
+  const before = getProfileBounds(getProject().stock.profile)
+  store.setRectStockDimension('height', 0, 'top')
+  bounds = getProfileBounds(getProject().stock.profile)
+  assert(approx(bounds.maxY - bounds.minY, before.maxY - before.minY), 'zero height should not resize stock')
+})
+
 test('setStockSourceFeature: sets feature as stock source, removes from tree', () => {
   resetStore()
   const store = useProjectStore.getState()
@@ -164,6 +245,41 @@ test('setStockSourceFeature: sets feature as stock source, removes from tree', (
   assert(afterStock.sourceFeature !== null, 'sourceFeature should be stored')
   assert(afterStock.sourceFeature !== undefined, 'sourceFeature should not be undefined')
   assert(getFeatures().length === 0, 'feature should be removed from feature list when set as stock source')
+})
+
+test('linked definition edits refresh feature-based stock geometry', () => {
+  resetStore()
+  const store = useProjectStore.getState()
+  store.addRectFeature('StockSource', 0, 0, 250, 150, 30)
+
+  const project = getProject()
+  const source = project.features[0]
+  const sibling = {
+    ...source,
+    id: 'linked-stock-editor',
+    name: 'Linked stock editor',
+  }
+  useProjectStore.setState({
+    project: {
+      ...project,
+      features: [...project.features, sibling],
+      featureTree: [...project.featureTree, { type: 'feature' as const, featureId: sibling.id }],
+    },
+  } as unknown as Partial<ProjectStore>)
+
+  store.setStockSourceFeature(source.id)
+  const resolvedSibling = resolveFeatureInstance(getProject(), sibling.id)
+  assert(resolvedSibling !== null, 'linked sibling should resolve')
+  store.updateFeature(sibling.id, {
+    sketch: {
+      ...resolvedSibling.sketch,
+      profile: rectProfile(0, 0, 320, 180),
+    },
+  })
+
+  const bounds = getProfileBounds(getProject().stock.profile)
+  assert(approx(bounds.maxX - bounds.minX, 320), 'stock width should follow the shared definition edit')
+  assert(approx(bounds.maxY - bounds.minY, 180), 'stock height should follow the shared definition edit')
 })
 
 test('setStockSourceFeature(null): restores feature and resets to rect stock', () => {

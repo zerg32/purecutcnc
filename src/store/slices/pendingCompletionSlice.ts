@@ -15,8 +15,7 @@
  */
 
 import type { StateCreator } from 'zustand'
-import { IDENTITY_MATRIX } from '../../types/project'
-import type { Clamp, FeatureDefinition, FeatureFolder, Matrix2D, Point, Project, SketchFeature, Tab } from '../../types/project'
+import type { Clamp, FeatureDefinition, FeatureFolder, FeatureInstance, Point, Project, SketchFeature, Tab } from '../../types/project'
 import {
   cloneProject,
   projectsEqual,
@@ -28,7 +27,7 @@ import {
   insertDerivedFeatureTreeEntries,
 } from '../helpers/derivedFeatures'
 import type { DerivedFeatureGroup } from '../helpers/derivedFeatures'
-import { gcOrphanedDefinitions } from '../helpers/featureDefinitions'
+import { createFeatureInstance, gcOrphanedDefinitions } from '../helpers/featureDefinitions'
 import { nextUniqueGeneratedId } from '../helpers/ids'
 import type { ProjectStore } from '../types'
 import { transformProfile, translateClamp, translateTab } from '../helpers/transform'
@@ -40,8 +39,23 @@ import {
   rotateBackdropFromReference,
   rotateFeatureFromReference,
 } from '../helpers/referenceTransforms'
-import { buildCopiedClamps, buildCopiedFeatures, buildCopiedTabs, buildMirroredCopies, buildRotatedCopies, extractClonedDefinitions } from '../helpers/copyFeatures'
+import {
+  buildCopiedClamps,
+  buildCopiedFeatures,
+  buildCopiedTabs,
+  buildMirroredCopies,
+  buildRotatedCopies,
+  extractClonedDefinitions,
+  type ReferencedSketchFeature,
+} from '../helpers/copyFeatures'
 import { uniqueFolderName } from '../helpers/naming'
+import {
+  commitResolvedInstances,
+  resolveFeatureInstance,
+  resolvedProjectFeatures,
+  restoreResolvedFeatureMetadata,
+  type ResolvedSketchFeature,
+} from '../helpers/resolveFeatures'
 
 export interface PendingCompletionSliceDependencies {
   clearStaleConstraints: (features: SketchFeature[], movedIds: Set<string>) => SketchFeature[]
@@ -66,8 +80,16 @@ export type PendingCompletionSlice = Pick<
   | 'completePendingShapeAction'
 >
 
-function featureById(project: Project, id: string): SketchFeature | null {
-  return project.features.find((feature) => feature.id === id) ?? null
+function featureById(project: Project, id: string): ResolvedSketchFeature | null {
+  return resolveFeatureInstance(project, id)
+}
+
+function instanceFromReferencedDraft(feature: ReferencedSketchFeature): FeatureInstance {
+  return createFeatureInstance(
+    feature,
+    feature.definitionId,
+    feature.transform,
+  )
 }
 
 export function createPendingCompletionSlice(
@@ -126,21 +148,18 @@ export function createPendingCompletionSlice(
         if (entityType === 'feature') {
           const sourceFeatures = entityIds
             .map((featureId) => featureById(s.project, featureId))
-            .filter((feature): feature is SketchFeature => feature !== null)
+            .filter((feature): feature is ResolvedSketchFeature => feature !== null)
           if (sourceFeatures.length !== entityIds.length) {
             return { pendingMove: null }
           }
 
-          const effectiveCopyMode =
-            mode === 'copy'
-              ? s.pendingMove?.copyMode ?? s.project.meta.copyMode
-              : undefined
+          const effectiveCopyMode = s.pendingMove.copyMode ?? s.project.meta.copyMode
 
           const createdFeatures =
             mode === 'copy'
               ? buildCopiedFeatures(
                   sourceFeatures,
-                  s.project.features,
+                  resolvedProjectFeatures(s.project),
                   dx,
                   dy,
                   normalizedCopyCount,
@@ -154,15 +173,17 @@ export function createPendingCompletionSlice(
           // Strip the _clonedDefinition temporary key from created features.
           const cleanedCreatedFeatures = mode === 'copy'
             ? createdFeatures.map((f) => {
-                const { _clonedDefinition, ...rest } = f as SketchFeature & { _clonedDefinition?: FeatureDefinition }
-                return rest as SketchFeature
+                const { _clonedDefinition, ...rest } = f
+                return rest
               })
             : []
 
-          // Detect group copy: all source features share the same folderId
-          // and that folder has grouped === true. If so, create a new
-          // grouped folder for the copies instead of appending root entries.
-          let finalCreatedFeatures: SketchFeature[] = cleanedCreatedFeatures
+          // Detect group copy: the sources are the ENTIRE membership of one
+          // grouped folder. Only then do the copies get their own new grouped
+          // folder. Copying a subset (e.g. a single member) keeps the copies
+          // in the original's folder instead — buildCopiedFeatures already
+          // preserves each source's folderId.
+          let finalCreatedFeatures: ReferencedSketchFeature[] = cleanedCreatedFeatures
           let groupCopyFolder: FeatureFolder | null = null
 
           if (mode === 'copy' && cleanedCreatedFeatures.length > 0) {
@@ -174,7 +195,11 @@ export function createPendingCompletionSlice(
               const sourceFolder = s.project.featureFolders.find(
                 (f) => f.id === firstFolderId,
               )
-              if (sourceFolder?.grouped === true) {
+              const sourceIdSet = new Set(sourceFeatures.map((f) => f.id))
+              const copiesWholeGroup = s.project.features
+                .filter((f) => f.folderId === firstFolderId)
+                .every((f) => sourceIdSet.has(f.id))
+              if (sourceFolder?.grouped === true && copiesWholeGroup) {
                 const newFolderId = nextUniqueGeneratedId(s.project, 'fd')
                 const newFolderName = uniqueFolderName(
                   `${sourceFolder.name} Copy`,
@@ -196,26 +221,18 @@ export function createPendingCompletionSlice(
           }
 
           const isGroupCopy = groupCopyFolder !== null
+          const createdInstances = finalCreatedFeatures.map(instanceFromReferencedDraft)
 
           const translatedFeatures =
             mode === 'copy'
-              ? [...s.project.features, ...finalCreatedFeatures]
-              : s.project.features.map((feature) => {
+              ? []
+              : resolvedProjectFeatures(s.project).map((feature) => {
                   if (!entityIds.includes(feature.id) || feature.locked) {
                     return feature
                   }
-                  const currentTransform = (feature as SketchFeature & { transform?: Matrix2D }).transform ?? IDENTITY_MATRIX
 
                   return {
                     ...feature,
-                    stl: feature.stl?.silhouettePaths
-                      ? {
-                          ...feature.stl,
-                          silhouettePaths: feature.stl.silhouettePaths.map((path) =>
-                            path.map((point) => ({ x: point.x + dx, y: point.y + dy })),
-                          ),
-                        }
-                      : feature.stl,
                     sketch: {
                       ...feature.sketch,
                       origin: ['text', 'stl'].includes(feature.kind)
@@ -223,23 +240,28 @@ export function createPendingCompletionSlice(
                         : feature.sketch.origin,
                       profile: transformProfile(feature.sketch.profile, (p) => ({ x: p.x + dx, y: p.y + dy })),
                     },
-                    transform: multiplyMatrix(moveDelta(dx, dy), currentTransform),
-                  } as SketchFeature & { transform: Matrix2D }
+                    transform: multiplyMatrix(moveDelta(dx, dy), feature.transform),
+                  }
                 })
           const resolvedFeatures =
             mode === 'copy'
-              ? deps.clearStaleConstraints(translatedFeatures, new Set(finalCreatedFeatures.map((f) => f.id)))
-              : deps.validateAllConstraints(deps.propagateConstraintsOnTranslate(
+              ? []
+              : restoreResolvedFeatureMetadata(
                   translatedFeatures,
-                  new Map(entityIds.filter((id) => !s.project.features.find((f) => f.id === id)?.locked).map((id) => [id, { dx, dy }])),
-                ))
+                  deps.validateAllConstraints(deps.propagateConstraintsOnTranslate(
+                    translatedFeatures,
+                    new Map(entityIds.filter((id) => !s.project.features.find((f) => f.id === id)?.locked).map((id) => [id, { dx, dy }])),
+                  )),
+                )
           const nextFeatureDefinitions = {
             ...s.project.featureDefinitions,
             ...clonedDefs,
           }
           const nextProject = {
             ...s.project,
-            features: resolvedFeatures,
+            features: mode === 'copy'
+              ? [...s.project.features, ...createdInstances]
+              : commitResolvedInstances(s.project, resolvedFeatures),
             featureDefinitions: nextFeatureDefinitions,
             featureFolders:
               isGroupCopy
@@ -254,7 +276,12 @@ export function createPendingCompletionSlice(
                 : mode === 'copy'
                   ? [
                       ...s.project.featureTree,
-                      ...finalCreatedFeatures.map((feature) => ({ type: 'feature' as const, featureId: feature.id })),
+                      // Foldered copies get no root entry — folder children
+                      // render from the features array, and a stray root
+                      // entry would double-list them.
+                      ...createdInstances
+                        .filter((feature) => feature.folderId === null)
+                        .map((feature) => ({ type: 'feature' as const, featureId: feature.id })),
                     ]
                   : s.project.featureTree,
             meta: { ...s.project.meta, modified: new Date().toISOString() },
@@ -436,7 +463,7 @@ export function createPendingCompletionSlice(
 
         const sourceFeatures = pendingTransform.entityIds
           .map((featureId) => featureById(s.project, featureId))
-          .filter((feature): feature is SketchFeature => feature !== null)
+          .filter((feature): feature is ResolvedSketchFeature => feature !== null)
         if (sourceFeatures.length !== pendingTransform.entityIds.length) {
           return { pendingTransform: null }
         }
@@ -460,7 +487,7 @@ export function createPendingCompletionSlice(
           const normalizedCopyCount = Math.max(1, Math.floor(copyCount))
           const createdFeatures = buildRotatedCopies(
             sourceFeatures,
-            s.project.features,
+            resolvedProjectFeatures(s.project),
             pendingTransform.referenceStart,
             angle,
             normalizedCopyCount,
@@ -468,12 +495,17 @@ export function createPendingCompletionSlice(
           if (createdFeatures.length === 0) {
             return { pendingTransform: null }
           }
+          const createdInstances = createdFeatures.map(instanceFromReferencedDraft)
           const nextProject = {
             ...s.project,
-            features: [...s.project.features, ...createdFeatures],
+            features: [...s.project.features, ...createdInstances],
             featureTree: [
               ...s.project.featureTree,
-              ...createdFeatures.map((feature) => ({ type: 'feature' as const, featureId: feature.id })),
+              // Copies keep their source's folderId; only root copies get a
+              // tree entry (folder children render from the features array).
+              ...createdInstances
+                .filter((feature) => feature.folderId === null)
+                .map((feature) => ({ type: 'feature' as const, featureId: feature.id })),
             ],
             meta: { ...s.project.meta, modified: new Date().toISOString() },
           }
@@ -500,19 +532,24 @@ export function createPendingCompletionSlice(
         if (pendingTransform.mode === 'mirror' && pendingTransform.keepOriginals) {
           const createdFeatures = buildMirroredCopies(
             sourceFeatures,
-            s.project.features,
+            resolvedProjectFeatures(s.project),
             pendingTransform.referenceStart,
             pendingTransform.referenceEnd,
           )
           if (createdFeatures.length === 0) {
             return { pendingTransform: null }
           }
+          const createdInstances = createdFeatures.map(instanceFromReferencedDraft)
           const nextProject = {
             ...s.project,
-            features: [...s.project.features, ...createdFeatures],
+            features: [...s.project.features, ...createdInstances],
             featureTree: [
               ...s.project.featureTree,
-              ...createdFeatures.map((feature) => ({ type: 'feature' as const, featureId: feature.id })),
+              // Copies keep their source's folderId; only root copies get a
+              // tree entry (folder children render from the features array).
+              ...createdInstances
+                .filter((feature) => feature.folderId === null)
+                .map((feature) => ({ type: 'feature' as const, featureId: feature.id })),
             ],
             meta: { ...s.project.meta, modified: new Date().toISOString() },
           }
@@ -550,7 +587,12 @@ export function createPendingCompletionSlice(
         }
 
         const movedTransformedIds = new Set(transformedFeatures.keys())
-        const nextFeatures = s.project.features.map((feature) => transformedFeatures.get(feature.id) ?? feature)
+        const sourceResolvedFeatures = resolvedProjectFeatures(s.project)
+        const nextFeatures = sourceResolvedFeatures.map((feature) => {
+          const transformed = transformedFeatures.get(feature.id)
+          if (!transformed) return feature
+          return { ...feature, ...transformed }
+        })
         let resolvedFeatures
         if (pendingTransform.mode === 'rotate') {
           const startVector = {
@@ -566,13 +608,19 @@ export function createPendingCompletionSlice(
           const angle = Math.atan2(cross, dot)
           const pivot = pendingTransform.referenceStart
           const movedRotations = new Map([...movedTransformedIds].map(id => [id, { pivot, angle }]))
-          resolvedFeatures = deps.validateAllConstraints(deps.propagateConstraintsOnRotate(nextFeatures, movedRotations))
+          resolvedFeatures = restoreResolvedFeatureMetadata(
+            nextFeatures,
+            deps.validateAllConstraints(deps.propagateConstraintsOnRotate(nextFeatures, movedRotations)),
+          )
         } else {
-          resolvedFeatures = deps.validateAllConstraints(deps.clearStaleConstraints(nextFeatures, movedTransformedIds))
+          resolvedFeatures = restoreResolvedFeatureMetadata(
+            nextFeatures,
+            deps.validateAllConstraints(deps.clearStaleConstraints(nextFeatures, movedTransformedIds)),
+          )
         }
         const nextProject = {
           ...s.project,
-          features: resolvedFeatures,
+          features: commitResolvedInstances(s.project, resolvedFeatures),
           meta: { ...s.project.meta, modified: new Date().toISOString() },
         }
 
@@ -599,6 +647,13 @@ export function createPendingCompletionSlice(
 
       const offsetResult = deps.previewOffsetFeatures(state.project, state.pendingOffset.entityIds, distance)
       const createdFeatures = offsetResult.features
+      const createdInstances = createdFeatures.map((feature, index) => {
+        const definition = offsetResult.definitions[index]
+        if (!definition) {
+          throw new Error(`Missing offset definition for feature ${feature.id}`)
+        }
+        return createFeatureInstance(feature, definition.id)
+      })
       if (createdFeatures.length === 0) {
         set({ pendingOffset: null })
         return []
@@ -611,7 +666,7 @@ export function createPendingCompletionSlice(
         }
         const nextProject = syncFeatureTreeProject({
           ...s.project,
-          features: [...s.project.features, ...createdFeatures],
+          features: [...s.project.features, ...createdInstances],
           featureDefinitions: nextDefinitions,
           meta: { ...s.project.meta, modified: new Date().toISOString() },
         })
@@ -663,10 +718,10 @@ export function createPendingCompletionSlice(
 
       const cutters = pendingShapeAction.cutterIds
         .map((cId) => featureById(state.project, cId))
-        .filter((feature): feature is SketchFeature => feature !== null)
+        .filter((feature): feature is ResolvedSketchFeature => feature !== null)
       const targets = pendingShapeAction.targetIds
         .map((featureId) => featureById(state.project, featureId))
-        .filter((feature): feature is SketchFeature => feature !== null)
+        .filter((feature): feature is ResolvedSketchFeature => feature !== null)
       if (cutters.length !== pendingShapeAction.cutterIds.length || targets.length !== pendingShapeAction.targetIds.length) {
         return []
       }
@@ -679,6 +734,18 @@ export function createPendingCompletionSlice(
       )
       const createdGroups: DerivedFeatureGroup[] = cutResult.groups
       const createdFeatures = createdGroups.flatMap((group) => group.features)
+      let definitionIndex = 0
+      const createdInstanceGroups: Array<DerivedFeatureGroup<FeatureInstance>> = createdGroups.map((group) => ({
+        sourceId: group.sourceId,
+        features: group.features.map((feature) => {
+          const definition = cutResult.definitions[definitionIndex]
+          definitionIndex += 1
+          if (!definition) {
+            throw new Error(`Missing cut definition for feature ${feature.id}`)
+          }
+          return createFeatureInstance(feature, definition.id)
+        }),
+      }))
       if (createdFeatures.length === 0) {
         set({ pendingShapeAction: null })
         return []
@@ -690,15 +757,15 @@ export function createPendingCompletionSlice(
             ? []
             : pendingShapeAction.targetIds,
         )
-        const nextFeatures = insertDerivedFeaturesAfterSources(s.project.features, createdGroups, idsToReplace)
-        const nextFeatureTree = insertDerivedFeatureTreeEntries(s.project.featureTree, s.project.features, createdGroups, idsToReplace)
+        const nextFeatures = insertDerivedFeaturesAfterSources(s.project.features, createdInstanceGroups, idsToReplace)
+        const nextFeatureTree = insertDerivedFeatureTreeEntries(s.project.featureTree, s.project.features, createdInstanceGroups, idsToReplace)
         const nextDefinitions = { ...s.project.featureDefinitions }
         for (const definition of cutResult.definitions) {
           nextDefinitions[definition.id] = definition
         }
         const finalDefinitions = pendingShapeAction.keepOriginals
           ? nextDefinitions
-          : gcOrphanedDefinitions(nextFeatures, nextDefinitions).definitions
+          : gcOrphanedDefinitions(nextFeatures, nextDefinitions, s.project.stock.sourceFeature).definitions
         const nextProject = syncFeatureTreeProject({
           ...s.project,
           features: nextFeatures,

@@ -26,10 +26,13 @@ import type {
   SketchFeature,
   Tool,
 } from '../../types/project'
+import { isMachinable } from '../helpers/featureRoles'
 import { nextUniqueGeneratedId } from '../helpers/ids'
 import { cloneProject, normalizeFeatureZRange, projectsEqual, syncFeatureTreeProject } from '../helpers/normalize'
 import { uniqueFolderName } from '../helpers/naming'
 import { defaultOperationForTarget, defaultOperationName, isOperationTargetValid, toolMatchesTemplate } from '../helpers/operationDefaults'
+import { createDefinitionForFeature, createFeatureInstance } from '../helpers/featureDefinitions'
+import { resolveFeatureInstance } from '../helpers/resolveFeatures'
 import type { ProjectStore } from '../types'
 
 export type OperationsSlice = Pick<
@@ -175,10 +178,10 @@ export function createOperationsSlice(
 
         let nextProjectLike = state.project
         const targetFeatures = operation.target.featureIds
-          .map((featureId) => state.project.features.find((item) => item.id === featureId) ?? null)
-          .filter((feature): feature is SketchFeature => feature !== null)
+          .map((featureId) => resolveFeatureInstance(state.project, featureId))
+          .filter((feature) => feature !== null)
         const machiningTargetIds = targetFeatures
-          .filter((feature) => feature.operation !== 'region')
+          .filter(isMachinable)
           .map((feature) => feature.id)
         const restFolderId = nextUniqueGeneratedId(nextProjectLike, 'fd')
         const restFolder: FeatureFolder = {
@@ -209,16 +212,20 @@ export function createOperationsSlice(
               constraints: [],
             },
             operation: 'region',
+            regionMaskMode: draft.regionMaskMode ?? 'include',
             z_top: state.project.stock.thickness,
             z_bottom: 0,
             visible: true,
             locked: false,
           })
-          nextProjectLike = {
-            ...nextProjectLike,
-            features: [...nextProjectLike.features, feature],
-          }
           return feature
+        })
+        const createdEntries = createdFeatures.map((feature) => {
+          const created = createDefinitionForFeature(nextProjectLike, feature)
+          return {
+            definition: created.definition,
+            instance: createFeatureInstance(feature, created.definitionId),
+          }
         })
         const createdIds = createdFeatures.map((feature) => feature.id)
         const restTarget: OperationTarget = {
@@ -239,7 +246,11 @@ export function createOperationsSlice(
           const nextProject = syncFeatureTreeProject({
             ...s.project,
             featureFolders: [...s.project.featureFolders, restFolder],
-            features: [...s.project.features, ...createdFeatures],
+            features: [...s.project.features, ...createdEntries.map((entry) => entry.instance)],
+            featureDefinitions: {
+              ...s.project.featureDefinitions,
+              ...Object.fromEntries(createdEntries.map((entry) => [entry.definition.id, entry.definition])),
+            },
             operations: [...s.project.operations, restOperation],
             featureTree: [...s.project.featureTree, { type: 'folder', folderId: restFolder.id }],
             meta: { ...s.project.meta, modified: new Date().toISOString() },
@@ -293,21 +304,25 @@ export function createOperationsSlice(
             constraints: [],
           },
           operation: 'region',
+          regionMaskMode: draft.regionMaskMode ?? 'include',
           z_top: state.project.stock.thickness,
           z_bottom: 0,
           visible: true,
           locked: false,
         })
-        nextProjectLike = {
-          ...nextProjectLike,
-          features: [...nextProjectLike.features, feature],
-        }
         return feature
+      })
+      const createdEntries = createdFeatures.map((feature) => {
+        const created = createDefinitionForFeature(nextProjectLike, feature)
+        return {
+          definition: created.definition,
+          instance: createFeatureInstance(feature, created.definitionId),
+        }
       })
       const createdIds = createdFeatures.map((feature) => feature.id)
       const machiningTargetIds = operation.target.featureIds.filter((featureId) => {
-        const feature = state.project.features.find((item) => item.id === featureId)
-        return feature?.operation !== 'region'
+        const feature = resolveFeatureInstance(state.project, featureId)
+        return feature !== null && isMachinable(feature)
       })
       const restTarget: OperationTarget = {
         source: 'features',
@@ -328,7 +343,11 @@ export function createOperationsSlice(
         const nextProject = syncFeatureTreeProject({
           ...s.project,
           featureFolders: [...s.project.featureFolders, restFolder],
-          features: [...s.project.features, ...createdFeatures],
+          features: [...s.project.features, ...createdEntries.map((entry) => entry.instance)],
+          featureDefinitions: {
+            ...s.project.featureDefinitions,
+            ...Object.fromEntries(createdEntries.map((entry) => [entry.definition.id, entry.definition])),
+          },
           operations: [...s.project.operations, restOperation],
           featureTree: [
             ...s.project.featureTree,

@@ -20,11 +20,12 @@ import {
   getStockBounds,
   rectProfile,
   stockFromFeature,
-  type SketchFeature,
+  type FeatureInstance,
 } from '../../types/project'
 import type { ProjectStore } from '../types'
 import { nextPlacementSession } from '../helpers/ids'
 import { cloneProject, projectsEqual, syncFeatureTreeProject } from '../helpers/normalize'
+import { resolveFeatureInstance } from '../helpers/resolveFeatures'
 
 export type WorkpieceSlice = Pick<
   ProjectStore,
@@ -32,6 +33,7 @@ export type WorkpieceSlice = Pick<
   | 'setStock'
   | 'setStockSourceFeature'
   | 'enterStockSketchEdit'
+  | 'setRectStockDimension'
   | 'setGrid'
   | 'setUnits'
   | 'setOrigin'
@@ -164,7 +166,7 @@ export function createWorkpieceSlice(
             ...s.project.stock,
             profile: rectProfile(stockBounds.minX, stockBounds.minY, rectW, rectH),
             sourceFeatureId: null as string | null | undefined,
-            sourceFeature: null as SketchFeature | null | undefined,
+            sourceFeature: null as FeatureInstance | null | undefined,
           }
 
           const nextProject = syncFeatureTreeProject({
@@ -191,8 +193,9 @@ export function createWorkpieceSlice(
         }
 
         // Set a feature as stock source
-        const feature = s.project.features.find((f) => f.id === featureId)
-        if (!feature) return {}
+        const featureInstance = s.project.features.find((f) => f.id === featureId)
+        const feature = resolveFeatureInstance(s.project, featureId)
+        if (!featureInstance || !feature) return {}
         if (!feature.sketch.profile.closed) return {} // Only closed profiles can be stock
 
         // If another feature is already the stock source, restore it first
@@ -217,7 +220,7 @@ export function createWorkpieceSlice(
           profile: newStock.profile,
           thickness: newStock.thickness,
           sourceFeatureId: feature.id,
-          sourceFeature: feature,
+          sourceFeature: featureInstance,
         }
 
         const nextProject = syncFeatureTreeProject({
@@ -289,6 +292,76 @@ export function createWorkpieceSlice(
         }
       }),
 
+    /**
+     * Resize rectangular stock by changing one dimension while holding the
+     * opposite side fixed. Only valid when the stock has no sourceFeatureId
+     * and its profile is a simple axis-aligned rectangle (4 line segments).
+     * Non-positive values are rejected.
+     */
+    setRectStockDimension: (axis, value, heldSide) =>
+      set((s) => {
+        // Only rectangular stock without a source feature
+        if (s.project.stock.sourceFeatureId) return {}
+
+        const segs = s.project.stock.profile.segments
+        if (segs.length !== 4 || !segs.every((seg) => seg.type === 'line')) return {}
+
+        if (value <= 0) return {}
+
+        const bounds = getStockBounds(s.project.stock)
+        const currentWidth = bounds.maxX - bounds.minX
+        const currentHeight = bounds.maxY - bounds.minY
+
+        let newMinX = bounds.minX
+        let newMinY = bounds.minY
+        let newW = currentWidth
+        let newH = currentHeight
+
+        if (axis === 'width') {
+          newW = value
+          if (heldSide === 'left') {
+            // Keep left (minX) fixed, adjust maxX
+          } else {
+            // Hold right: keep maxX fixed, adjust minX
+            newMinX = bounds.maxX - value
+          }
+        } else {
+          newH = value
+          if (heldSide === 'top') {
+            // Keep top (minY) fixed, adjust maxY
+          } else {
+            // Hold bottom: keep maxY fixed, adjust minY
+            newMinY = bounds.maxY - value
+          }
+        }
+
+        const nextStock = {
+          ...s.project.stock,
+          profile: rectProfile(newMinX, newMinY, newW, newH),
+        }
+
+        const nextProject = {
+          ...s.project,
+          stock: nextStock,
+          meta: { ...s.project.meta, modified: new Date().toISOString() },
+        }
+
+        if (projectsEqual(nextProject, s.project)) {
+          return {}
+        }
+        if (s.history.transactionStart) {
+          return { project: nextProject }
+        }
+        return {
+          project: nextProject,
+          history: {
+            past: [...s.history.past, cloneProject(s.project)].slice(-100),
+            future: [],
+            transactionStart: null,
+          },
+        }
+      }),
+
     setGrid: (grid) =>
       set((s) => {
         const nextProject = {
@@ -312,13 +385,15 @@ export function createWorkpieceSlice(
         }
       }),
 
-    setUnits: (units) =>
+    setUnits: (units, mode) =>
       set((s) => {
         if (s.project.meta.units === units) {
           return {}
         }
 
-        const convertedProject = convertProjectUnits(s.project, units)
+        const convertedProject = mode === 'convert'
+          ? convertProjectUnits(s.project, units)
+          : { ...s.project, meta: { ...s.project.meta, units } }
         const nextProject = {
           ...convertedProject,
           meta: { ...convertedProject.meta, modified: new Date().toISOString() },

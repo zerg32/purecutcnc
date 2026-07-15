@@ -21,11 +21,25 @@ import { validateMachineDefinition } from '../../engine/gcode/types'
 import type { MachineDefinition } from '../../engine/gcode/types'
 import { convertLength } from '../../utils/units'
 import { defaultTool, inferFeatureKind, newProject, profileVertices } from '../../types/project'
-import type { Clamp, Operation, Point, Project, SketchFeature, Tab, Tool } from '../../types/project'
+import type {
+  Clamp,
+  FeatureDefinition,
+  FeatureInstance,
+  FeatureOperation,
+  Operation,
+  Point,
+  Project,
+  RegionMaskMode,
+  SketchFeature,
+  Tab,
+  Tool,
+} from '../../types/project'
 import { normalizeTextFontId } from '../../text'
 import { idNumericSuffix } from './ids'
+import { isSolid } from './featureRoles'
 import { isImportedModelFeature } from './modelAssets'
 import { fallbackOperationTarget, defaultOperationForTarget, isOperationTargetValid } from './operationDefaults'
+import { resolveFeatureRow } from './resolveFeatures'
 
 export function normalizeAngleDegrees(angle: number): number {
   const normalized = angle % 360
@@ -65,6 +79,16 @@ export function inferProfileOrientationAngle(profile: SketchFeature['sketch']['p
   return normalizeAngleDegrees(xAxisAngle + 90)
 }
 
+export function normalizeRegionMaskMode(
+  operation: FeatureOperation,
+  mode?: RegionMaskMode,
+): RegionMaskMode | undefined {
+  if (operation !== 'region') {
+    return undefined
+  }
+  return mode === 'exclude' ? 'exclude' : 'include'
+}
+
 export function normalizeFeatureZRange(feature: SketchFeature): SketchFeature {
   const safeFeature = {
     ...feature,
@@ -87,6 +111,7 @@ export function normalizeFeatureZRange(feature: SketchFeature): SketchFeature {
     },
     kind: feature.kind ?? inferFeatureKind(feature.sketch.profile),
     folderId: feature.folderId ?? null,
+    regionMaskMode: normalizeRegionMaskMode(feature.operation, feature.regionMaskMode),
   }
   const { z_top, z_bottom } = safeFeature
   if (typeof z_top === 'number' && typeof z_bottom === 'number' && z_top < z_bottom) {
@@ -98,6 +123,13 @@ export function normalizeFeatureZRange(feature: SketchFeature): SketchFeature {
   }
 
   return safeFeature
+}
+
+export function normalizeFeatureDefinition(definition: FeatureDefinition): FeatureDefinition {
+  return {
+    ...definition,
+    regionMaskMode: normalizeRegionMaskMode(definition.operation, definition.regionMaskMode),
+  }
 }
 
 export function normalizeTool(tool: Tool, units: Project['meta']['units'], index: number): Tool {
@@ -202,13 +234,20 @@ export function dedupeProjectIds(project: Project): Project {
   }
 }
 
-export function normalizeOperation(operation: Operation, project: Project, index: number): Operation {
+export function normalizeOperation(rawOperation: Operation, project: Project, index: number): Operation {
+  // Migrate the retired recursive skeleton op to the medial-axis op (issue
+  // #279). Parameters carry over unchanged: `stepover` is the step size for
+  // both, and `maxCarveDepth` plus the V-bit tool mean the same thing.
+  const operation: Operation = (rawOperation.kind as string) === 'v_carve_recursive'
+    ? { ...rawOperation, kind: 'v_carve_medial' }
+    : rawOperation
   const fallbackTarget = fallbackOperationTarget(project, operation.kind)
   const defaults = defaultOperationForTarget(project, operation.kind, 'rough', fallbackTarget, index)
   const normalized = {
     ...defaults,
     ...operation,
     description: operation.description ?? '',
+    roundOutsideCorners: operation.roundOutsideCorners ?? false,
     machiningOrder: operation.machiningOrder ?? 'level_first',
     waterlineAdaptiveRefinement: operation.waterlineAdaptiveRefinement ?? true,
     waterlineMicroStepover: operation.waterlineMicroStepover ?? 0,
@@ -372,7 +411,7 @@ export function syncFeatureTreeProject(project: Project): Project {
     }
   }
 
-  const orderedFeatures: SketchFeature[] = []
+  const orderedFeatures: FeatureInstance[] = []
   const pushedFeatureIds = new Set<string>()
 
   for (const entry of normalizedTree) {
@@ -407,33 +446,23 @@ export function syncFeatureTreeProject(project: Project): Project {
   }
 }
 
-export function syncStockFromSourceFeature(project: Project, featureId: string): Project {
+export function syncFeatureBasedStock(project: Project): Project {
   const stock = project.stock
-  if (!stock.sourceFeature || stock.sourceFeatureId !== featureId) {
+  if (!stock.sourceFeature || !stock.sourceFeatureId) {
     return project
   }
 
-  const updatedFeature = project.features.find((f) => f.id === featureId)
-  if (updatedFeature) {
-    const syncedStock = {
-      ...stock,
-      sourceFeature: updatedFeature,
-      profile: updatedFeature.sketch.profile,
-      thickness: typeof updatedFeature.z_top === 'number' ? updatedFeature.z_top : stock.thickness,
-    }
-    return {
-      ...project,
-      stock: syncedStock,
-    }
-  }
-
-  const source = stock.sourceFeature
+  const sourceInstance = project.features.find((feature) => feature.id === stock.sourceFeatureId)
+    ?? stock.sourceFeature
+  const resolvedSource = resolveFeatureRow(project, sourceInstance)
+  if (!resolvedSource) return project
   return {
     ...project,
     stock: {
       ...stock,
-      profile: source.sketch.profile,
-      thickness: typeof source.z_top === 'number' ? source.z_top : stock.thickness,
+      sourceFeature: sourceInstance,
+      profile: resolvedSource.sketch.profile,
+      thickness: typeof resolvedSource.z_top === 'number' ? resolvedSource.z_top : stock.thickness,
     },
   }
 }
@@ -481,12 +510,58 @@ export function clearProjectMemoryCaches(): void {
   clearSTLTransformedGeometryCache()
 }
 
-export function projectsEqual(a: Project, b: Project): boolean {
+export function projectsEqual(a: unknown, b: unknown): boolean {
   return JSON.stringify(a) === JSON.stringify(b)
 }
 
 export function isFirstFeatureValid(features: SketchFeature[]): boolean {
-  const firstMachiningFeature = features.find((feature) => feature.operation !== 'region')
-  if (!firstMachiningFeature) return true
-  return firstMachiningFeature.operation === 'add' || isImportedModelFeature(firstMachiningFeature)
+  const firstSolidFeature = features.find(isSolid)
+  if (!firstSolidFeature) return true
+  return firstSolidFeature.operation === 'add' || isImportedModelFeature(firstSolidFeature)
+}
+
+/**
+ * Sanitize an operation-bearing feature patch against the base-solid rule:
+ * z edits are stripped for region/construction targets, and if the edited row
+ * would be the first solid feature after the patch (row order, skipping
+ * lines/regions/construction), a machinable operation other than 'add' is forced
+ * back to 'add'. Converting the row out of the model (line/region/construction) is
+ * allowed — `enforceFirstSolidAdd` then protects the successor.
+ */
+export function sanitizeOperationPatch(
+  features: SketchFeature[],
+  targetId: string,
+  patch: Partial<SketchFeature>,
+): { safePatch: Partial<SketchFeature>; safeOperation: FeatureOperation | undefined } {
+  const existing = features.find((feature) => feature.id === targetId) ?? null
+  const nextOperation = patch.operation ?? existing?.operation
+  const nextKind = patch.kind ?? existing?.kind
+  const nextIsImportedModel = nextKind === 'stl' && nextOperation === 'model'
+  const zSafePatch = nextOperation === 'region' || nextOperation === 'construction'
+    ? Object.fromEntries(Object.entries(patch).filter(([key]) => key !== 'z_top' && key !== 'z_bottom')) as Partial<SketchFeature>
+    : patch
+  const firstSolidAfter = features.find((feature) =>
+    isSolid({ operation: (feature.id === targetId ? nextOperation ?? feature.operation : feature.operation) }))
+  const isFirstSolidAfter = firstSolidAfter?.id === targetId
+  const safePatch: Partial<SketchFeature> =
+    isFirstSolidAfter && !nextIsImportedModel && zSafePatch.operation !== undefined && zSafePatch.operation !== 'add'
+      ? { ...zSafePatch, operation: 'add' }
+      : zSafePatch
+  return { safePatch, safeOperation: safePatch.operation ?? existing?.operation }
+}
+
+/**
+ * Post-edit cascade for the base-solid rule (mirrors reorderFeatures): if the
+ * first solid feature in row order is not 'add' and not an imported
+ * model, force it to 'add'. Keeps operation edits from exposing a subtract as
+ * the base solid, e.g. after converting the previous base to construction.
+ * Line features are skipped — they are path geometry and never contribute to
+ * the solid model.
+ */
+export function enforceFirstSolidAdd(features: SketchFeature[]): SketchFeature[] {
+  const first = features.find(isSolid)
+  if (!first || first.operation === 'add' || isImportedModelFeature(first)) {
+    return features
+  }
+  return features.map((feature) => (feature.id === first.id ? { ...feature, operation: 'add' } : feature))
 }

@@ -24,9 +24,15 @@
  */
 
 import { rectProfile } from '../../types/project'
-import { newProject, type FeatureDefinition, type Matrix2D, type Project, type SketchFeature } from '../../types/project'
+import { newProject, type Matrix2D, type Project, type SketchFeature } from '../../types/project'
 import { resolvedProjectFeatures } from '../../store/helpers/resolveFeatures'
-import { findHitFeatureId, featureFullyInsideRect } from './hitTest'
+import { projectWithFeatures } from '../../test/projectFixtures'
+import {
+  findHitFeatureId,
+  findHitFeatureIds,
+  featureFullyInsideRect,
+  resolveFeatureSelectionHit,
+} from './hitTest'
 import type { ViewTransform } from './viewTransform'
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -35,6 +41,7 @@ function assert(condition: unknown, message: string): asserts condition {
 
 // Simple view transform: scale=1, no offset → world coords = screen coords.
 const vt: ViewTransform = { scale: 1, offsetX: 0, offsetY: 0 }
+const preciseVt: ViewTransform = { scale: 10, offsetX: 0, offsetY: 0 }
 
 // ── Helpers ────────────────────────────────────────────────────────
 
@@ -66,34 +73,13 @@ function makeFeature(
 
 function makeProject(
   features: SketchFeature[],
-  defs?: Record<string, FeatureDefinition>,
   transforms?: Map<string, Matrix2D>,
 ): Project {
-  const project = newProject('hit-test')
-  const featureDefs: Record<string, FeatureDefinition> = defs ?? {}
-  if (!defs) {
-    for (const f of features) {
-      featureDefs[f.id] = {
-        id: f.id,
-        kind: f.kind,
-        profile: f.sketch.profile,
-        dimensions: f.sketch.dimensions.map((d) => ({ ...d })),
-        text: f.text ? { ...f.text } : null,
-        stl: f.stl ? { ...f.stl } : null,
-        operation: f.operation,
-      }
-    }
-  }
-
-  // Apply per-feature transforms if provided.
-  const featuresWithTransforms = features.map((f) => {
-    if (transforms?.has(f.id)) {
-      return { ...f, definitionId: f.id, transform: transforms.get(f.id)! }
-    }
-    return f
-  })
-
-  return { ...project, features: featuresWithTransforms, featureDefinitions: featureDefs }
+  return projectWithFeatures(newProject('hit-test'), features.map((feature) => ({
+    ...feature,
+    definitionId: feature.id,
+    transform: transforms?.get(feature.id),
+  })))
 }
 
 // ── Tests ──────────────────────────────────────────────────────────
@@ -127,20 +113,26 @@ function makeProject(
 
   // Transform: translate by (100, 50). World-space profile is at (100,50)-(110,56).
   const translateTransform: Matrix2D = { a: 1, b: 0, c: 0, d: 1, e: 100, f: 50 }
-  const project = makeProject([feature], undefined, new Map([['f0001', translateTransform]]))
+  const project = makeProject([feature], new Map([['f0001', translateTransform]]))
 
   // Verify the feature has definitionId + transform
-  const raw = project.features[0] as SketchFeature & { definitionId?: string; transform?: Matrix2D }
+  const raw = project.features[0]
   assert(raw.definitionId === 'f0001', 'feature should have definitionId')
   assert(raw.transform?.e === 100 && raw.transform?.f === 50, 'feature should have translate transform')
 
+  const resolvedFeatures = resolvedProjectFeatures(project)
+
   // Point at world position (105, 53) — inside the transformed profile.
-  const hitWorld = findHitFeatureId({ x: 105, y: 53 }, resolvedProjectFeatures(project), vt)
+  const hitWorld = findHitFeatureId({ x: 105, y: 53 }, resolvedFeatures, vt)
   assert(hitWorld === 'f0001', 'point inside transformed world profile should hit')
+  assert(
+    findHitFeatureIds({ x: 105, y: 53 }, resolvedFeatures, vt).join(',') === 'f0001',
+    'candidate hits should use the transformed world profile',
+  )
 
   // Point at definition-local position (5, 3) — should NOT hit because the
   // world-space profile is at (100,50)-(110,56), and (5,3) is outside it.
-  const hitLocal = findHitFeatureId({ x: 5, y: 3 }, resolvedProjectFeatures(project), vt)
+  const hitLocal = findHitFeatureId({ x: 5, y: 3 }, resolvedFeatures, vt)
   assert(hitLocal === null, 'point at definition-local position should NOT hit transformed feature')
 
   console.log('   ✓ transformed feature hit test correct')
@@ -153,7 +145,7 @@ function makeProject(
   const definitionProfile = rectProfile(0, 0, 10, 6)
   const feature = makeFeature('f0001', definitionProfile)
   const translateTransform: Matrix2D = { a: 1, b: 0, c: 0, d: 1, e: 100, f: 50 }
-  const project = makeProject([feature], undefined, new Map([['f0001', translateTransform]]))
+  const project = makeProject([feature], new Map([['f0001', translateTransform]]))
   const resolvedList = resolvedProjectFeatures(project)
 
   // The world-space rect is at (100,50)-(110,56).
@@ -182,6 +174,11 @@ function makeProject(
     transform: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
   }
   const project = makeProject([orphanFeature as SketchFeature])
+  project.features[0] = {
+    ...project.features[0],
+    definitionId: 'nonexistent',
+  }
+  delete project.featureDefinitions.orphan
 
   // resolvedProjectFeatures should skip the orphan (missing definition).
   const resolvedList = resolvedProjectFeatures(project)
@@ -208,6 +205,91 @@ function makeProject(
   assert(resolvedList[0].instanceId === 'f0001', 'resolved instanceId = feature id')
 
   console.log('   ✓ instance IDs preserved')
+}
+
+// Overlapping feature picks retain topmost-first order and ignore hidden features.
+{
+  console.log('6. Overlap hit candidates...')
+
+  const bottom = makeFeature('bottom')
+  const hidden = makeFeature('hidden', undefined, { visible: false })
+  const top = makeFeature('top')
+  const project = makeProject([bottom, hidden, top])
+  const features = resolvedProjectFeatures(project)
+
+  const hitIds = findHitFeatureIds({ x: 5, y: 3 }, features, vt)
+  assert(hitIds.join(',') === 'top,bottom', `expected top,bottom candidates, got ${hitIds.join(',')}`)
+  assert(findHitFeatureId({ x: 5, y: 3 }, features, vt) === 'top', 'single-hit helper should keep returning topmost candidate')
+
+  // Closed-profile edge tolerance is part of ordinary selection and must apply
+  // to the full candidate list as well.
+  const edgeHitIds = findHitFeatureIds({ x: 14, y: 3 }, features, vt)
+  assert(edgeHitIds.join(',') === 'top,bottom', `expected edge candidates, got ${edgeHitIds.join(',')}`)
+
+  console.log('   ✓ overlap candidates retain hit-test semantics')
+}
+
+// A unique nearby outline wins over other containing profiles.
+{
+  console.log('7. Clear outline selection...')
+
+  const outlined = makeFeature('outlined', rectProfile(0, 0, 10, 10))
+  const containingTop = makeFeature('containing-top', rectProfile(-5, -5, 20, 20))
+  const features = resolvedProjectFeatures(makeProject([outlined, containingTop]))
+  const result = resolveFeatureSelectionHit({ x: 0.2, y: 5 }, features, preciseVt)
+
+  assert(result.kind === 'direct', `expected direct hit, got ${result.kind}`)
+  assert(result.featureId === 'outlined', `expected outlined feature, got ${result.featureId}`)
+  assert(
+    result.candidateIds.join(',') === 'containing-top,outlined',
+    `expected all candidates in topmost order, got ${result.candidateIds.join(',')}`,
+  )
+
+  console.log('   ✓ unique nearby outline resolves directly')
+}
+
+// Coincident outlines remain ambiguous.
+{
+  console.log('8. Coincident outline ambiguity...')
+
+  const bottom = makeFeature('bottom', rectProfile(0, 0, 20, 20))
+  const top = makeFeature('top', rectProfile(0, 0, 20, 20))
+  const features = resolvedProjectFeatures(makeProject([bottom, top]))
+  const result = resolveFeatureSelectionHit({ x: 0.2, y: 10 }, features, preciseVt)
+
+  assert(result.kind === 'ambiguous', `expected ambiguous coincident outlines, got ${result.kind}`)
+  assert(result.candidateIds.join(',') === 'top,bottom', 'coincident candidates should remain topmost-first')
+
+  console.log('   ✓ coincident outlines remain ambiguous')
+}
+
+// Shared interiors with no nearby outline remain ambiguous.
+{
+  console.log('9. Shared interior ambiguity...')
+
+  const bottom = makeFeature('bottom', rectProfile(0, 0, 20, 20))
+  const top = makeFeature('top', rectProfile(0, 0, 20, 20))
+  const features = resolvedProjectFeatures(makeProject([bottom, top]))
+  const result = resolveFeatureSelectionHit({ x: 10, y: 10 }, features, preciseVt)
+
+  assert(result.kind === 'ambiguous', `expected ambiguous shared interior, got ${result.kind}`)
+  assert(result.candidateIds.join(',') === 'top,bottom', 'interior candidates should remain topmost-first')
+
+  console.log('   ✓ shared interiors remain ambiguous')
+}
+
+// A lone hit keeps ordinary direct-selection behavior.
+{
+  console.log('10. Single candidate selection...')
+
+  const feature = makeFeature('only', rectProfile(0, 0, 20, 20))
+  const features = resolvedProjectFeatures(makeProject([feature]))
+  const result = resolveFeatureSelectionHit({ x: 10, y: 10 }, features, preciseVt)
+
+  assert(result.kind === 'direct', `expected single candidate to resolve directly, got ${result.kind}`)
+  assert(result.featureId === 'only', `expected only candidate, got ${result.featureId}`)
+
+  console.log('   ✓ single candidate still resolves directly')
 }
 
 console.log('\nall hitTest.test.ts assertions passed')

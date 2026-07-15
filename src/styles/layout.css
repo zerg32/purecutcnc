@@ -146,9 +146,19 @@
   color: #fff;
 }
 
+.toolbar-target-btn--line.toolbar-target-btn--active {
+  border-color: rgba(91, 144, 227, 0.9);
+  box-shadow: inset 0 0 0 1px rgba(91, 144, 227, 0.42);
+}
+
 .toolbar-target-btn--region.toolbar-target-btn--active {
   border-color: rgba(153, 102, 204, 0.9);
   box-shadow: inset 0 0 0 1px rgba(153, 102, 204, 0.42);
+}
+
+.toolbar-target-btn--construction.toolbar-target-btn--active {
+  border-color: rgba(138, 154, 171, 0.9);
+  box-shadow: inset 0 0 0 1px rgba(138, 154, 171, 0.42);
 }
 
 .toolbar--creation.toolbar--vertical .toolbar-group {
@@ -777,6 +787,40 @@
   to { transform: rotate(360deg); }
 }
 
+.simulation-viewport__webgl-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(13, 20, 28, 0.72);
+  pointer-events: none;
+  z-index: 6;
+}
+
+.simulation-viewport__webgl-message {
+  max-width: 360px;
+  padding: 16px 20px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: rgba(20, 28, 38, 0.95);
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 13px;
+  text-align: center;
+}
+
+.simulation-viewport__webgl-message strong {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 14px;
+}
+
+.simulation-viewport__webgl-message p {
+  margin: 0;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.65);
+}
+
 .simulation-detail-control {
   box-sizing: border-box;
   display: inline-flex;
@@ -942,7 +986,7 @@
 }
 
 .simulation-playback-bar__speed--slider input[type='range'] {
-  width: 130px;
+  width: 90px;
   accent-color: var(--accent);
 }
 
@@ -986,7 +1030,24 @@
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  margin-left: 6px;
+  /* Sits at the start of the feed group; the flex gap handles spacing. */
+  flex: none;
+}
+
+.simulation-playback-bar__feed {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border-left: 1px solid var(--line-strong);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.simulation-playback-bar__feed-value {
+  color: var(--text);
+  min-width: 7em;
+  text-align: right;
 }
 
 /* Match the toolpath preview colours from Viewport3D.tsx buildToolpathOverlay().
@@ -1193,6 +1254,51 @@
   touch-action: none;
 }
 
+/* ── Drawing-mode badge: which creation target is active (issue #199) ─── */
+
+.creation-target-badge {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  z-index: 4;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px 3px 7px;
+  border: 1px solid rgba(91, 117, 138, 0.55);
+  border-radius: 999px;
+  background: rgba(16, 22, 30, 0.82);
+  color: rgba(203, 216, 227, 0.85);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  line-height: 16px;
+  pointer-events: none;
+  user-select: none;
+}
+
+.creation-target-badge .icon-sprite {
+  flex: 0 0 auto;
+}
+
+.creation-target-badge--line {
+  border-color: rgba(91, 144, 227, 0.65);
+  background: rgba(25, 39, 61, 0.85);
+  color: #8fb6f4;
+}
+
+.creation-target-badge--region {
+  border-color: rgba(153, 102, 204, 0.65);
+  background: rgba(41, 28, 56, 0.85);
+  color: #c4a6e0;
+}
+
+.creation-target-badge--construction {
+  border-color: rgba(138, 154, 171, 0.65);
+  background: rgba(31, 38, 46, 0.85);
+  color: #a9b6c4;
+}
+
 .axis-lock-chip {
   position: absolute;
   bottom: 8px;
@@ -1291,12 +1397,8 @@
   flex: 0 0 12px;
 }
 
-.sketch-depth-legend__swatch--subtract-shallow {
-  background: #5da5d8;
-}
-
-.sketch-depth-legend__swatch--subtract-deep {
-  background: #3f76b4;
+.sketch-depth-legend__swatch--subtract {
+  background: #4e8dbe;
 }
 
 .sketch-depth-legend__swatch--add {
@@ -1305,6 +1407,11 @@
 
 .sketch-depth-legend__swatch--region {
   background: #9966cc;
+}
+
+.sketch-depth-legend__swatch--region-exclude {
+  border: 1px dashed #b58adf;
+  background: rgba(153, 102, 204, 0.16);
 }
 
 .sketch-depth-legend__swatch--imported-model {
@@ -1425,7 +1532,8 @@
 }
 
 .tree-row--features,
-.tree-row--regions {
+.tree-row--regions,
+.tree-row--constructions {
   margin: 4px 0 2px;
 }
 
@@ -1475,6 +1583,7 @@
 
 .tree-row--features .tree-branch,
 .tree-row--regions .tree-branch,
+.tree-row--constructions .tree-branch,
 .tree-row--folder .tree-branch {
   border-color: rgba(118, 144, 164, 0.7);
   background: rgba(41, 58, 72, 0.7);
@@ -1483,6 +1592,11 @@
 .tree-row--regions .tree-branch {
   border-color: rgba(153, 102, 204, 0.75);
   background: rgba(153, 102, 204, 0.13);
+}
+
+.tree-row--constructions .tree-branch {
+  border-color: rgba(138, 154, 171, 0.75);
+  background: rgba(138, 154, 171, 0.13);
 }
 
 .tree-row--folder .tree-branch {
@@ -1509,12 +1623,17 @@
 
 .tree-row--features .tree-branch::before,
 .tree-row--regions .tree-branch::before,
+.tree-row--constructions .tree-branch::before,
 .tree-row--folder .tree-branch::before {
   background: rgba(214, 226, 236, 0.75);
 }
 
 .tree-row--regions .tree-branch::before {
   background: #b98add;
+}
+
+.tree-row--constructions .tree-branch::before {
+  background: #9dadbe;
 }
 
 .tree-branch--folder::before {
@@ -1724,7 +1843,7 @@
   height: 15px;
 }
 
-.properties-field > :not(span):not(.properties-field-label-row) {
+.properties-field > :not(span):not(.properties-field-label-row):not(.op-param-ref) {
   grid-column: 2;
 }
 
@@ -1910,6 +2029,41 @@
   opacity: 1;
 }
 
+/* ── Operation parameter reference column ──────────────────── */
+
+.cam-operation-properties .properties-field {
+  grid-template-columns: minmax(74px, 88px) minmax(0, 1fr) 50px;
+}
+
+/* Match the gear/creation reference frame (50×34) so the diagrams read at the
+   same size as the feature-creation dialogs. Illustrative only — never a click
+   target (so it can't accidentally toggle a checkbox row's input). */
+.op-param-ref {
+  grid-column: 3;
+  justify-self: end;
+  align-self: center;
+  width: 50px;
+  height: 34px;
+  border: 1px solid rgba(200, 156, 98, 0.22);
+  border-radius: 6px;
+  background: rgba(7, 12, 17, 0.72);
+  pointer-events: none;
+}
+
+/* Checkbox-backed parameters (Finish Walls/Floor, Adaptive refinement) live in
+   flex `.properties-check` rows, not the grid — push their reference to the same
+   right-hand rail as the field icons. */
+.cam-operation-properties .properties-check .op-param-ref {
+  margin-left: auto;
+}
+
+/* Action messages (e.g. "✓ Target updated") are plain <span> children, so the
+   reserved third column would otherwise pull them into the 30px icon rail.
+   Force them onto their own full-width row instead. */
+.cam-operation-properties .properties-field > .cam-field-message {
+  grid-column: 1 / -1;
+}
+
 .properties-field .cam-field-message,
 .properties-field .cam-field-note-list {
   margin-top: 2px;
@@ -2005,6 +2159,14 @@
 
   .properties-field > :not(span) {
     grid-column: auto;
+  }
+
+  .cam-operation-properties .properties-field {
+    grid-template-columns: 1fr;
+  }
+
+  .op-param-ref {
+    display: none;
   }
 }
 
@@ -3196,6 +3358,46 @@
   cursor: default;
 }
 
+.tree-region-badge--exclude {
+  border-style: solid;
+  background: rgba(153, 102, 204, 0.08);
+  color: #d2b8ee;
+}
+
+/* ── Construction rows read as sketch reference geometry (issue #199) ─── */
+
+.tree-action-btn--construction {
+  color: #8a9aab;
+  border-color: rgba(138, 154, 171, 0.45);
+}
+
+.tree-row--construction {
+  /* Muted accent so construction reads as reference marks, not material. */
+  box-shadow: inset 2px 0 0 0 rgba(138, 154, 171, 0.55);
+}
+
+.tree-row--construction .tree-label {
+  font-style: italic;
+  color: #a9b6c4;
+}
+
+.tree-construction-badge {
+  flex: 0 0 auto;
+  margin-left: 6px;
+  padding: 0 5px;
+  height: 14px;
+  line-height: 14px;
+  border-radius: 3px;
+  border: 1px dashed rgba(138, 154, 171, 0.7);
+  background: rgba(138, 154, 171, 0.12);
+  color: #a9b6c4;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: default;
+}
+
 /* Linked-instance marker: a quiet inline glyph, not a button. No box/border/fill
    so it reads as a status hint rather than another row action. */
 .tree-linked-badge {
@@ -3266,6 +3468,12 @@
   background: rgba(255, 255, 255, 0.06);
 }
 
+.tree-operation-menu__item--disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
 .tree-operation-menu__icon {
   display: inline-flex;
   align-items: center;
@@ -3309,6 +3517,34 @@
   border-radius: 3px;
   border: 1px dashed rgba(153, 102, 204, 0.7);
   background: rgba(153, 102, 204, 0.16);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.properties-construction-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 2px 0 4px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px dashed rgba(138, 154, 171, 0.5);
+  background: rgba(138, 154, 171, 0.1);
+  color: #a9b6c4;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.properties-construction-note__badge {
+  flex: 0 0 auto;
+  padding: 0 5px;
+  height: 14px;
+  line-height: 14px;
+  border-radius: 3px;
+  border: 1px dashed rgba(138, 154, 171, 0.7);
+  background: rgba(138, 154, 171, 0.16);
   font-size: 9px;
   font-weight: 600;
   letter-spacing: 0.04em;

@@ -41,6 +41,10 @@ import {
 import { isFeatureFirst, mergePocketToolpathResults, perFeatureOperations } from './multiFeature'
 import { resolvePocketRegions } from './resolver'
 import { buildRegionMask, clipToolpathResultToRegionMask, splitFeatureTargets } from './regions'
+import { resolveFeatureInstance } from '../../store/helpers/resolveFeatures'
+
+const MAX_ROUND_JOIN_ARC_TOLERANCE = DEFAULT_CLIPPER_SCALE * 0.01
+const ROUND_JOIN_ARC_TOLERANCE_RATIO = 0.01
 
 interface PolyTreeNode {
   IsHole(): boolean
@@ -82,6 +86,10 @@ function offsetPaths(
   }
 
   const offset = new ClipperLib.ClipperOffset()
+  offset.ArcTolerance = Math.max(
+    1,
+    Math.min(MAX_ROUND_JOIN_ARC_TOLERANCE, Math.abs(delta) * ROUND_JOIN_ARC_TOLERANCE_RATIO),
+  )
   offset.AddPaths(paths, joinType, ClipperLib.EndType.etClosedPolygon)
   const solution = new ClipperLib.Paths()
   offset.Execute(solution, delta)
@@ -194,6 +202,251 @@ export type SafeLinkCheck = (from: ToolpathPoint, to: ToolpathPoint) => boolean
 type OffsetTraversalMode = 'outer-first' | 'inner-first'
 
 const XY_ALIGN_EPS = 1e-6
+
+/**
+ * A cut is fully engaged (slotting) when the nearest path already cut at the
+ * same level is about a tool diameter away — at that distance no neighbouring
+ * kerf absorbs any of the tool's width. The factor leaves a margin so cuts a
+ * few percent shy of a true slot still get the reduced feed. Cuts closer to a
+ * prior kerf are over-engaged at most transiently (e.g. ring corners, whose
+ * diagonal spacing exceeds the stepover) and keep the normal feed.
+ */
+const SLOT_FEED_ENGAGEMENT_FACTOR = 0.9
+
+/**
+ * Lower bound on the slot distance: a pass at exactly one stepover from its
+ * neighbour must never be misclassified as engaged, even with stepovers close
+ * to (or beyond) the engagement threshold.
+ */
+const SLOT_FEED_ADJACENCY_FACTOR = 1.05
+
+/**
+ * Lateral wiggle (as a fraction of the stepover) tolerated when deciding that
+ * a prior kerf directly behind the tool is its own trail: below half a
+ * stepover it cannot be a neighbouring pass, so it must be the path just cut.
+ */
+const SLOT_FEED_OWN_TRAIL_FACTOR = 0.45
+
+/**
+ * Resolve the operation's slot-feed percentage into a cut-feed multiplier.
+ * Returns null when the reduction is disabled (non-pocket kinds, undefined,
+ * out-of-range, or 100%), which callers use to skip all slot-feed work so the
+ * generated move stream is byte-identical to the pre-feature output.
+ */
+function resolveSlotFeedScale(operation: Operation): number | null {
+  if (operation.kind !== 'pocket') return null
+  const percent = operation.pocketSlotFeedPercent
+  if (percent === undefined || !(percent > 0) || percent >= 100) return null
+  return percent / 100
+}
+
+interface PriorCutSegment {
+  ax: number
+  ay: number
+  bx: number
+  by: number
+}
+
+/**
+ * Spatial index over previously cut segments: segments are inserted into every
+ * grid cell their adjacency-inflated bounding box covers, so a point query
+ * only has to test its own cell's bucket.
+ */
+class PriorCutIndex {
+  private readonly cells = new Map<string, PriorCutSegment[]>()
+  private readonly cellSize: number
+  private readonly adjacency: number
+  private readonly ownTrailLateralTolerance: number
+  private readonly maxPieceLength: number
+
+  constructor(cellSize: number, adjacency: number, ownTrailLateralTolerance: number, maxPieceLength: number) {
+    this.cellSize = cellSize
+    this.adjacency = adjacency
+    this.ownTrailLateralTolerance = ownTrailLateralTolerance
+    this.maxPieceLength = maxPieceLength
+  }
+
+  /**
+   * Segments are stored in pieces no longer than maxPieceLength. The
+   * directional query below tests each piece's closest point: with long
+   * segments the closest point can collapse onto a shared corner and be
+   * dismissed as the tool's own trail even though the rest of the kerf wraps
+   * laterally around the query point (e.g. a link hopping diagonally out of a
+   * ring corner). Short pieces provide those lateral witness points.
+   */
+  insert(segment: PriorCutSegment): void {
+    const dx = segment.bx - segment.ax
+    const dy = segment.by - segment.ay
+    const length = Math.hypot(dx, dy)
+    const pieceCount = Math.max(1, Math.ceil(length / this.maxPieceLength))
+    for (let piece = 0; piece < pieceCount; piece += 1) {
+      const t0 = piece / pieceCount
+      const t1 = (piece + 1) / pieceCount
+      this.insertPiece({
+        ax: segment.ax + dx * t0,
+        ay: segment.ay + dy * t0,
+        bx: segment.ax + dx * t1,
+        by: segment.ay + dy * t1,
+      })
+    }
+  }
+
+  private insertPiece(segment: PriorCutSegment): void {
+    const pad = this.adjacency
+    const colMin = Math.floor((Math.min(segment.ax, segment.bx) - pad) / this.cellSize)
+    const colMax = Math.floor((Math.max(segment.ax, segment.bx) + pad) / this.cellSize)
+    const rowMin = Math.floor((Math.min(segment.ay, segment.by) - pad) / this.cellSize)
+    const rowMax = Math.floor((Math.max(segment.ay, segment.by) + pad) / this.cellSize)
+    for (let col = colMin; col <= colMax; col += 1) {
+      for (let row = rowMin; row <= rowMax; row += 1) {
+        const key = `${col},${row}`
+        const bucket = this.cells.get(key)
+        if (bucket) {
+          bucket.push(segment)
+        } else {
+          this.cells.set(key, [segment])
+        }
+      }
+    }
+  }
+
+  /**
+   * Is the point (x, y), moving in direction (dirX, dirY) (unit vector),
+   * within the adjacency distance of a prior kerf that actually reduces the
+   * tool's engagement? A prior whose closest point lies directly BEHIND the
+   * motion (negative along-component, near-zero lateral offset) is the tool's
+   * own trail — the kerf it just cut — and says nothing about the material
+   * ahead, so it is ignored. Priors beside or ahead of the motion count.
+   */
+  isNearPrior(x: number, y: number, dirX: number, dirY: number): boolean {
+    const bucket = this.cells.get(`${Math.floor(x / this.cellSize)},${Math.floor(y / this.cellSize)}`)
+    if (!bucket) return false
+    const adjacencySq = this.adjacency * this.adjacency
+    for (const segment of bucket) {
+      const dx = segment.bx - segment.ax
+      const dy = segment.by - segment.ay
+      const lengthSq = dx * dx + dy * dy
+      const t = lengthSq > 0
+        ? Math.max(0, Math.min(1, ((x - segment.ax) * dx + (y - segment.ay) * dy) / lengthSq))
+        : 0
+      const vx = segment.ax + dx * t - x
+      const vy = segment.ay + dy * t - y
+      if (vx * vx + vy * vy > adjacencySq) continue
+      const along = vx * dirX + vy * dirY
+      const lateral = Math.abs(vx * dirY - vy * dirX)
+      if (along < 1e-9 && lateral < this.ownTrailLateralTolerance) continue
+      return true
+    }
+    return false
+  }
+}
+
+function interpolateMovePoint(move: ToolpathMove, t: number): ToolpathPoint {
+  if (t <= 0) return { ...move.from }
+  if (t >= 1) return { ...move.to }
+  return {
+    x: move.from.x + (move.to.x - move.from.x) * t,
+    y: move.from.y + (move.to.y - move.from.y) * t,
+    z: move.from.z + (move.to.z - move.from.z) * t,
+  }
+}
+
+/**
+ * Stamp the reduced slot feed onto the fully engaged portions of the cut
+ * moves appended since startIndex (one Z level's worth of cutting).
+ *
+ * Engagement model: a cut is fully engaged (slotting) exactly when it runs
+ * farther than `slotDistance` (about a tool diameter) from every path already
+ * cut at this level — no neighbouring kerf is absorbing part of the tool's
+ * width. This single rule covers every case: the first pass into virgin
+ * material, each disjoint section's own inner start, ring segments crossing
+ * uncleared pinch corridors, and link cuts through virgin strips — while
+ * passes near an existing kerf (ordinary stepover rings, ring corners, the
+ * back side of a thin loop overlapping its own kerf, and links crossing
+ * already-cleared floor) keep the normal feed.
+ *
+ * Moves are classified in chunks of a quarter of the slot distance and split
+ * where the classification changes. The tool's own trail — a prior kerf lying
+ * directly behind the motion direction — is excluded from the test, so a
+ * straight slot stays fully engaged however long it runs, while a genuinely
+ * lateral neighbour (an adjacent scanline or ring, however recently cut)
+ * counts immediately. `ownTrailTolerance` is the lateral wiggle allowed for
+ * that behind-the-tool exclusion (covers gently curved trails). Rapids and
+ * plunges are left untouched and don't count as cleared paths.
+ */
+function applySlotFeedToLevel(
+  moves: ToolpathMove[],
+  startIndex: number,
+  scale: number,
+  slotDistance: number,
+  ownTrailTolerance: number,
+): void {
+  if (startIndex >= moves.length) return
+
+  const chunkLength = slotDistance / 4
+  const index = new PriorCutIndex(slotDistance, slotDistance, ownTrailTolerance, chunkLength)
+  const stamped: ToolpathMove[] = []
+
+  for (let moveIndex = startIndex; moveIndex < moves.length; moveIndex += 1) {
+    const move = moves[moveIndex]
+    if (move.kind !== 'cut') {
+      stamped.push(move)
+      continue
+    }
+
+    const dx = move.to.x - move.from.x
+    const dy = move.to.y - move.from.y
+    const length = Math.hypot(dx, dy)
+    if (length <= 1e-9) {
+      stamped.push(move)
+      continue
+    }
+    const dirX = dx / length
+    const dirY = dy / length
+
+    const chunkCount = Math.max(1, Math.ceil(length / chunkLength))
+    let fragmentStartT = 0
+    let fragmentEngaged: boolean | null = null
+
+    const emitFragment = (t0: number, t1: number, engaged: boolean) => {
+      const from = interpolateMovePoint(move, t0)
+      const to = interpolateMovePoint(move, t1)
+      stamped.push(engaged ? { ...move, from, to, feedScale: scale } : { ...move, from, to })
+    }
+
+    for (let chunk = 0; chunk < chunkCount; chunk += 1) {
+      const t0 = chunk / chunkCount
+      const t1 = (chunk + 1) / chunkCount
+      const tMid = (t0 + t1) / 2
+      const engaged = !index.isNearPrior(
+        move.from.x + dx * tMid,
+        move.from.y + dy * tMid,
+        dirX,
+        dirY,
+      )
+      if (fragmentEngaged === null) {
+        fragmentEngaged = engaged
+      } else if (engaged !== fragmentEngaged) {
+        emitFragment(fragmentStartT, t0, fragmentEngaged)
+        fragmentStartT = t0
+        fragmentEngaged = engaged
+      }
+    }
+    emitFragment(fragmentStartT, 1, fragmentEngaged ?? true)
+
+    index.insert({
+      ax: move.from.x,
+      ay: move.from.y,
+      bx: move.to.x,
+      by: move.to.y,
+    })
+  }
+
+  moves.length = startIndex
+  for (const move of stamped) {
+    moves.push(move)
+  }
+}
 
 export function transitionToCutEntry(
   moves: ToolpathMove[],
@@ -329,18 +582,19 @@ export function updateBounds(bounds: ToolpathBounds | null, point: ToolpathPoint
 export function buildInsetRegions(
   region: ResolvedPocketRegion,
   delta: number,
-  joinType: number = ClipperLib.JoinType.jtMiter,
+  outerJoinType: number = ClipperLib.JoinType.jtMiter,
+  islandJoinType: number = outerJoinType,
 ): ResolvedPocketRegion[] {
   const scale = DEFAULT_CLIPPER_SCALE
   const outerPath = toClipperPath(normalizeWinding(region.outer, false), scale)
   const islandPaths = region.islands.map((island) => toClipperPath(normalizeWinding(island, false), scale))
 
-  const insetOuterPaths = offsetPaths([outerPath], -delta * scale, joinType)
+  const insetOuterPaths = offsetPaths([outerPath], -delta * scale, outerJoinType)
   if (insetOuterPaths.length === 0) {
     return []
   }
 
-  const expandedIslandPaths = offsetPaths(islandPaths, delta * scale, joinType)
+  const expandedIslandPaths = offsetPaths(islandPaths, delta * scale, islandJoinType)
   const clipped = executeDifference(insetOuterPaths, expandedIslandPaths)
   return polyTreeToRegions(clipped, region.targetFeatureIds, region.islandFeatureIds, scale)
     .filter((nextRegion) => nextRegion.outer.length >= 3)
@@ -362,6 +616,107 @@ export function buildContourLoops(regions: ResolvedPocketRegion[]): Point[][] {
   }
 
   return contours
+}
+
+function buildExpandedIslandContours(
+  regions: ResolvedPocketRegion[],
+  delta: number,
+  joinType: number,
+): Point[][] {
+  const scale = DEFAULT_CLIPPER_SCALE
+  return regions.flatMap((region) => {
+    const islandPaths = region.islands.map((island) => toClipperPath(normalizeWinding(island, false), scale))
+    return offsetPaths(islandPaths, delta * scale, joinType)
+      .map((path) => fromClipperPath(path, scale))
+      .filter((island) => island.length >= 3)
+  })
+}
+
+function withoutDuplicateClosingPoint(points: Point[]): Point[] {
+  return points.length > 1 && pointEpsilonEqual(points[0], points[points.length - 1])
+    ? points.slice(0, -1)
+    : points
+}
+
+function isAcuteCorner(points: Point[], index: number): boolean {
+  const count = points.length
+  if (count < 3) return false
+  const current = points[index]
+  const previous = points[(index + count - 1) % count]
+  const next = points[(index + 1) % count]
+  const previousVector = { x: previous.x - current.x, y: previous.y - current.y }
+  const nextVector = { x: next.x - current.x, y: next.y - current.y }
+  const previousLength = Math.hypot(previousVector.x, previousVector.y)
+  const nextLength = Math.hypot(nextVector.x, nextVector.y)
+  if (previousLength <= 1e-9 || nextLength <= 1e-9) return false
+  const cosine = (
+    previousVector.x * nextVector.x + previousVector.y * nextVector.y
+  ) / (previousLength * nextLength)
+  return cosine > 1e-6
+}
+
+function circularPointRun(points: Point[], start: number, end: number): Point[] {
+  const run: Point[] = []
+  for (let index = start; ; index = (index + 1) % points.length) {
+    run.push(points[index])
+    if (index === end) break
+  }
+  return run
+}
+
+function extractRoundedCornerSegment(contour: Point[], corner: Point, delta: number): Point[] {
+  if (contour.length < 2) return []
+  const threshold = delta + Math.max(delta * 0.04, 2 / DEFAULT_CLIPPER_SCALE)
+  const withinThreshold = (index: number) =>
+    Math.sqrt(distanceSquared(contour[(index + contour.length) % contour.length], corner)) <= threshold
+  let nearestIndex = 0
+  let nearestDistance = Number.POSITIVE_INFINITY
+  for (let index = 0; index < contour.length; index += 1) {
+    const distance = distanceSquared(contour[index], corner)
+    if (distance < nearestDistance) {
+      nearestIndex = index
+      nearestDistance = distance
+    }
+  }
+  if (Math.sqrt(nearestDistance) > threshold) return []
+
+  let start = nearestIndex
+  for (let scanned = 0; scanned < contour.length - 1 && withinThreshold(start - 1); scanned += 1) {
+    start = (start + contour.length - 1) % contour.length
+  }
+  let end = nearestIndex
+  for (let scanned = 0; scanned < contour.length - 1 && withinThreshold(end + 1); scanned += 1) {
+    end = (end + 1) % contour.length
+  }
+
+  const segment = circularPointRun(contour, start, end)
+  return segment.length >= 2 ? segment : []
+}
+
+function buildAcuteIslandCornerCleanupSegments(regions: ResolvedPocketRegion[], delta: number): Point[][] {
+  const scale = DEFAULT_CLIPPER_SCALE
+  const segments: Point[][] = []
+  for (const region of regions) {
+    for (const island of region.islands) {
+      const sourcePoints = withoutDuplicateClosingPoint(island)
+      const acuteCorners = sourcePoints.filter((_, index) => isAcuteCorner(sourcePoints, index))
+      if (acuteCorners.length === 0) continue
+
+      const islandPath = toClipperPath(normalizeWinding(sourcePoints, false), scale)
+      const offsetContours = offsetPaths([islandPath], delta * scale, ClipperLib.JoinType.jtRound)
+        .map((path) => fromClipperPath(path, scale))
+        .filter((contour) => contour.length >= 3)
+      for (const corner of acuteCorners) {
+        const candidates = offsetContours
+          .map((contour) => extractRoundedCornerSegment(contour, corner, delta))
+          .filter((segment) => segment.length >= 2)
+        if (candidates.length > 0) {
+          segments.push(candidates.sort((left, right) => right.length - left.length)[0])
+        }
+      }
+    }
+  }
+  return segments
 }
 
 export function buildOuterContours(regions: ResolvedPocketRegion[]): Point[][] {
@@ -795,31 +1150,63 @@ export function cutClosedContours(
   return nextPosition
 }
 
-export function cutOffsetRegionRecursive(
+interface OffsetRegionNode {
+  region: ResolvedPocketRegion
+  children: OffsetRegionNode[]
+}
+
+/**
+ * Precompute the offset ring tree for a region. The successive insets depend
+ * only on the region geometry and stepover — not on Z — so callers cutting
+ * several step levels build the tree once and traverse it per level instead
+ * of redoing the Clipper offsets at every level.
+ */
+function buildOffsetRegionTree(region: ResolvedPocketRegion, stepoverDistance: number): OffsetRegionNode {
+  const childRegions = buildInsetRegions(region, stepoverDistance)
+  return {
+    region,
+    children: childRegions.map((child) => buildOffsetRegionTree(child, stepoverDistance)),
+  }
+}
+
+function orderNodesGreedy(nodes: OffsetRegionNode[], start: Point | null): OffsetRegionNode[] {
+  if (nodes.length <= 1 || start === null) {
+    return nodes
+  }
+  const byRegion = new Map(nodes.map((node) => [node.region, node]))
+  return orderRegionsGreedy(nodes.map((node) => node.region), start)
+    .map((region) => byRegion.get(region) as OffsetRegionNode)
+}
+
+function cutOffsetRegionNode(
   moves: ToolpathMove[],
-  region: ResolvedPocketRegion,
+  node: OffsetRegionNode,
   z: number,
   safeZ: number,
-  stepoverDistance: number,
   maxLinkDistance: number,
   currentPosition: ToolpathPoint | null,
-  direction: CutDirection = 'conventional',
-  safeLinkCheck?: SafeLinkCheck,
-  traversalMode: OffsetTraversalMode = 'outer-first',
+  direction: CutDirection,
+  safeLinkCheck: SafeLinkCheck | undefined,
+  traversalMode: OffsetTraversalMode,
   rampEntry?: boolean,
   rampAngle?: number,
   rampType?: 'zigzag' | 'spiral',
+  loops: 'all' | 'outer' = 'all',
 ): ToolpathPoint | null {
-  const childRegions = buildInsetRegions(region, stepoverDistance)
-
   const cutCurrentRegion = (fromPosition: ToolpathPoint | null): ToolpathPoint | null => {
     const childAnchors = traversalMode === 'outer-first'
-      ? childRegions
-        .map((child) => child.outer)
+      ? node.children
+        .map((child) => child.region.outer)
         .filter((contour) => contour.length > 0)
         .map((contour) => contour[0])
       : []
-    const preparedContours = buildContourLoops([region]).map((contour) => rotateContourToBestEntry(
+    // 'outer' cuts only the region's outer boundary loop — used by the finish
+    // floor pass, where island walls are the wall pass's job, matching the
+    // outer-contours-only coverage of buildPocketFloorContours.
+    const contours = loops === 'outer'
+      ? (node.region.outer.length >= 3 ? [node.region.outer] : [])
+      : buildContourLoops([node.region])
+    const preparedContours = contours.map((contour) => rotateContourToBestEntry(
       contour,
       fromPosition ? { x: fromPosition.x, y: fromPosition.y } : null,
       childAnchors,
@@ -846,18 +1233,17 @@ export function cutOffsetRegionRecursive(
     nextPosition = cutCurrentRegion(nextPosition)
   }
 
-  const orderedChildren = orderRegionsGreedy(
-    childRegions,
+  const orderedChildren = orderNodesGreedy(
+    node.children,
     nextPosition ? { x: nextPosition.x, y: nextPosition.y } : null,
   )
 
-  for (const childRegion of orderedChildren) {
-    nextPosition = cutOffsetRegionRecursive(
+  for (const childNode of orderedChildren) {
+    nextPosition = cutOffsetRegionNode(
       moves,
-      childRegion,
+      childNode,
       z,
       safeZ,
-      stepoverDistance,
       maxLinkDistance,
       nextPosition,
       direction,
@@ -866,6 +1252,7 @@ export function cutOffsetRegionRecursive(
       rampEntry,
       rampAngle,
       rampType,
+      loops,
     )
   }
 
@@ -874,6 +1261,31 @@ export function cutOffsetRegionRecursive(
   }
 
   return nextPosition
+}
+
+export function cutOffsetRegionRecursive(
+  moves: ToolpathMove[],
+  region: ResolvedPocketRegion,
+  z: number,
+  safeZ: number,
+  stepoverDistance: number,
+  maxLinkDistance: number,
+  currentPosition: ToolpathPoint | null,
+  direction: CutDirection = 'conventional',
+  safeLinkCheck?: SafeLinkCheck,
+  traversalMode: OffsetTraversalMode = 'outer-first',
+): ToolpathPoint | null {
+  return cutOffsetRegionNode(
+    moves,
+    buildOffsetRegionTree(region, stepoverDistance),
+    z,
+    safeZ,
+    maxLinkDistance,
+    currentPosition,
+    direction,
+    safeLinkCheck,
+    traversalMode,
+  )
 }
 
 export function toOpenCutMoves(points: Point[], z: number): ToolpathMove[] {
@@ -919,6 +1331,11 @@ function generateRoughBandMoves(
   const stepLevels = generateStepLevels(band.topZ, effectiveBottom, stepdown)
   const minStepover = 1 / DEFAULT_CLIPPER_SCALE
   const effectiveStepover = Math.max(stepoverDistance, minStepover)
+  const slotScale = resolveSlotFeedScale(operation)
+  const slotDistance = Math.max(
+    toolRadius * 2 * SLOT_FEED_ENGAGEMENT_FACTOR,
+    effectiveStepover * SLOT_FEED_ADJACENCY_FACTOR,
+  )
   let currentPosition: ToolpathPoint | null = null
 
   if (operation.kind === 'pocket' && operation.pocketPattern === 'parallel') {
@@ -942,6 +1359,7 @@ function generateRoughBandMoves(
     }
 
     for (const z of stepLevels) {
+      const levelStartIndex = moves.length
       for (const contour of boundaryContours) {
         const entryPoint = contourStartPoint(contour, z)
         currentPosition = transitionToCutEntry(moves, currentPosition, entryPoint, safeZ, maxLinkDistance, undefined, operation.rampEntry, operation.rampAngle, operation.rampType)
@@ -963,32 +1381,41 @@ function generateRoughBandMoves(
         currentPosition = cutMoves.at(-1)?.to ?? currentPosition
       }
 
+      if (slotScale !== null) {
+        applySlotFeedToLevel(moves, levelStartIndex, slotScale, slotDistance, effectiveStepover * SLOT_FEED_OWN_TRAIL_FACTOR)
+      }
+
       currentPosition = retractToSafe(moves, currentPosition, safeZ)
     }
 
     return { moves, stepLevels, warnings }
   }
 
+  // The offset ring tree is identical at every step level — build it once
+  // and traverse it per level.
+  const regionTrees = band.regions
+    .flatMap((region) => buildInsetRegions(region, initialInset))
+    .map((region) => buildOffsetRegionTree(region, effectiveStepover))
+
   for (const z of stepLevels) {
-    const currentRegions = band.regions.flatMap((region) => buildInsetRegions(region, initialInset))
-    if (currentRegions.length === 0) {
+    if (regionTrees.length === 0) {
       warnings.push(`No machinable offset contours for band ${band.topZ} -> ${band.bottomZ}`)
       currentPosition = retractToSafe(moves, currentPosition, safeZ)
       continue
     }
 
-    const orderedRegions = orderRegionsGreedy(
-      currentRegions,
+    const levelStartIndex = moves.length
+    const orderedTrees = orderNodesGreedy(
+      regionTrees,
       currentPosition ? { x: currentPosition.x, y: currentPosition.y } : null,
     )
 
-    for (const region of orderedRegions) {
-      currentPosition = cutOffsetRegionRecursive(
+    for (const tree of orderedTrees) {
+      currentPosition = cutOffsetRegionNode(
         moves,
-        region,
+        tree,
         z,
         safeZ,
-        effectiveStepover,
         maxLinkDistance,
         currentPosition,
         direction,
@@ -998,6 +1425,10 @@ function generateRoughBandMoves(
         operation.rampAngle,
         operation.rampType,
       )
+    }
+
+    if (slotScale !== null) {
+      applySlotFeedToLevel(moves, levelStartIndex, slotScale, slotDistance, effectiveStepover * SLOT_FEED_OWN_TRAIL_FACTOR)
     }
 
     currentPosition = retractToSafe(moves, currentPosition, safeZ)
@@ -1037,15 +1468,57 @@ function generateFinishBandMoves(
 
   const radialLeave = Math.max(0, operation.stockToLeaveRadial)
   const finishDelta = toolRadius + radialLeave
-  const finishRegions = band.regions.flatMap((region) => buildInsetRegions(region, finishDelta))
-  const wallContours = operation.finishWalls ? buildContourLoops(finishRegions) : []
-  const floorContours = operation.finishFloor && !(operation.kind === 'pocket' && operation.pocketPattern === 'parallel')
-    ? buildPocketFloorContours(finishRegions, 0, stepoverDistance)
+  const shouldRoundPocketWalls = operation.kind === 'pocket' && operation.finishWalls && operation.roundOutsideCorners
+  const needsMiterFinishRegions = operation.finishFloor || operation.finishWalls
+  const finishRegions = needsMiterFinishRegions
+    ? band.regions.flatMap((region) => buildInsetRegions(region, finishDelta))
     : []
-  const floorSegments = operation.finishFloor && operation.kind === 'pocket' && operation.pocketPattern === 'parallel'
+  let wallContours: Point[][] = []
+  let wallOuterContours: Point[][] = []
+  let wallFinalContours: Point[][] = []
+  let wallCleanupSegments: Point[][] = []
+  if (operation.finishWalls) {
+    if (shouldRoundPocketWalls) {
+      const roundedWallRegions = band.regions.flatMap((region) => buildInsetRegions(
+        region,
+        finishDelta,
+        ClipperLib.JoinType.jtMiter,
+        ClipperLib.JoinType.jtRound,
+      ))
+      const islandCleanupDelta = finishDelta + stepoverDistance
+      wallOuterContours = buildOuterContours(roundedWallRegions)
+      wallFinalContours = buildExpandedIslandContours(band.regions, finishDelta, ClipperLib.JoinType.jtRound)
+      wallCleanupSegments = buildAcuteIslandCornerCleanupSegments(band.regions, islandCleanupDelta)
+    } else {
+      wallContours = buildContourLoops(finishRegions)
+    }
+  }
+  const slotScale = resolveSlotFeedScale(operation)
+  const isParallelPocket = operation.kind === 'pocket' && operation.pocketPattern === 'parallel'
+  // Offset floors are cut through the same inner-first ring traversal as the
+  // rough pass (each disjoint floor area starts at its innermost loop and
+  // works outward). The tree roots replicate buildPocketFloorContours'
+  // geometry: a zero-inset Clipper round-trip, then one extra stepover inset
+  // so the floor pass doesn't double as a wall-finish contour.
+  const minFloorStepover = 1 / DEFAULT_CLIPPER_SCALE
+  const floorStepover = Math.max(stepoverDistance, minFloorStepover)
+  const floorTrees = operation.finishFloor && !isParallelPocket
+    ? finishRegions
+      .flatMap((region) => buildInsetRegions(region, 0))
+      .flatMap((region) => buildInsetRegions(region, floorStepover))
+      .map((region) => buildOffsetRegionTree(region, floorStepover))
+    : []
+  const floorSegments = operation.finishFloor && isParallelPocket
     ? buildPocketParallelSegments(finishRegions, stepoverDistance, operation.pocketAngle)
     : []
-  if (wallContours.length === 0 && floorContours.length === 0 && floorSegments.length === 0) {
+  if (
+    wallContours.length === 0
+    && wallOuterContours.length === 0
+    && wallFinalContours.length === 0
+    && wallCleanupSegments.length === 0
+    && floorTrees.length === 0
+    && floorSegments.length === 0
+  ) {
     return {
       moves,
       stepLevels: [],
@@ -1057,26 +1530,102 @@ function generateFinishBandMoves(
   const floorStepLevels = operation.finishFloor ? [effectiveBottom] : []
   let currentPosition: ToolpathPoint | null = null
 
-  for (const z of wallStepLevels) {
-    currentPosition = cutClosedContours(moves, wallContours, z, safeZ, maxLinkDistance, currentPosition, false, direction, undefined, operation.rampEntry, operation.rampAngle, operation.rampType)
-
-    currentPosition = retractToSafe(moves, currentPosition, safeZ)
-  }
-
+  // Floor before walls: when roughing left axial stock, a wall pass at final
+  // depth would slot through the uncleared floor skin at full feed. Cutting
+  // the floor first removes that skin (with its first pass at the reduced
+  // slot feed), so the wall pass only shaves the radial stock — and cutting
+  // walls last leaves the cleanest final wall surface.
   for (const z of floorStepLevels) {
-    currentPosition = cutClosedContours(moves, floorContours, z, safeZ, maxLinkDistance, currentPosition, false, direction, undefined, operation.rampEntry, operation.rampAngle, operation.rampType)
+    const floorStartIndex = moves.length
+
+    const orderedTrees = orderNodesGreedy(
+      floorTrees,
+      currentPosition ? { x: currentPosition.x, y: currentPosition.y } : null,
+    )
+    for (const tree of orderedTrees) {
+      currentPosition = cutOffsetRegionNode(
+        moves,
+        tree,
+        z,
+        safeZ,
+        maxLinkDistance,
+        currentPosition,
+        direction,
+        undefined,
+        'inner-first',
+        operation.rampEntry,
+        operation.rampAngle,
+        operation.rampType,
+        'outer',
+      )
+    }
 
     const orderedFloorSegments = orderOpenSegmentsGreedy(
       floorSegments,
       currentPosition ? { x: currentPosition.x, y: currentPosition.y } : null,
     )
-
     for (const segment of orderedFloorSegments) {
       const entryPoint = contourStartPoint(segment, z)
       currentPosition = transitionToCutEntry(moves, currentPosition, entryPoint, safeZ, maxLinkDistance, undefined, operation.rampEntry, operation.rampAngle, operation.rampType)
       const cutMoves = toOpenCutMoves(segment, z)
       moves.push(...cutMoves)
       currentPosition = cutMoves.at(-1)?.to ?? currentPosition
+    }
+
+    if (slotScale !== null) {
+      const slotDistance = Math.max(
+        toolRadius * 2 * SLOT_FEED_ENGAGEMENT_FACTOR,
+        floorStepover * SLOT_FEED_ADJACENCY_FACTOR,
+      )
+      applySlotFeedToLevel(moves, floorStartIndex, slotScale, slotDistance, floorStepover * SLOT_FEED_OWN_TRAIL_FACTOR)
+    }
+
+    currentPosition = retractToSafe(moves, currentPosition, safeZ)
+  }
+
+  for (const z of wallStepLevels) {
+    if (shouldRoundPocketWalls) {
+      currentPosition = cutClosedContours(
+        moves,
+        wallOuterContours,
+        z,
+        safeZ,
+        maxLinkDistance,
+        currentPosition,
+        false,
+        direction,
+        undefined,
+        operation.rampEntry,
+        operation.rampAngle,
+        operation.rampType,
+      )
+      const orderedCleanupSegments = orderOpenSegmentsGreedy(
+        wallCleanupSegments,
+        currentPosition ? { x: currentPosition.x, y: currentPosition.y } : null,
+      )
+      for (const segment of orderedCleanupSegments) {
+        const entryPoint = contourStartPoint(segment, z)
+        currentPosition = transitionToCutEntry(moves, currentPosition, entryPoint, safeZ, maxLinkDistance, undefined, operation.rampEntry, operation.rampAngle, operation.rampType)
+        const cutMoves = toOpenCutMoves(segment, z)
+        moves.push(...cutMoves)
+        currentPosition = cutMoves.at(-1)?.to ?? currentPosition
+      }
+      currentPosition = cutClosedContours(
+        moves,
+        wallFinalContours,
+        z,
+        safeZ,
+        maxLinkDistance,
+        currentPosition,
+        false,
+        direction,
+        undefined,
+        operation.rampEntry,
+        operation.rampAngle,
+        operation.rampType,
+      )
+    } else {
+      currentPosition = cutClosedContours(moves, wallContours, z, safeZ, maxLinkDistance, currentPosition, false, direction, undefined, operation.rampEntry, operation.rampAngle, operation.rampType)
     }
 
     currentPosition = retractToSafe(moves, currentPosition, safeZ)
@@ -1164,7 +1713,7 @@ function generatePocketToolpathSingle(project: Project, operation: Operation): P
 
   const formatZ = (value: number) => Number(value.toFixed(6)).toString()
   const formatFeatureSpan = (featureId: string) => {
-    const feature = project.features.find((entry) => entry.id === featureId)
+    const feature = resolveFeatureInstance(project, featureId)
     if (!feature) {
       return `${featureId} [missing]`
     }
@@ -1174,7 +1723,7 @@ function generatePocketToolpathSingle(project: Project, operation: Operation): P
   }
 
   const formatIslandSpan = (id: string) => {
-    const feature = project.features.find((entry) => entry.id === id)
+    const feature = resolveFeatureInstance(project, id)
     if (feature) {
       const span = resolveFeatureZSpan(project, feature)
       return `${feature.name} (${feature.id}) [${formatZ(span.max)} -> ${formatZ(span.min)}]`

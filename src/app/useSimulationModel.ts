@@ -20,12 +20,24 @@ import {
   createSimulationGrid,
   simulateOperationHeightfield,
   simulateReplayItemsHeightfield,
+  type SimulationGrid,
   type SimulationReplayItem,
   type SimulationResult,
 } from '../engine/simulation'
 import type { ToolpathResult } from '../engine/toolpaths'
 import { normalizeToolForProject } from '../engine/toolpaths/geometry'
 import type { Operation, Project } from '../types/project'
+
+/** Defer a computation to first call and cache the result for later calls. */
+function lazyOnce<T>(compute: () => T): () => T {
+  let cached: { value: T } | null = null
+  return () => {
+    if (cached === null) {
+      cached = { value: compute() }
+    }
+    return cached.value
+  }
+}
 
 interface UseSimulationModelArgs {
   project: Project
@@ -136,41 +148,47 @@ export function useSimulationModel({
 
     const normalizedSelectedTool = normalizeToolForProject(toolRecord, project)
 
-    // Pre-apply only operations that come BEFORE the selected one in the feature
-    // tree order — operations listed after the selection haven't run yet at this
-    // point in the cycle, so their cuts shouldn't appear in the starting state.
-    const selectedIndex = project.operations.findIndex((operation) => operation.id === selectedOperation.id)
-    const priorOperations = selectedIndex >= 0 ? project.operations.slice(0, selectedIndex) : []
+    // Starting stock state for playback: all operations BEFORE the selected one
+    // in the feature tree order, replayed into a fresh grid — operations listed
+    // after the selection haven't run yet at this point in the cycle, so their
+    // cuts shouldn't appear. The replay is deferred until the viewport actually
+    // starts playback (lazyOnce): while the simulation tab is open this memo
+    // re-runs on every project change, and eagerly replaying prior operations
+    // each time made ordinary edits pay for a full heightfield replay.
+    const getBaseGrid = lazyOnce((): SimulationGrid => {
+      const selectedIndex = project.operations.findIndex((operation) => operation.id === selectedOperation.id)
+      const priorOperations = selectedIndex >= 0 ? project.operations.slice(0, selectedIndex) : []
 
-    const priorItems: SimulationReplayItem[] = priorOperations
-      .filter((operation) =>
-        operation.enabled
-        && operation.showToolpath
-        && operation.toolRef,
-      )
-      .map((operation): SimulationReplayItem | null => {
-        const toolpath = generateToolpathForOperation(operation)
-        const operationTool = operation.toolRef
-          ? project.tools.find((tool) => tool.id === operation.toolRef) ?? null
-          : null
-        if (!toolpath || !operationTool) {
-          return null
-        }
-        const normalizedTool = normalizeToolForProject(operationTool, project)
-        return {
-          operationId: operation.id,
-          operationName: operation.name,
-          toolRef: operationTool.id,
-          toolType: operationTool.type,
-          toolRadius: normalizedTool.radius,
-          vBitAngle: normalizedTool.vBitAngle,
-          toolpath,
-        }
-      })
-      .filter((item): item is SimulationReplayItem => item !== null)
+      const priorItems: SimulationReplayItem[] = priorOperations
+        .filter((operation) =>
+          operation.enabled
+          && operation.showToolpath
+          && operation.toolRef,
+        )
+        .map((operation): SimulationReplayItem | null => {
+          const toolpath = generateToolpathForOperation(operation)
+          const operationTool = operation.toolRef
+            ? project.tools.find((tool) => tool.id === operation.toolRef) ?? null
+            : null
+          if (!toolpath || !operationTool) {
+            return null
+          }
+          const normalizedTool = normalizeToolForProject(operationTool, project)
+          return {
+            operationId: operation.id,
+            operationName: operation.name,
+            toolRef: operationTool.id,
+            toolType: operationTool.type,
+            toolRadius: normalizedTool.radius,
+            vBitAngle: normalizedTool.vBitAngle,
+            toolpath,
+          }
+        })
+        .filter((item): item is SimulationReplayItem => item !== null)
 
-    const baseResult = simulateReplayItemsHeightfield(project, priorItems, {
-      targetLongAxisCells: simulationDetailCells,
+      return simulateReplayItemsHeightfield(project, priorItems, {
+        targetLongAxisCells: simulationDetailCells,
+      }).grid
     })
 
     const diameter = normalizedSelectedTool.radius * 2
@@ -181,21 +199,26 @@ export function useSimulationModel({
       ? normalizedSelectedTool.maxCutDepth
       : diameter * 3
     const toolShankLength = diameter * 2
-    // Split source moves longer than ~0.4× tool radius so long straights don't
-    // apply a single giant cut in one shot. The playback controller also throttles
-    // by distance-per-frame now, so this is belt-and-suspenders for partial-cut
-    // granularity on very long segments.
-    const maxSegmentLength = normalizedSelectedTool.radius * 0.4
+    // Split long source moves so a single move's cell-loop bounding box stays
+    // close to the swept path (long diagonals would otherwise test a huge
+    // rectangle). Correctness doesn't depend on the length — the controller
+    // applies partial moves exactly — so the trade-off is pure overhead: every
+    // sub-segment re-tests the tool-radius end caps it shares with its
+    // neighbors. At 0.4× radius that overlap dominated (~5/6 of cell tests
+    // were repeats); 2× radius keeps bounding boxes tight while cutting the
+    // redundant work ~4×.
+    const maxSegmentLength = normalizedSelectedTool.radius * 2
 
     // Operation feed is stored in project-units-per-minute. The viewport works in
     // units-per-second, so divide by 60. This becomes the "1×" playback speed so
     // users can intuitively speed up or slow down relative to the real feed rate.
     const feedPerSecond = selectedOperation.feed > 0 ? selectedOperation.feed / 60 : undefined
+    const plungeFeedPerSecond = selectedOperation.plungeFeed > 0 ? selectedOperation.plungeFeed / 60 : undefined
     // `project.meta.units` uses 'inch'; the playback UI shows the short label 'in'.
     const units: 'mm' | 'in' = project.meta.units === 'inch' ? 'in' : 'mm'
 
     return {
-      baseGrid: baseResult.grid,
+      getBaseGrid,
       moves: selectedToolpath.moves,
       toolType: toolRecord.type,
       toolRadius: normalizedSelectedTool.radius,
@@ -205,6 +228,7 @@ export function useSimulationModel({
       maxSegmentLength,
       units,
       feedPerSecond,
+      plungeFeedPerSecond,
     }
   }, [centerTab, generateToolpathForOperation, project, selectedOperation, selectedToolpath, simulationDetailCells, simulationMode])
 

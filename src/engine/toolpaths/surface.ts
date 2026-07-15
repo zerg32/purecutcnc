@@ -56,8 +56,9 @@ import {
   toOpenCutMoves,
   updateBounds,
 } from './pocket'
-import { buildRegionMask, splitFeatureTargets } from './regions'
+import { buildRegionMask, clipToolpathResultToRegionMask, splitFeatureTargets } from './regions'
 import { expandFeatureGeometry, featureHasClosedGeometry } from '../../text'
+import { resolvedProjectFeatures } from '../../store/helpers/resolveFeatures'
 
 interface PolyTreeNode {
   IsHole(): boolean
@@ -75,6 +76,7 @@ interface SurfaceCleanResult {
   operationId: string
   units: ResolvedPocketResult['units']
   bands: SurfaceCleanBand[]
+  regionMask: ReturnType<typeof buildRegionMask>
   warnings: string[]
 }
 
@@ -179,6 +181,7 @@ function resolveSurfaceCleanRegions(project: Project, operation: Operation): Sur
       operationId: operation.id,
       units: project.meta.units,
       bands: [],
+      regionMask: null,
       warnings: ['Only surface-clean operations can be resolved by the surface-clean resolver'],
     }
   }
@@ -188,6 +191,7 @@ function resolveSurfaceCleanRegions(project: Project, operation: Operation): Sur
       operationId: operation.id,
       units: project.meta.units,
       bands: [],
+      regionMask: null,
       warnings: ['Surface-clean operation has no feature targets'],
     }
   }
@@ -220,11 +224,12 @@ function resolveSurfaceCleanRegions(project: Project, operation: Operation): Sur
       operationId: operation.id,
       units: project.meta.units,
       bands: [],
+      regionMask,
       warnings: [...warnings, 'No valid add features were found for this surface-clean operation'],
     }
   }
 
-  const allAddFeatures = project.features
+  const allAddFeatures = resolvedProjectFeatures(project)
     .flatMap((feature) => expandFeatureGeometry(feature))
     .filter((feature) => feature.operation === 'add' && featureHasClosedGeometry(feature))
     .map((feature) => {
@@ -256,9 +261,6 @@ function resolveSurfaceCleanRegions(project: Project, operation: Operation): Sur
     const protectedFeatures = allAddFeatures.filter(({ top, feature }) => top > bottomZ && !activeTargetIdSet.has(feature.id))
     const protectedPaths = protectedFeatures.map(({ feature }) => flattenProfileToClipperPath(feature.sketch.profile))
     subjectPaths = executeClipPaths(subjectPaths, protectedPaths, ClipperLib.ClipType.ctDifference)
-    if (regionMask) {
-      subjectPaths = executeClipPaths(subjectPaths, regionMask.paths, ClipperLib.ClipType.ctIntersection)
-    }
     const polyTree = executeClip(subjectPaths, [], ClipperLib.ClipType.ctUnion)
     const regions = polyTreeToRegions(
       polyTree,
@@ -290,6 +292,7 @@ function resolveSurfaceCleanRegions(project: Project, operation: Operation): Sur
     operationId: operation.id,
     units: project.meta.units,
     bands,
+    regionMask,
     warnings,
   }
 }
@@ -460,23 +463,11 @@ function generateFinishBandMoves(
   const floorStepLevels = operation.finishFloor ? [effectiveBottom] : []
   let currentPosition: ToolpathPoint | null = null
 
-  for (const z of wallStepLevels) {
-    const orderedWallContours = orderClosedContoursGreedy(
-      wallContours,
-      currentPosition ? { x: currentPosition.x, y: currentPosition.y } : null,
-    )
-
-    for (const contour of orderedWallContours) {
-      const entryPoint = contourStartPoint(contour, z)
-      currentPosition = transitionToCutEntry(moves, currentPosition, entryPoint, safeZ, maxLinkDistance)
-      const cutMoves = toClosedCutMoves(contour, z)
-      moves.push(...cutMoves)
-      currentPosition = cutMoves.at(-1)?.to ?? currentPosition
-    }
-
-    currentPosition = retractToSafe(moves, currentPosition, safeZ)
-  }
-
+  // Floor before walls: when roughing left axial stock, a wall pass at final
+  // depth would slot through the uncleared floor skin at full feed. Cutting
+  // the floor first removes that skin, so the wall pass only shaves the
+  // radial stock — and cutting walls last leaves the cleanest wall surface.
+  // Mirrors the same ordering in pocket.ts generateFinishBandMoves.
   for (const z of floorStepLevels) {
     const orderedFloorContours = orderClosedContoursGreedy(
       floorContours,
@@ -500,6 +491,23 @@ function generateFinishBandMoves(
       const entryPoint = contourStartPoint(segment, z)
       currentPosition = transitionToCutEntry(moves, currentPosition, entryPoint, safeZ, maxLinkDistance)
       const cutMoves = toOpenCutMoves(segment, z)
+      moves.push(...cutMoves)
+      currentPosition = cutMoves.at(-1)?.to ?? currentPosition
+    }
+
+    currentPosition = retractToSafe(moves, currentPosition, safeZ)
+  }
+
+  for (const z of wallStepLevels) {
+    const orderedWallContours = orderClosedContoursGreedy(
+      wallContours,
+      currentPosition ? { x: currentPosition.x, y: currentPosition.y } : null,
+    )
+
+    for (const contour of orderedWallContours) {
+      const entryPoint = contourStartPoint(contour, z)
+      currentPosition = transitionToCutEntry(moves, currentPosition, entryPoint, safeZ, maxLinkDistance)
+      const cutMoves = toClosedCutMoves(contour, z)
       moves.push(...cutMoves)
       currentPosition = cutMoves.at(-1)?.to ?? currentPosition
     }
@@ -599,11 +607,12 @@ export function generateSurfaceCleanToolpath(project: Project, operation: Operat
     bounds = updateBounds(bounds, move.to)
   }
 
-  return {
+  const result: PocketToolpathResult = {
     operationId: operation.id,
     moves: allMoves,
     warnings,
     bounds,
     stepLevels: [...allStepLevels].sort((a, b) => b - a),
   }
+  return clipToolpathResultToRegionMask(project, result, resolved.regionMask) as PocketToolpathResult
 }

@@ -12,6 +12,12 @@ Start every session by reading [`INDEX.md`](INDEX.md) at the repo root. It maps 
 
 **Maintenance rule:** when you add, rename, remove, or significantly change the purpose of a file, update the nearest `INDEX.md` in the same commit. If you create a new folder with non-trivial content, add an `INDEX.md` there and link it from the parent index.
 
+## Codebase memory (MCP)
+
+If the `codebase-memory-mcp` server is connected, prefer its graph tools (`search_graph`, `get_architecture`, `trace_path`, `get_code_snippet`, `search_code`) over blind grep for structural questions; fall back to Grep/Glob/Read for text content.
+
+**Every tool takes a `project` argument that is the project *name*, not a filesystem path.** Call `list_projects` first and pass back the exact `name` it returns (the repo path with `/` replaced by `-`, e.g. `Users-frankp-Projects-purecutcnc`). Passing a path yields `{"error":"project not found or not indexed"}` — a wrong-argument error, not a broken server; retry with the name. If the repo isn't listed yet, run `index_repository` once. If calls repeatedly fail with `Connection closed`, the local graph cache is bloated with stale project graphs — prune it and retry.
+
 ## Workflow: Issue → Plan → Approve → Implement → PR
 
 **Every task follows this loop. No exceptions — even a one-line bug fix gets an issue and a short plan.** The plan can be tiny if the task is tiny; the point is that intent is written down, agreed, and traceable. Tasks are tracked on the GitHub Project board ([PureCutCNC project #1](https://github.com/orgs/PureCutCNC/projects/1)), **not** in checked-in plan files.
@@ -30,13 +36,16 @@ Abandoned work: close the issue with a short reason; the board moves it to `Done
 ```bash
 npm run build          # Full build (lint + icon generation + tsc + tests + vite). Run this before committing.
 npm test               # Run the structural test suite (every src/**/*.test.ts via tsx)
+npm run test:e2e       # Playwright browser smoke (PR CI gate; starts its own Vite dev server)
 npm run dev            # Vite dev server (do NOT start this unless asked — the user runs it themselves)
 npm run lint           # ESLint over supported source only: src, vite.config.ts, and build/test scripts
 npm run lint:scripts   # Optional: lint the one-off diagnostic scripts in scripts/ (not a quality gate)
 npm run sync-icons     # Regenerate public/icons.svg from src/assets/icons/*.svg
 ```
 
-Always run `npm run build` from the project root to verify changes compile before committing. `npm run lint` and `npm test` run automatically as part of the build, so a lint failure or failing structural test will fail the build. Do not start the dev/preview server unless asked.
+Always run `npm run build` from the project root to verify changes compile before committing. `npm run lint` and `npm test` run automatically as part of the build, so a lint failure or failing structural test will fail the build. Do not start the dev/preview server unless asked; `npm run test:e2e` owns its temporary dev server when you intentionally run the browser smoke.
+
+`npm run test:e2e` is a separate PR CI gate, not part of `npm run build`. User-facing UI or workflow changes should add or extend an `e2e/*.smoke.spec.ts` test when the behavior depends on rendered DOM, menu wiring, dialogs, or browser-only boot paths. If lower-level structural tests are sufficient, say so in the PR description so the lack of e2e coverage is deliberate.
 
 ## Git & Branching
 
@@ -67,7 +76,7 @@ The full manager loop (plan → dispatch → review → merge) is packaged as th
      --output-format json < work/slice-prompt.md
    ```
    - `--worktree DIR` is **required for `--mode implement`**: the launcher `cd`s into it so the worker operates there by default. This sets the working directory only — it is **not** a sandbox; a `bypassPermissions` worker can still reach any absolute path, so staying in the worktree is a prompt-and-review convention, not a technical boundary. Bound the real risk with a capped, rotatable key and the post-hoc review in step 4. `--worktree` is optional for `--mode review` (read-only, `--permission-mode plan`), which is the safer default — prefer it whenever the slice doesn't need to write.
-   - For slices that run for minutes, dispatch in the background and read the result when it exits, rather than blocking on a foreground call.
+   - For slices that run for minutes, dispatch in the background rather than blocking on a foreground call. Pass `--progress-log FILE` (`dispatch-task.sh` sets one automatically at `$PURECUT_WORKTREE_BASE/SLUG.progress.log`) and poll `scripts/worker-status.sh --slug SLUG` — judge the worker by idle time since its last progress entry, never by total runtime, and never kill a worker whose status is `running`.
 4. **Review the real artifacts, not the report.** The worker ends with a `STATUS/COMMIT/CHANGED_FILES/CHECKS/RISKS` completion block — that is a *report, not acceptance*. Inspect the actual worktree diff, the commit, and the test output before accepting or merging.
 
 ### Credential & token handling

@@ -33,7 +33,7 @@ import type {
   SketchControlRef,
   TapeMeasureState,
 } from '../../store/types'
-import type { Point, Project, SketchFeature } from '../../types/project'
+import type { Point, Project } from '../../types/project'
 import type { FeatureClipboardPayload } from '../../platform/featureClipboard'
 import { formatLength } from '../../utils/units'
 import { buildArcSegmentFromThreePoints } from './draftHelpers'
@@ -50,6 +50,7 @@ import type { DimensionEditWorkflow } from './useDimensionEditWorkflow'
 import type { FilletWorkflow } from './useFilletWorkflow'
 import type { MoveWorkflow } from './useMoveWorkflow'
 import type { TransformExactWorkflow } from './useTransformExactWorkflow'
+import { resolveFeatureInstance, resolveFeatureInstances } from '../../store/helpers/resolveFeatures'
 
 interface PendingPreviewPoint {
   point: Point
@@ -92,6 +93,7 @@ export interface CanvasKeyboardCtx {
   originPreviewPointRef: MutableRefObject<PendingPreviewPoint | null>
   hoveredEditControlRef: MutableRefObject<SketchControlRef | null>
   canvasRef: RefObject<HTMLCanvasElement | null>
+  overlapFeaturePickerOpen: boolean
 
   dimEdit: DimensionEditWorkflow
   constraint: ConstraintWorkflow
@@ -116,6 +118,7 @@ export interface CanvasKeyboardCtx {
   confirmCutCutters: () => void
   cancelPendingShapeAction: () => void
   cancelPendingSketchEdit: () => void
+  cancelOverlapFeaturePicker: () => void
   completePendingMove: (toPoint: Point, copyCount?: number) => void
   completePendingShapeAction: () => void
   beginHistoryTransaction: () => void
@@ -165,6 +168,7 @@ export function useCanvasKeyboard(ctx: CanvasKeyboardCtx): {
     originPreviewPointRef,
     hoveredEditControlRef,
     canvasRef,
+    overlapFeaturePickerOpen,
     dimEdit,
     constraint,
     move,
@@ -187,6 +191,7 @@ export function useCanvasKeyboard(ctx: CanvasKeyboardCtx): {
     confirmCutCutters,
     cancelPendingShapeAction,
     cancelPendingSketchEdit,
+    cancelOverlapFeaturePicker,
     completePendingMove,
     completePendingShapeAction,
     beginHistoryTransaction,
@@ -215,6 +220,12 @@ export function useCanvasKeyboard(ctx: CanvasKeyboardCtx): {
     const pendingOffset = pendingOffsetRef.current
     const pendingShapeAction = pendingShapeActionRef.current
     const viewState = viewStateRef.current
+
+    if (event.key === 'Escape' && overlapFeaturePickerOpen) {
+      event.preventDefault()
+      cancelOverlapFeaturePicker()
+      return
+    }
 
     // ── Measure & dimension tools ──
     if (event.key === 'Escape' && tapeMeasureRef.current) {
@@ -463,6 +474,23 @@ export function useCanvasKeyboard(ctx: CanvasKeyboardCtx): {
         }
         return
       }
+
+      if (pendingAdd.shape === 'gear' && pendingAdd.anchor) {
+        event.preventDefault()
+        if (!currentEdit) {
+          const fallbackPoint = pendingAdd.outsideRadius !== null
+            ? { x: pendingAdd.anchor.x + pendingAdd.outsideRadius, y: pendingAdd.anchor.y }
+            : pendingAdd.anchor
+          const previewPoint = pendingPreviewPointRef.current?.point ?? fallbackPoint
+          const r = Math.hypot(previewPoint.x - pendingAdd.anchor.x, previewPoint.y - pendingAdd.anchor.y)
+          const angleDeg = (Math.atan2(previewPoint.y - pendingAdd.anchor.y, previewPoint.x - pendingAdd.anchor.x) * (180 / Math.PI)).toFixed(2).replace(/\.?0+$/, '')
+          dimEdit.setDimensionEdit({ shape: 'gear', anchor: pendingAdd.anchor, signX: 1, signY: 1, activeField: 'radius', width: '', height: '', radius: formatLength(r, units), length: '', angle: angleDeg })
+        } else {
+          dimEdit.setDimensionEdit(null)
+          canvasRef.current?.focus({ preventScroll: true })
+        }
+        return
+      }
     }
 
     if (event.key === 'Tab' && pendingMove && pendingMove.fromPoint && !pendingMove.toPoint) {
@@ -531,9 +559,7 @@ export function useCanvasKeyboard(ctx: CanvasKeyboardCtx): {
           const canvas = canvasRef.current
           if (canvas) {
             const vt = computeViewTransform(project.stock, canvas.width, canvas.height, viewState)
-            const sourceFeatures = pendingOffset.entityIds
-              .map((id) => project.features.find((f) => f.id === id) ?? null)
-              .filter((f): f is SketchFeature => f !== null)
+            const sourceFeatures = resolveFeatureInstances(project, pendingOffset.entityIds)
               .filter((f) => f.sketch.profile.closed)
             const previewInput = resolveOffsetPreview(sourceFeatures, rawOffsetPoint, snappedOffsetPoint, activeSnapRef.current?.mode ?? null, vt)
             if (previewInput) {
@@ -579,7 +605,7 @@ export function useCanvasKeyboard(ctx: CanvasKeyboardCtx): {
 
       const featureId = selection.selectedFeatureId
       if (!featureId) return
-      const feature = projectRef.current.features.find((f) => f.id === featureId)
+      const feature = resolveFeatureInstance(projectRef.current, featureId)
       if (!feature) return
 
       const profile = feature.sketch.profile

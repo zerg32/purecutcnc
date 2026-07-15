@@ -217,7 +217,8 @@ export interface LocalDimension {
 // Feature — core building block
 // ============================================================
 
-export type FeatureOperation = 'add' | 'subtract' | 'region' | 'model' | 'line'
+export type FeatureOperation = 'add' | 'subtract' | 'region' | 'model' | 'line' | 'construction'
+export type RegionMaskMode = 'include' | 'exclude'
 export type TextFontStyle = 'skeleton' | 'outline'
 export type TextFontId =
   | 'simple_stroke'
@@ -309,6 +310,7 @@ export interface SketchFeature {
   folderId: string | null
   sketch: Sketch
   operation: FeatureOperation
+  regionMaskMode?: RegionMaskMode
   z_top: DimensionRef
   z_bottom: DimensionRef
   visible: boolean
@@ -351,6 +353,7 @@ export interface FeatureDefinition {
   text?: TextFeatureData | null
   stl?: STLFeatureData | null
   operation: FeatureOperation
+  regionMaskMode?: RegionMaskMode
 }
 
 /**
@@ -373,7 +376,7 @@ export interface FeatureFolder {
   id: string
   name: string
   collapsed: boolean
-  section?: 'features' | 'regions'
+  section?: 'features' | 'regions' | 'construction'
   grouped?: boolean
 }
 
@@ -395,8 +398,8 @@ export interface Stock {
   origin: Point               // machine coordinate of stock corner
   /** When set, stock is derived from a feature. Feature is removed from features array and stored here. */
   sourceFeatureId?: string | null
-  /** The full feature data when stock is sourced from a feature. Null/undefined when using rectangle stock. */
-  sourceFeature?: SketchFeature | null
+  /** Lightweight source instance retained while the stock source is out of the feature tree. */
+  sourceFeature?: FeatureInstance | null
 }
 
 export interface GridSettings {
@@ -438,7 +441,7 @@ export interface Tool {
 export type OperationKind =
   | 'pocket'
   | 'v_carve'
-  | 'v_carve_recursive'
+  | 'v_carve_medial'
   | 'edge_route_inside'
   | 'edge_route_outside'
   | 'surface_clean'
@@ -476,6 +479,12 @@ export interface Operation {
   rpm: number
   pocketPattern: PocketPattern
   pocketAngle: number
+  /** Feed percentage (1-100) applied to fully engaged (slotting) pocket cuts:
+   *  each section's innermost offset loop, ring segments crossing uncleared
+   *  pinch corridors, the parallel boundary pass and first fill line, and the
+   *  first finish-floor cut. Undefined or 100 disables the reduction. */
+  pocketSlotFeedPercent?: number
+  roundOutsideCorners?: boolean
   stockToLeaveRadial: number
   stockToLeaveAxial: number
   finishWalls: boolean
@@ -584,8 +593,8 @@ export interface MachineOrigin {
 }
 
 export interface Project {
-  /** Schema version. '1.0' = legacy (flat features). '2.0' = split definitions + instances. */
-  version: '1.0' | '2.0'
+  /** Schema version. '3.0' makes lightweight definition-backed instances authoritative. */
+  version: '1.0' | '2.0' | '2.1' | '3.0'
   meta: ProjectMeta
   grid: GridSettings
   stock: Stock
@@ -594,10 +603,10 @@ export interface Project {
   dimensions: Record<string, NamedDimension>
   annotations: DimensionAnnotation[]
   modelAssets: Record<string, PersistedImportedMesh>
-  /** Feature definitions — shared canonical shape data. Populated during migration from legacy projects. */
+  /** Feature definitions — the sole owner of feature shape and machining role data. */
   featureDefinitions: Record<string, FeatureDefinition>
-  /** Feature instances. In '2.0' projects every tree row is an instance pointing at a definition. */
-  features: SketchFeature[]
+  /** Lightweight feature-tree instances. World geometry is derived through the resolver. */
+  features: FeatureInstance[]
   featureFolders: FeatureFolder[]
   featureTree: FeatureTreeEntry[]
   global_constraints: GlobalConstraint[]
@@ -899,7 +908,6 @@ export function stockFromFeature(feature: SketchFeature): Stock {
     visible: true,
     origin: { x: 0, y: 0 },
     sourceFeatureId: feature.id,
-    sourceFeature: feature,
   }
 }
 
@@ -953,10 +961,6 @@ export function transformFeatureProfile(feature: SketchFeature): SketchProfile {
  * stock.profile directly (e.g. rectangle).
  */
 export function getEffectiveStockProfile(stock: Stock): SketchProfile {
-  // Use the source feature's profile directly — it's already in project (world) coordinates.
-  if (stock.sourceFeature && stock.sourceFeatureId) {
-    return stock.sourceFeature.sketch.profile
-  }
   return stock.profile
 }
 
@@ -1267,7 +1271,7 @@ export function profileExceedsStock(profile: SketchProfile, stock: Stock): boole
 }
 
 /** The newest project schema version this build understands. */
-export const LATEST_PROJECT_VERSION = '2.0'
+export const LATEST_PROJECT_VERSION = '3.0'
 
 /**
  * True when a loaded project's `version` is newer than this build supports
@@ -1289,7 +1293,7 @@ export function newProject(name = 'Untitled', units: ProjectMeta['units'] = 'inc
   const now = new Date().toISOString()
   const stock = defaultStock(undefined, undefined, undefined, units)
   return {
-    version: '2.0',
+    version: LATEST_PROJECT_VERSION,
     meta: {
       name,
       created: now,

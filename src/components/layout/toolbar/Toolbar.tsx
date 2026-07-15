@@ -35,12 +35,13 @@ export function Toolbar({
   zoomWindowActive = false,
   onImportComplete,
   onExportModel,
+  onPrintDesign,
   snapSettings,
   activeSnapMode,
   onToggleSnapEnabled,
   onToggleSnapMode,
 }: ToolbarProps & SnapToolbarProps) {
-  const toolbar = useToolbarState(onZoomToModel, onImportComplete, onExportModel)
+  const toolbar = useToolbarState(onZoomToModel, onImportComplete, onExportModel, onPrintDesign)
 
   return (
     <>
@@ -61,6 +62,7 @@ export function Toolbar({
           onOpen={toolbar.fileCommands.openProject.onActivate}
           onImport={toolbar.fileCommands.importGeometry.onActivate}
           onExportModel={toolbar.fileCommands.exportModel.onActivate}
+          onPrintDesign={toolbar.fileCommands.printDesign.onActivate}
           onSave={toolbar.fileCommands.saveProject.onActivate}
           onUndo={toolbar.fileCommands.undo.onActivate}
           onRedo={toolbar.fileCommands.redo.onActivate}
@@ -99,8 +101,9 @@ export function Toolbar({
           onText={toolbar.creationCommands.shapeCommands[6].onActivate}
           onSlot={toolbar.creationCommands.shapeCommands[7].onActivate}
           onNgon={toolbar.creationCommands.shapeCommands[8].onActivate}
-          onRoundRect={toolbar.creationCommands.shapeCommands[9].onActivate}
-          onChamferRect={toolbar.creationCommands.shapeCommands[10].onActivate}
+          onGear={toolbar.creationCommands.shapeCommands[9].onActivate}
+          onRoundRect={toolbar.creationCommands.shapeCommands[10].onActivate}
+          onChamferRect={toolbar.creationCommands.shapeCommands[11].onActivate}
         />
         <ShapeToolActions
           pendingShapeAction={toolbar.sketchCommands.boolean.join.active ? 'join' : toolbar.sketchCommands.boolean.cut.active ? 'cut' : null}

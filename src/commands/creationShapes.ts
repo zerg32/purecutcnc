@@ -28,6 +28,7 @@ export const CREATION_SHAPE_OPTIONS = [
   { value: 'text', icon: 'text', noun: 'text' },
   { value: 'slot', icon: 'slot', noun: 'slot' },
   { value: 'ngon', icon: 'ngon', noun: 'regular polygon' },
+  { value: 'gear', icon: 'gear', noun: 'gear' },
   { value: 'roundrect', icon: 'roundrect', noun: 'rounded rectangle' },
   { value: 'chamferrect', icon: 'chamferrect', noun: 'chamfered rectangle' },
 ] as const
@@ -54,7 +55,12 @@ function isPlacementShape(shape: CreationShape): shape is PlacementShape {
 }
 
 export function shapeEnabledForTarget(shape: CreationShape, creationTarget: CreationTarget): boolean {
-  return creationTarget !== 'region' || shape !== 'text'
+  // Text and Gear are only solid-feature shapes. Line, Region, and
+  // Construction targets use plain profile geometry.
+  if (shape === 'text' || shape === 'gear') {
+    return creationTarget === 'feature'
+  }
+  return true
 }
 
 export function useCreationShapeCommands({
@@ -81,6 +87,7 @@ export function useCreationShapeCommands({
     startAddTextPlacement,
     startAddSlotPlacement,
     startAddNgonPlacement,
+    startAddGearPlacement,
     startAddRoundRectPlacement,
     startAddChamferRectPlacement,
     cancelPendingAdd,
@@ -122,6 +129,8 @@ export function useCreationShapeCommands({
       togglePlacement(shape, startAddSlotPlacement)
     } else if (shape === 'ngon') {
       togglePlacement(shape, startAddNgonPlacement)
+    } else if (shape === 'gear') {
+      togglePlacement(shape, startAddGearPlacement)
     } else if (shape === 'roundrect') {
       togglePlacement(shape, startAddRoundRectPlacement)
     } else if (shape === 'chamferrect') {

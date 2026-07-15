@@ -21,7 +21,7 @@
  */
 
 import { readFileSync } from 'fs'
-import { defaultTool, newProject, rectProfile, type Operation, type Project, type SketchFeature, type Tool } from '../../types/project'
+import { defaultTool, newProject, rectProfile, type Operation, type Project, type RegionMaskMode, type SketchFeature, type Tool } from '../../types/project'
 import { normalizeProject, useProjectStore } from '../../store/projectStore'
 import { convertProjectUnits } from '../../utils/units'
 import { generateFinishSurfaceToolpath, maxContourGap } from './finishSurface'
@@ -36,6 +36,7 @@ import type { ClipperPath, PocketToolpathResult, ToolpathMove } from './types'
 import { simulateReplayItemsHeightfield } from '../simulation/replay'
 import type { SimulationGrid, SimulationReplayItem } from '../simulation/types'
 import { applyTabsToEdgeRoute } from './tabs'
+import { projectWithFeatures, replaceProjectFeatures, resolvedFeature } from '../../test/projectFixtures'
 
 function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(`Assertion failed: ${message}`)
@@ -465,12 +466,11 @@ function makeRoughSurfaceOperation(): Operation {
 }
 
 function makeProject(): { project: Project; operation: Operation } {
-  const project = {
+  const project = projectWithFeatures({
     ...newProject('finish-surface-test', 'mm'),
     tools: [makeTool()],
-    features: [makeModelFeature()],
-  }
-  return { project: normalizeProject(project), operation: makeOperation() }
+  }, [makeModelFeature()])
+  return { project, operation: makeOperation() }
 }
 
 function loadImportedBlockWaterlineProject(): { project: Project; operation: Operation } {
@@ -483,12 +483,6 @@ function loadImportedBlockWaterlineProject(): { project: Project; operation: Ope
     throw new Error('expected waterline finish operation in 3d-imported-block-test3.camj')
   }
   return { project, operation }
-}
-
-function normalizeProjectFeatures(project: Project): void {
-  const normalized = normalizeProject(project)
-  project.features = normalized.features
-  project.modelAssets = normalized.modelAssets
 }
 
 function cutMoves(moves: ToolpathMove[]): ToolpathMove[] {
@@ -529,8 +523,10 @@ function distanceToSliceBoundary(paths: Array<Array<[number, number]>>, point: P
 }
 
 function assertNoTargetMeshGougingCuts(project: Project, operation: Operation, result: PocketToolpathResult): void {
-  const modelFeature = project.features.find((feature) => feature.kind === 'stl' && feature.operation === 'model')
-  if (!modelFeature) throw new Error('expected imported model feature')
+  if (operation.target.source !== 'features' || operation.target.featureIds.length === 0) {
+    throw new Error('expected imported model feature target')
+  }
+  const modelFeature = resolvedFeature(project, operation.target.featureIds[0])
   const toolRecord = project.tools.find((tool) => tool.id === operation.toolRef)
   if (!toolRecord) throw new Error('expected operation tool')
   const tool = normalizeToolForProject(toolRecord, project)
@@ -672,6 +668,7 @@ function makeRegionFeatureRect(
   y: number,
   w: number,
   h: number,
+  regionMaskMode: RegionMaskMode = 'include',
 ): SketchFeature {
   return {
     id,
@@ -686,6 +683,7 @@ function makeRegionFeatureRect(
       constraints: [],
     },
     operation: 'region',
+    regionMaskMode,
     z_top: 0,
     z_bottom: 0,
     visible: true,
@@ -914,7 +912,7 @@ function testFinishSurfaceRepeatGenerationIsStable(): void {
 function testFinishSurfaceAvoidsSurroundingAddFeature(): void {
   console.log('Testing finish_surface avoids surrounding add feature footprints...')
   const { project, operation } = makeProject()
-  project.features = [...project.features, makeProtectedAddFeature()]
+  replaceProjectFeatures(project, [...project.features, makeProtectedAddFeature()])
   const result = generateFinishSurfaceToolpath(project, operation)
   const protectedCuts = cutMoves(result.moves).filter((move) => (
     pointInsideProtectedBoss(move.from) || pointInsideProtectedBoss(move.to)
@@ -928,7 +926,7 @@ function testFinishSurfaceAvoidsSurroundingAddFeature(): void {
 function testFinishSurfaceRespectsContainingPocketDepth(): void {
   console.log('Testing finish_surface respects containing subtract pocket depth...')
   const { project, operation } = makeProject()
-  project.features = [makeContainingSubtractFeature(), ...project.features]
+  replaceProjectFeatures(project, [makeContainingSubtractFeature(), ...project.features])
   const result = generateFinishSurfaceToolpath(project, operation)
   const cuts = cutMoves(result.moves)
   const minCutZ = Math.min(...cuts.map((move) => move.to.z))
@@ -941,7 +939,7 @@ function testFinishSurfaceRespectsContainingPocketDepth(): void {
 function testFinishSurfaceRespectsSplitPocketDepths(): void {
   console.log('Testing finish_surface respects split subtract pocket depths...')
   const { project, operation } = makeProject()
-  project.features = [makeContainingSubtractFeature(), makeRightHalfSubtractFeature(), ...project.features]
+  replaceProjectFeatures(project, [makeContainingSubtractFeature(), makeRightHalfSubtractFeature(), ...project.features])
   const result = generateFinishSurfaceToolpath(project, operation)
   const cuts = cutMoves(result.moves)
   const leftCutsBelowShallow = cuts.filter((move) => (
@@ -1068,7 +1066,7 @@ function testWaterlineRespectsContainingPocketDepth(): void {
   console.log('Testing waterline respects containing subtract pocket depth...')
   const { project } = makeProject()
   const operation = makeWaterlineOperation()
-  project.features = [makeContainingSubtractFeature(), ...project.features]
+  replaceProjectFeatures(project, [makeContainingSubtractFeature(), ...project.features])
   project.operations = [operation]
   const result = generateFinishSurfaceToolpath(project, operation)
   const cuts = cutMoves(result.moves)
@@ -1080,8 +1078,7 @@ function testWaterlineRespectsContainingPocketDepth(): void {
 function testWaterlineRegionActsAsFilterNotBoundaryContour(): void {
   console.log('Testing waterline region is a filter (no boundary contour cuts)...')
   const { project } = makeProject()
-  project.features = [makeTaperedModelFeature(), makeRegionFeatureRect('region1', 9, 0, 4, 10)]
-  normalizeProjectFeatures(project)
+  replaceProjectFeatures(project, [makeTaperedModelFeature(), makeRegionFeatureRect('region1', 9, 0, 4, 10)])
   const operation: Operation = {
     ...makeWaterlineOperation(),
     target: { source: 'features', featureIds: ['model1', 'region1'] },
@@ -1106,8 +1103,7 @@ function testWaterlineRegionActsAsFilterNotBoundaryContour(): void {
 function testWaterlineAdaptivelyRefinesShallowSlope(): void {
   console.log('Testing waterline adaptively refines shallow tapered slope...')
   const { project } = makeProject()
-  project.features = [makeTaperedModelFeature()]
-  normalizeProjectFeatures(project)
+  replaceProjectFeatures(project, [makeTaperedModelFeature()])
   const operation: Operation = {
     ...makeWaterlineOperation(),
     stepover: 0.3,
@@ -1134,8 +1130,7 @@ function testWaterlineAdaptivelyRefinesShallowSlope(): void {
 function testWaterlineTipCapSmoothsConePeak(): void {
   console.log('Testing waterline projected cap smooths a cone peak...')
   const { project } = makeProject()
-  project.features = [makeConeModelFeature()]
-  normalizeProjectFeatures(project)
+  replaceProjectFeatures(project, [makeConeModelFeature()])
   const operation: Operation = {
     ...makeWaterlineOperation(),
     stepdown: 1,
@@ -1207,8 +1202,7 @@ function testWaterlineTipCapSmoothsConePeak(): void {
 function testWaterlineTipCapFillsCollapsedBranch(): void {
   console.log('Testing waterline projected cap fills a collapsed branch...')
   const { project } = makeProject()
-  project.features = [makeUnevenTwinConeModelFeature()]
-  normalizeProjectFeatures(project)
+  replaceProjectFeatures(project, [makeUnevenTwinConeModelFeature()])
   const operation: Operation = {
     ...makeWaterlineOperation(),
     stepdown: 1,
@@ -1246,8 +1240,7 @@ function testWaterlineTipCapFillsCollapsedBranch(): void {
 function testWaterlineAdaptiveRefinementCanBeDisabled(): void {
   console.log('Testing waterline adaptive refinement can be disabled...')
   const { project } = makeProject()
-  project.features = [makeTaperedModelFeature()]
-  normalizeProjectFeatures(project)
+  replaceProjectFeatures(project, [makeTaperedModelFeature()])
   const operation: Operation = {
     ...makeWaterlineOperation(),
     stepover: 0.3,
@@ -1267,8 +1260,7 @@ function testWaterlineAdaptiveRefinementCanBeDisabled(): void {
 function testWaterlineMicroStepoverControlsProjectedDensity(): void {
   console.log('Testing waterline adaptive spacing controls projected pass density...')
   const { project } = makeProject()
-  project.features = [makeTaperedModelFeature()]
-  normalizeProjectFeatures(project)
+  replaceProjectFeatures(project, [makeTaperedModelFeature()])
   const coarseOperation: Operation = {
     ...makeWaterlineOperation(),
     stepover: 0.8,
@@ -1293,8 +1285,7 @@ function testWaterlineMicroStepoverControlsProjectedDensity(): void {
 function testWaterlineZeroMicroStepoverUsesLegacyRatioFallback(): void {
   console.log('Testing waterline zero adaptive spacing uses legacy stepover-ratio fallback...')
   const { project } = makeProject()
-  project.features = [makeTaperedModelFeature()]
-  normalizeProjectFeatures(project)
+  replaceProjectFeatures(project, [makeTaperedModelFeature()])
   const legacyOperation: Operation = {
     ...makeWaterlineOperation(),
     stepover: 0.25,
@@ -1320,8 +1311,7 @@ function testWaterlineZeroMicroStepoverUsesLegacyRatioFallback(): void {
 function testWaterlineRefinementThresholdControlsProjectedBands(): void {
   console.log('Testing waterline trigger gap controls projected band insertion...')
   const { project } = makeProject()
-  project.features = [makeTaperedModelFeature()]
-  normalizeProjectFeatures(project)
+  replaceProjectFeatures(project, [makeTaperedModelFeature()])
   const autoThresholdOperation: Operation = {
     ...makeWaterlineOperation(),
     stepover: 0.3,
@@ -1346,8 +1336,7 @@ function testWaterlineRefinementThresholdControlsProjectedBands(): void {
 function testWaterlineAdaptiveDoesNotRefineSteepVerticalWalls(): void {
   console.log('Testing waterline adaptive refinement avoids 3D micro passes on steep vertical walls...')
   const { project } = makeProject()
-  project.features = [makePocketBlockModelFeature()]
-  normalizeProjectFeatures(project)
+  replaceProjectFeatures(project, [makePocketBlockModelFeature()])
   const operation: Operation = {
     ...makeWaterlineOperation(),
     stepdown: 0.5,
@@ -1366,8 +1355,7 @@ function testWaterlineAdaptiveDoesNotRefineSteepVerticalWalls(): void {
 function testWaterlineAdaptiveSubdivisionIsBounded(): void {
   console.log('Testing waterline adaptive subdivision is bounded...')
   const { project } = makeProject()
-  project.features = [makeTaperedModelFeature()]
-  normalizeProjectFeatures(project)
+  replaceProjectFeatures(project, [makeTaperedModelFeature()])
   const operation: Operation = {
     ...makeWaterlineOperation(),
     stepover: 0.001,
@@ -1385,8 +1373,7 @@ function testWaterlineAdaptiveSubdivisionIsBounded(): void {
 function testWaterlineMaxRingsPerBandLimitsProjectedRings(): void {
   console.log('Testing waterline max rings per band limits adaptive passes...')
   const { project } = makeProject()
-  project.features = [makeTaperedModelFeature()]
-  normalizeProjectFeatures(project)
+  replaceProjectFeatures(project, [makeTaperedModelFeature()])
   const unrestrictedOperation: Operation = {
     ...makeWaterlineOperation(),
     stepover: 0.2,
@@ -1483,8 +1470,7 @@ function testWaterlineNewOperationGetsToolDerivedAdaptiveSpacing(): void {
 function testWaterlineLevelsAreConstantBands(): void {
   console.log('Testing waterline levels are constant Z bands...')
   const { project } = makeProject()
-  project.features = [makeTaperedModelFeature()]
-  normalizeProjectFeatures(project)
+  replaceProjectFeatures(project, [makeTaperedModelFeature()])
   const operation = makeWaterlineOperation()
   project.operations = [operation]
   const result = generateFinishSurfaceToolpath(project, operation)
@@ -1498,8 +1484,7 @@ function testWaterlineLevelsAreConstantBands(): void {
 function testWaterlineEmitsBandBoundaryLevels(): void {
   console.log('Testing waterline emits current band boundary levels...')
   const { project } = makeProject()
-  project.features = [makeTaperedModelFeature()]
-  normalizeProjectFeatures(project)
+  replaceProjectFeatures(project, [makeTaperedModelFeature()])
   const operation: Operation = {
     ...makeWaterlineOperation(),
     stepover: 0.3,
@@ -1518,8 +1503,7 @@ function testWaterlineEmitsBandBoundaryLevels(): void {
 function testWaterlineBallEndmillUsesSideContactZ(): void {
   console.log('Testing waterline ball-endmill stays on constant slice Z levels...')
   const { project } = makeProject()
-  project.features = [makeTaperedModelFeature()]
-  normalizeProjectFeatures(project)
+  replaceProjectFeatures(project, [makeTaperedModelFeature()])
   const operation = makeWaterlineOperation()
   project.operations = [operation]
   const result = generateFinishSurfaceToolpath(project, operation)
@@ -1550,8 +1534,7 @@ function testWaterlineReachesModelTop(): void {
 function testWaterlineBlendsWithRoughInCombinedSimulation(): void {
   console.log('Testing rough + waterline combined replay remains stable...')
   const { project } = makeProject()
-  project.features = [makeTaperedModelFeature()]
-  normalizeProjectFeatures(project)
+  replaceProjectFeatures(project, [makeTaperedModelFeature()])
   project.stock = {
     ...project.stock,
     profile: rectProfile(0, 0, 20, 10),
@@ -1609,8 +1592,7 @@ function testWaterlineBlendsWithRoughInCombinedSimulation(): void {
 function testWaterlinePocketBlockSimplification(): void {
   console.log('Testing waterline simplification on steep pocket block...')
   const { project } = makeProject()
-  project.features = [makePocketBlockModelFeature()]
-  normalizeProjectFeatures(project)
+  replaceProjectFeatures(project, [makePocketBlockModelFeature()])
   const operation: Operation = {
     ...makeWaterlineOperation(),
     stepdown: 0.5,
@@ -1643,8 +1625,7 @@ function testWaterlinePocketBlockSimplification(): void {
 function testWaterlineIgnoresContainingAddAsIntersectingWall(): void {
   console.log('Testing waterline ignores containing add features as intersecting walls...')
   const { project } = makeProject()
-  project.features = [makeContainingAddFeature(), makePocketBlockModelFeature()]
-  normalizeProjectFeatures(project)
+  replaceProjectFeatures(project, [makeContainingAddFeature(), makePocketBlockModelFeature()])
   const operation: Operation = {
     ...makeWaterlineOperation(),
     stepdown: 0.5,
@@ -1664,8 +1645,7 @@ function testWaterlineIgnoresContainingAddAsIntersectingWall(): void {
 function testWaterlineCutsIntersectingAddFeatureWalls(): void {
   console.log('Testing waterline cuts intersecting add feature walls...')
   const { project } = makeProject()
-  project.features = [makePocketBlockModelFeature(), makeIntersectingAddFeature()]
-  normalizeProjectFeatures(project)
+  replaceProjectFeatures(project, [makePocketBlockModelFeature(), makeIntersectingAddFeature()])
   const operation: Operation = {
     ...makeWaterlineOperation(),
     stepdown: 0.5,
@@ -1737,7 +1717,7 @@ function testWaterlineClipsIntersectingWallToActualModelSpan(): void {
 function testFinishSurfaceExcludesAddOwnedPocketFromZRange(): void {
   console.log('Testing finish_surface excludes add-feature-owned pocket from Z range...')
   const { project, operation } = makeProject()
-  project.features = [makeAddOwnedPocketParent(), makeAddOwnedPocketFeature(), ...project.features]
+  replaceProjectFeatures(project, [makeAddOwnedPocketParent(), makeAddOwnedPocketFeature(), ...project.features])
   const result = generateFinishSurfaceToolpath(project, operation)
   const cuts = cutMoves(result.moves)
   assert(result.warnings.length === 0, `unexpected warnings: ${result.warnings.join(', ')}`)
@@ -1752,8 +1732,7 @@ function testFinishSurfaceExcludesAddOwnedPocketFromZRange(): void {
 function testWaterlineRespectsTabZRange(): void {
   console.log('Testing waterline respects tab Z range...')
   const { project } = makeProject()
-  project.features = [makePocketBlockModelFeature()]
-  normalizeProjectFeatures(project)
+  replaceProjectFeatures(project, [makePocketBlockModelFeature()])
   const tabRect = { x: 0, y: 0, w: 3, h: 3 }
   project.tabs = [{
     id: 'tab1',
@@ -1805,8 +1784,7 @@ function testWaterlineRespectsTabZRange(): void {
 function testWaterlineRespectsClampFootprint(): void {
   console.log('Testing waterline respects clamp footprint...')
   const { project } = makeProject()
-  project.features = [makePocketBlockModelFeature()]
-  normalizeProjectFeatures(project)
+  replaceProjectFeatures(project, [makePocketBlockModelFeature()])
   const clampRect = { x: 0, y: 0, w: 3, h: 3 }
   project.clamps = [{
     id: 'clamp1',
@@ -1967,8 +1945,7 @@ function loopBounds(loop: Point[]): { minX: number; maxX: number; minY: number; 
 function testWaterlineClimbWindsCorrectlyOnBothSides(): void {
   console.log('Testing waterline climb winds CCW around model and CW inside pocket ...')
   const { project } = makeProject()
-  project.features = [makePocketBlockModelFeature()]
-  normalizeProjectFeatures(project)
+  replaceProjectFeatures(project, [makePocketBlockModelFeature()])
   const op: Operation = {
     ...makeWaterlineOperation(),
     target: { source: 'features', featureIds: ['model1'] },
@@ -2009,8 +1986,7 @@ function testWaterlineClimbWindsCorrectlyOnBothSides(): void {
 function testWaterlineConventionalWindsOppositeOfClimb(): void {
   console.log('Testing waterline conventional winds CW around model and CCW inside pocket ...')
   const { project } = makeProject()
-  project.features = [makePocketBlockModelFeature()]
-  normalizeProjectFeatures(project)
+  replaceProjectFeatures(project, [makePocketBlockModelFeature()])
   const op: Operation = {
     ...makeWaterlineOperation(),
     target: { source: 'features', featureIds: ['model1'] },
@@ -2112,8 +2088,7 @@ testWaterlineSnapsDriftedClosedRingEntryToPreviousEndpoint()
 function testWaterlineFinishesOneColumnBeforeNext(): void {
   console.log('Testing waterline finishes one column top-to-bottom before moving to the next...')
   const { project } = makeProject()
-  project.features = [makePocketBlockModelFeature()]
-  normalizeProjectFeatures(project)
+  replaceProjectFeatures(project, [makePocketBlockModelFeature()])
   const op: Operation = {
     ...makeWaterlineOperation(),
     target: { source: 'features', featureIds: ['model1'] },
@@ -2167,8 +2142,7 @@ function testWaterlineFinishesOneColumnBeforeNext(): void {
 function testWaterlineColumnDescentReusesSameXYWithPlunge(): void {
   console.log('Testing waterline column descent reuses XY and emits plunge instead of retract...')
   const { project } = makeProject()
-  project.features = [makePocketBlockModelFeature()]
-  normalizeProjectFeatures(project)
+  replaceProjectFeatures(project, [makePocketBlockModelFeature()])
   const op: Operation = {
     ...makeWaterlineOperation(),
     target: { source: 'features', featureIds: ['model1'] },
@@ -2237,11 +2211,10 @@ function testParallelFinishLinksScanlinesOnFlatPocket(): void {
   // Use a region feature to restrict parallel finish to the pocket interior
   // only, so every scanline is entirely on the flat floor (no walls crossing).
   // This isolates the scanline-to-scanline link case the user reported.
-  project.features = [
+  replaceProjectFeatures(project, [
     makePocketBlockModelFeature(),
     makeRegionFeatureRect('region-pocket', 6.5, 3.5, 7, 3),
-  ]
-  normalizeProjectFeatures(project)
+  ])
   const op: Operation = {
     ...makeOperation(),
     target: { source: 'features', featureIds: ['model1', 'region-pocket'] },
@@ -2291,11 +2264,10 @@ testParallelFinishLinksScanlinesOnFlatPocket()
 function testParallelFinishCutsOverDeepTab(): void {
   console.log('Testing parallel finish cuts over a deep tab in the pocket floor...')
   const { project } = makeProject()
-  project.features = [
+  replaceProjectFeatures(project, [
     makePocketBlockModelFeature(),
     makeRegionFeatureRect('region-pocket', 6.5, 3.5, 7, 3),
-  ]
-  normalizeProjectFeatures(project)
+  ])
   // Tab sits inside the pocket footprint with its top well BELOW the pocket
   // floor (floor at z=2, tab top at z=0.5). The cutter never touches the tab,
   // so the toolpath must still cover this XY area.
@@ -2331,11 +2303,10 @@ function testParallelFinishCutsOverDeepTab(): void {
 function testParallelFinishPreservesTabWhenSurfaceDipsIntoIt(): void {
   console.log('Testing parallel finish clamps Z up to tab.z_top inside tab footprint...')
   const { project } = makeProject()
-  project.features = [
+  replaceProjectFeatures(project, [
     makePocketBlockModelFeature(),
     makeRegionFeatureRect('region-pocket', 6.5, 3.5, 7, 3),
-  ]
-  normalizeProjectFeatures(project)
+  ])
   // Tab top sits ABOVE the pocket floor — the natural finish surface dips
   // into the tab. The toolpath must raise its Z to tab.z_top inside the
   // tab footprint so the tab is left standing.
@@ -2376,7 +2347,92 @@ function testParallelFinishPreservesTabWhenSurfaceDipsIntoIt(): void {
     `expected some cut moves inside tab footprint (clamped to z=${tabTopZ}), got none`)
 }
 
+function testParallelFinishHonorsOrderedRegionMaskModes(): void {
+  console.log('Testing parallel finish honors ordered include/exclude region masks...')
+  const { project } = makeProject()
+  replaceProjectFeatures(project, [
+    makePocketBlockModelFeature(),
+    makeRegionFeatureRect('outer-region', 6.5, 3.5, 7, 3, 'include'),
+    makeRegionFeatureRect('exclude-region', 8, 4, 4, 2, 'exclude'),
+    makeRegionFeatureRect('inner-region', 9.25, 4.6, 1.5, 0.8, 'include'),
+  ])
+  const op: Operation = {
+    ...makeOperation(),
+    target: { source: 'features', featureIds: ['model1', 'outer-region', 'exclude-region', 'inner-region'] },
+    pocketPattern: 'parallel',
+    stepover: 0.4,
+    stockToLeaveAxial: 0,
+    stockToLeaveRadial: 0,
+  }
+  project.operations = [op]
+
+  const result = generateFinishSurfaceToolpath(project, op)
+  const cuts = cutMoves(result.moves)
+  let hasOuterCut = false
+  let hasInnerCut = false
+
+  assert(result.warnings.length === 0, `unexpected warnings: ${result.warnings.join(', ')}`)
+  assert(cuts.length > 0, 'expected parallel finish cuts inside the ordered region mask')
+  for (const move of cuts) {
+    const samples = [0.1, 0.25, 0.5, 0.75, 0.9].map((t) => ({
+      x: move.from.x + (move.to.x - move.from.x) * t,
+      y: move.from.y + (move.to.y - move.from.y) * t,
+    }))
+    hasOuterCut ||= samples.some((point) => pointInsideRect(point, { x: 6.5, y: 3.5, w: 1, h: 1 }))
+    hasInnerCut ||= samples.some((point) => pointInsideRect(point, { x: 9.25, y: 4.6, w: 1.5, h: 0.8 }))
+    assert(
+      samples.every((point) => !pointInsideRect(point, { x: 8, y: 4, w: 4, h: 2 })
+        || pointInsideRect(point, { x: 9.25, y: 4.6, w: 1.5, h: 0.8 })),
+      `parallel finish should remove excluded area except the later include, got move ${JSON.stringify(move)}`,
+    )
+  }
+  assert(hasOuterCut, 'expected parallel finish cuts in the outer included area')
+  assert(hasInnerCut, 'expected parallel finish cuts in the later included inner region')
+}
+
+function testParallelFinishExcludeOnlyKeepsOuterCoverage(): void {
+  console.log('Testing parallel finish exclude-only mask keeps outer model coverage...')
+  const { project } = makeProject()
+  replaceProjectFeatures(project, [
+    makePocketBlockModelFeature(),
+    makeRegionFeatureRect('exclude-region', 6.5, 3.5, 7, 3, 'exclude'),
+  ])
+  const op: Operation = {
+    ...makeOperation(),
+    target: { source: 'features', featureIds: ['model1', 'exclude-region'] },
+    pocketPattern: 'parallel',
+    stepover: 0.4,
+    stockToLeaveAxial: 0,
+    stockToLeaveRadial: 0,
+  }
+  project.operations = [op]
+
+  const result = generateFinishSurfaceToolpath(project, op)
+  const cuts = cutMoves(result.moves)
+  let hasLeftCoverage = false
+  let hasRightCoverage = false
+
+  assert(result.warnings.length === 0, `unexpected warnings: ${result.warnings.join(', ')}`)
+  assert(cuts.length > 0, 'expected parallel finish cuts outside the excluded region')
+  for (const move of cuts) {
+    const samples = [0.1, 0.25, 0.5, 0.75, 0.9].map((t) => ({
+      x: move.from.x + (move.to.x - move.from.x) * t,
+      y: move.from.y + (move.to.y - move.from.y) * t,
+    }))
+    hasLeftCoverage ||= samples.some((point) => pointInsideRect(point, { x: 1, y: 3.5, w: 4, h: 3 }))
+    hasRightCoverage ||= samples.some((point) => pointInsideRect(point, { x: 15, y: 3.5, w: 4, h: 3 }))
+    assert(
+      samples.every((point) => !pointInsideRect(point, { x: 6.5, y: 3.5, w: 7, h: 3 })),
+      `parallel finish exclude-only mask should remove the excluded rectangle, got move ${JSON.stringify(move)}`,
+    )
+  }
+  assert(hasLeftCoverage, 'expected cuts on the left side outside the excluded region')
+  assert(hasRightCoverage, 'expected cuts on the right side outside the excluded region')
+}
+
 testParallelFinishCutsOverDeepTab()
 testParallelFinishPreservesTabWhenSurfaceDipsIntoIt()
+testParallelFinishHonorsOrderedRegionMaskModes()
+testParallelFinishExcludeOnlyKeepsOuterCoverage()
 
 console.log('finishSurface tests passed')
