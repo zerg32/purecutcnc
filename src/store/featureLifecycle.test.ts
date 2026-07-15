@@ -28,9 +28,8 @@ import {
   newProject,
   rectProfile,
   type FeatureDefinition,
-  type Matrix2D,
+  type FeatureInstance,
   type Project,
-  type SketchFeature,
   type STLFeatureData,
   type TextFeatureData,
 } from '../types/project'
@@ -52,6 +51,7 @@ function resetStore(project?: Project): void {
     selection: {
       selectedFeatureIds: [],
       selectedFeatureId: null,
+      selectedTabIds: [],
       selectedNode: null,
       mode: 'feature' as const,
       sketchEditTool: null,
@@ -70,7 +70,7 @@ function getProject(): Project {
   return useProjectStore.getState().project
 }
 
-function getFeatures(): SketchFeature[] {
+function getFeatures(): FeatureInstance[] {
   return getProject().features
 }
 
@@ -105,7 +105,7 @@ const CREATE_TEST_CASES: Array<{
   kind: string
   setup: () => void
   expectKind: string
-  extra?: (f: SketchFeature & { definitionId?: string; transform?: Matrix2D }, def: FeatureDefinition) => void
+  extra?: (f: FeatureInstance, def: FeatureDefinition) => void
 }> = [
   {
     kind: 'rect',
@@ -242,19 +242,17 @@ for (const tc of CREATE_TEST_CASES) {
     const features = getFeatures()
     assert(features.length === 1, `[${tc.kind}] expected 1 feature, got ${features.length}`)
 
-    const f = features[0] as SketchFeature & { definitionId?: string; transform?: Matrix2D }
-    assert(f.kind === tc.expectKind, `[${tc.kind}] expected kind ${tc.expectKind}, got ${f.kind}`)
+    const f = features[0] as FeatureInstance
+    const defId = f.definitionId
+    const def = getDefinitions()[defId]
+    assert(def !== null && def !== undefined, `[${tc.kind}] definition should exist`)
+    assert(def.kind === tc.expectKind, `[${tc.kind}] expected kind ${tc.expectKind}, got ${def.kind}`)
 
-    // Should have a definitionId set by addFeature
-    const defId = f.definitionId!
     assert(defId !== undefined, `[${tc.kind}] feature should have definitionId`)
     assert(typeof defId === 'string' && defId.length > 0, `[${tc.kind}] definitionId should be non-empty string`)
 
     // Definition should exist in featureDefinitions
-    const defs = getDefinitions()
-    const def = defs[defId]
     assert(def !== undefined, `[${tc.kind}] definition should exist in featureDefinitions`)
-    assert(def.kind === tc.expectKind, `[${tc.kind}] definition kind should be ${tc.expectKind}, got ${def.kind}`)
 
     // Identity transform should be present
     const t = f.transform
@@ -301,10 +299,12 @@ for (const tc of CREATE_TEST_CASES) {
     assert(after.features.length === before.features.length,
       `[${tc.kind}] feature count: before=${before.features.length}, after=${after.features.length}`)
 
-    // Feature kinds preserved
+    // Feature kinds preserved via definitions
     for (let i = 0; i < before.features.length; i++) {
-      assert(after.features[i].kind === before.features[i].kind,
-        `[${tc.kind}] feature[${i}] kind: before=${before.features[i].kind}, after=${after.features[i].kind}`)
+      const beforeDef = before.featureDefinitions[before.features[i].definitionId]
+      const afterDef = after.featureDefinitions[after.features[i].definitionId]
+      assert(beforeDef?.kind === afterDef?.kind,
+        `[${tc.kind}] feature[${i}] kind: before=${beforeDef?.kind}, after=${afterDef?.kind}`)
     }
 
     // Definitions preserved
@@ -369,7 +369,7 @@ test('mixed project: copyMode + linked relationships survive save/load', () => {
   store.addCircleFeature('Base', 50, 50, 10, 5)
 
   const baseFeatures = getFeatures()
-  const base = baseFeatures[0] as SketchFeature & { definitionId?: string }
+  const base = baseFeatures[0] as FeatureInstance
   const baseDefId = base.definitionId!
 
   // Duplicate as reference (linked)
@@ -380,7 +380,7 @@ test('mixed project: copyMode + linked relationships survive save/load', () => {
 
   const afterCopy = getFeatures()
   assert(afterCopy.length === 2, `expected 2 features after copy, got ${afterCopy.length}`)
-  const linked = afterCopy[1] as SketchFeature & { definitionId?: string }
+  const linked = afterCopy[1] as FeatureInstance
   assert(linked.definitionId === baseDefId, 'linked copy should share definitionId')
 
   // Copy as independent
@@ -392,13 +392,13 @@ test('mixed project: copyMode + linked relationships survive save/load', () => {
 
   const afterIndependent = getFeatures()
   assert(afterIndependent.length === 3, `expected 3 features, got ${afterIndependent.length}`)
-  const independent = afterIndependent[2] as SketchFeature & { definitionId?: string }
+  const independent = afterIndependent[2] as FeatureInstance
   assert(independent.definitionId !== baseDefId, 'independent copy should have different definitionId')
 
   // Make unique on the linked copy
   store.makeUnique(linked.id)
   const afterUnique = getFeatures()
-  const uniqued = afterUnique[1] as SketchFeature & { definitionId?: string }
+  const uniqued = afterUnique[1] as FeatureInstance
   assert(uniqued.definitionId !== baseDefId, 'made-unique should have different definitionId')
 
   // Save and reload
@@ -423,9 +423,9 @@ test('mixed project: copyMode + linked relationships survive save/load', () => {
   assert(loadedDefIds.size === 3, `expected 3 distinct definitionIds after load, got ${loadedDefIds.size}`)
 
   // Verify the base feature still resolves correctly
-  const baseLoaded = loaded.features.find((f) => f.id === base.id) as SketchFeature & { definitionId?: string; transform?: Matrix2D }
+  const baseLoaded = loaded.features.find((f) => f.id === base.id) as FeatureInstance
   assert(baseLoaded != null, 'base feature should survive load')
-  const baseLoadedDef = loaded.featureDefinitions[baseLoaded.definitionId!]
+  const baseLoadedDef = loaded.featureDefinitions[baseLoaded.definitionId]
   assert(baseLoadedDef != null, 'base definition should survive load')
   assert(baseLoadedDef.kind === 'circle', 'base definition should still be circle')
 })
@@ -457,7 +457,7 @@ test('undo after edit restores pre-edit geometry', () => {
   const store = useProjectStore.getState()
 
   store.addCircleFeature('Circle', 50, 50, 10, 5)
-  const f = getFeatures()[0] as SketchFeature & { definitionId?: string }
+  const f = getFeatures()[0] as FeatureInstance
   const defId = f.definitionId!
   const preDef = getDefinitions()[defId]
   const preProfileJSON = JSON.stringify(preDef.profile)
@@ -482,7 +482,7 @@ test('undo after transform restores position', () => {
   const store = useProjectStore.getState()
 
   store.addRectFeature('Rect', 10, 20, 30, 15, 5)
-  const f = getFeatures()[0] as SketchFeature & { definitionId?: string; transform?: Matrix2D }
+  const f = getFeatures()[0] as FeatureInstance
   const preTransform = { ...(f.transform ?? IDENTITY_MATRIX) }
 
   store.selectFeature(f.id)
@@ -490,13 +490,13 @@ test('undo after transform restores position', () => {
   store.setPendingMoveFrom({ x: 0, y: 0 })
   store.completePendingMove({ x: 50, y: 30 })
 
-  const moved = getFeatures()[0] as SketchFeature & { definitionId?: string; transform?: Matrix2D }
+  const moved = getFeatures()[0] as FeatureInstance
   const movedTransform = moved.transform ?? IDENTITY_MATRIX
   assert(!(movedTransform.e === preTransform.e && movedTransform.f === preTransform.f),
     'move should change transform')
 
   store.undo()
-  const undone = getFeatures()[0] as SketchFeature & { definitionId?: string; transform?: Matrix2D }
+  const undone = getFeatures()[0] as FeatureInstance
   const undoneTransform = undone.transform ?? IDENTITY_MATRIX
   assert(undoneTransform.e === preTransform.e && undoneTransform.f === preTransform.f,
     `undo should restore transform: expected e=${preTransform.e}, f=${preTransform.f}, got e=${undoneTransform.e}, f=${undoneTransform.f}`)
@@ -509,7 +509,7 @@ test('undo after delete restores feature + definition', () => {
   const store = useProjectStore.getState()
 
   store.addCircleFeature('Circle', 50, 50, 10, 5)
-  const f = getFeatures()[0] as SketchFeature & { definitionId?: string }
+  const f = getFeatures()[0] as FeatureInstance
   const defId = f.definitionId!
 
   assert(getDefinitions()[defId] !== undefined, 'definition should exist before delete')
@@ -537,7 +537,7 @@ test('delete last instance: definition is GCd; undo restores both', () => {
   const store = useProjectStore.getState()
 
   store.addCircleFeature('Circle', 50, 50, 10, 5)
-  const f = getFeatures()[0] as SketchFeature & { definitionId?: string }
+  const f = getFeatures()[0] as FeatureInstance
   const defId = f.definitionId!
 
   assert(getDefinitions()[defId] !== undefined, 'definition should exist before delete')
@@ -562,7 +562,7 @@ test('linked pair: delete one instance keeps definition; delete last GCs it', ()
   const store = useProjectStore.getState()
 
   store.addCircleFeature('Circle', 50, 50, 10, 5)
-  const base = getFeatures()[0] as SketchFeature & { definitionId?: string }
+  const base = getFeatures()[0] as FeatureInstance
   const defId = base.definitionId!
 
   // Create linked copy
@@ -573,7 +573,7 @@ test('linked pair: delete one instance keeps definition; delete last GCs it', ()
 
   const features = getFeatures()
   assert(features.length === 2, 'should have 2 linked instances')
-  const linked = features[1] as SketchFeature & { definitionId?: string }
+  const linked = features[1] as FeatureInstance
   assert(linked.definitionId === defId, 'linked should share definitionId')
 
   // Delete one instance — definition still referenced by the other
@@ -600,7 +600,7 @@ test('undo delete: restores instance AND its definition', () => {
   const store = useProjectStore.getState()
 
   store.addCircleFeature('Circle', 50, 50, 10, 5)
-  const f = getFeatures()[0] as SketchFeature & { definitionId?: string }
+  const f = getFeatures()[0] as FeatureInstance
   const defId = f.definitionId!
 
   const preDefJSON = JSON.stringify(getDefinitions()[defId])
@@ -642,14 +642,15 @@ test('multiple undos step back through history', () => {
   store.undo()
   assert(getFeatures().length === 2, 'after undo 1: should have 2 features')
   // The remaining features should be rect and circle
-  const kinds1 = getFeatures().map((f) => f.kind)
+  const defs = getDefinitions()
+  const kinds1 = getFeatures().map((f) => defs[f.definitionId]?.kind ?? 'unknown')
   assert(kinds1.includes('rect') && kinds1.includes('circle'),
     `after undo 1: should have rect+circle, got ${kinds1.join(',')}`)
 
   // Undo step 2
   store.undo()
   assert(getFeatures().length === 1, 'after undo 2: should have 1 feature')
-  assert(getFeatures()[0].kind === 'rect', 'remaining feature should be rect')
+  assert(defs[getFeatures()[0].definitionId]?.kind === 'rect', 'remaining feature should be rect')
 
   // Undo step 1
   store.undo()
@@ -658,7 +659,7 @@ test('multiple undos step back through history', () => {
   // Redo step 1
   store.redo()
   assert(getFeatures().length === 1, 'after redo 1: should have 1 feature')
-  assert(getFeatures()[0].kind === 'rect', 'after redo 1: should be rect')
+  assert(defs[getFeatures()[0].definitionId]?.kind === 'rect', 'after redo 1: should be rect')
 
   // Redo step 2
   store.redo()
