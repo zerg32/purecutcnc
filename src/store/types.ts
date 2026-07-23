@@ -14,7 +14,8 @@
  * limitations under the License.
  */
 
-import type { ImportedShape, ImportSourceType } from '../import'
+import type { ToolpathWarning } from '../engine/toolpaths/warningCodes'
+import type { ClassifiedShape, ImportedShape, ImportSourceType } from '../import'
 import type { MachineDefinition } from '../engine/gcode/types'
 import type { SnapMode } from '../sketch/snapping'
 import type {
@@ -41,6 +42,7 @@ import type {
 } from '../types/project'
 import type { TextToolConfig } from '../text'
 import type { ToolLibraryEntry } from '../toolLibrary'
+import type { GearCreationParams } from '../sketch/gearProfile'
 
 export type SelectionMode = 'feature' | 'sketch_edit'
 
@@ -92,6 +94,7 @@ export type SelectedNode =
   | { type: 'backdrop' }
   | { type: 'features_root' }
   | { type: 'regions_root' }
+  | { type: 'construction_root' }
   | { type: 'tabs_root' }
   | { type: 'clamps_root' }
   | { type: 'folder'; folderId: string }
@@ -122,11 +125,18 @@ export type PendingAddTool =
     }
   | { shape: 'slot'; points: Point[]; session: number }
   | { shape: 'ngon'; anchor: Point | null; sides: number; session: number }
+  | {
+      shape: 'gear'
+      anchor: Point | null
+      outsideRadius: number | null
+      params: GearCreationParams
+      session: number
+    }
   | { shape: 'roundrect'; anchor: Point | null; corner: number; session: number }
   | { shape: 'chamferrect'; anchor: Point | null; corner: number; session: number }
 
 export type CompositeSegmentMode = 'line' | 'arc' | 'spline'
-export type CreationTarget = 'feature' | 'region'
+export type CreationTarget = 'feature' | 'line' | 'region' | 'construction'
 
 /**
  * Transient tape-measure state. Not persisted, not in undo history.
@@ -333,10 +343,10 @@ export interface ProjectStore {
   /** Resize rectangular stock by changing width or height while holding one side fixed. */
   setRectStockDimension: (axis: 'width' | 'height', value: number, heldSide: 'left' | 'right' | 'top' | 'bottom') => void
   setGrid: (grid: GridSettings) => void
-  setUnits: (units: Project['meta']['units']) => void
+  setUnits: (units: Project['meta']['units'], mode: 'convert' | 'reinterpret') => void
   setCreationTarget: (target: CreationTarget) => void
 
-  addFeatureFolder: (section?: 'features' | 'regions') => string
+  addFeatureFolder: (section?: 'features' | 'regions' | 'construction') => string
   updateFeatureFolder: (id: string, patch: Partial<FeatureFolder>) => void
   deleteFeatureFolder: (id: string) => void
   assignFeaturesToFolder: (featureIds: string[], folderId: string | null) => void
@@ -344,13 +354,16 @@ export interface ProjectStore {
   reorderFeatureTreeEntries: (entries: FeatureTreeEntry[]) => void
   setAllFeaturesVisible: (visible: boolean) => void
   setAllRegionsVisible: (visible: boolean) => void
+  setAllConstructionVisible: (visible: boolean) => void
   toggleFolderVisible: (folderId: string) => void
   toggleRegionFolderVisible: (folderId: string) => void
+  toggleConstructionFolderVisible: (folderId: string) => void
   selectFolderFeatures: (folderId: string) => void
   toggleFolderGrouped: (folderId: string) => void
+  revealFeatureFolder: (folderId: string) => void
   groupSelectedFeaturesIntoNewFolder: () => string
   addFeature: (feature: SketchFeature) => void
-  importShapes: (input: { fileName: string; sourceType: ImportSourceType; shapes: ImportedShape[] }) => string[]
+  importShapes: (input: { fileName: string; sourceType: ImportSourceType; shapes: ImportedShape[]; classified?: ClassifiedShape[] }) => string[]
   importCamjFolders: (input: { fileName: string; sourceProject: Project; selectedFolderIds: string[]; importStock?: boolean }) => string[]
   updateFeature: (id: string, patch: Partial<SketchFeature>) => void
   updateFeatures: (ids: string[], patch: Partial<SketchFeature>) => void
@@ -396,7 +409,7 @@ export interface ProjectStore {
     libraryTools?: ToolLibraryEntry[],
   ) => string | null
   updateOperation: (id: string, patch: Partial<Operation>) => void
-  createRestOperation: (operationId: string) => { operationId: string | null; regionIds: string[]; warnings: string[] }
+  createRestOperation: (operationId: string) => { operationId: string | null; regionIds: string[]; warnings: ToolpathWarning[] }
   setAllOperationToolpathVisibility: (visible: boolean) => void
   deleteOperation: (id: string) => void
   duplicateOperation: (id: string) => string | null
@@ -411,6 +424,7 @@ export interface ProjectStore {
   selectBackdrop: () => void
   selectFeaturesRoot: () => void
   selectRegionsRoot: () => void
+  selectConstructionRoot: () => void
   selectTabsRoot: () => void
   selectClampsRoot: () => void
   selectFeatureFolder: (id: string) => void
@@ -452,6 +466,7 @@ export interface ProjectStore {
   startAddTextPlacement: (config: TextToolConfig) => void
   startAddSlotPlacement: () => void
   startAddNgonPlacement: () => void
+  startAddGearPlacement: () => void
   startAddRoundRectPlacement: () => void
   startAddChamferRectPlacement: () => void
   cancelPendingAdd: () => void
@@ -469,6 +484,9 @@ export interface ProjectStore {
   completePendingComposite: () => void
   completePendingOpenComposite: () => void
   setPendingNgonSides: (n: number) => void
+  setPendingGearParams: (patch: Partial<GearCreationParams>) => void
+  setPendingGearRadiusAt: (point: Point) => void
+  completePendingGear: () => string[]
   setPendingRectCorner: (n: number) => void
   placePendingSlotAt: (p3: Point) => void
   placePendingNgonAt: (point: Point) => void
@@ -506,6 +524,7 @@ export interface ProjectStore {
   addSplineFeature: (name: string, points: Point[], depth: number) => void
   addSlotFeature: (name: string, p1: Point, p2: Point, width: number, depth: number) => void
   addNgonFeature: (name: string, cx: number, cy: number, sides: number, circumradius: number, firstVertexAngle: number, depth: number) => void
+  addGearFeature: (name: string, center: Point, outsideRadius: number, params: GearCreationParams, depth: number) => string[]
   addRoundRectFeature: (name: string, x: number, y: number, w: number, h: number, corner: number, depth: number) => void
   addChamferRectFeature: (name: string, x: number, y: number, w: number, h: number, corner: number, depth: number) => void
 

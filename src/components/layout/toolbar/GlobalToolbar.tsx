@@ -22,6 +22,8 @@ import { SnapActions } from './SnapActions'
 import { ToolbarDialog } from './ToolbarDialog'
 import { useToolbarState } from './useToolbarState'
 import type { SnapToolbarProps, ToolbarProps } from './shared'
+import { AppearanceControl } from '../AppearanceControl'
+import { LanguageControl } from '../LanguageControl'
 
 export function GlobalToolbar({
   onZoomToModel,
@@ -29,12 +31,13 @@ export function GlobalToolbar({
   zoomWindowActive = false,
   onImportComplete,
   onExportModel,
+  onPrintDesign,
   snapSettings,
   activeSnapMode,
   onToggleSnapEnabled,
   onToggleSnapMode,
 }: ToolbarProps & SnapToolbarProps) {
-  const toolbar = useToolbarState(onZoomToModel, onImportComplete, onExportModel)
+  const toolbar = useToolbarState(onZoomToModel, onImportComplete, onExportModel, onPrintDesign)
 
   return (
     <>
@@ -55,6 +58,7 @@ export function GlobalToolbar({
           onOpen={toolbar.fileCommands.openProject.onActivate}
           onImport={toolbar.fileCommands.importGeometry.onActivate}
           onExportModel={toolbar.fileCommands.exportModel.onActivate}
+          onPrintDesign={toolbar.fileCommands.printDesign.onActivate}
           onSave={toolbar.fileCommands.saveProject.onActivate}
           onUndo={toolbar.fileCommands.undo.onActivate}
           onRedo={toolbar.fileCommands.redo.onActivate}
@@ -80,6 +84,10 @@ export function GlobalToolbar({
           onDeleteDimension={toolbar.sketchCommands.dimension.deleteDimension.onActivate}
           onToggleShowDimensions={toolbar.sketchCommands.dimension.showDimensions.onActivate}
         />
+        <div className="toolbar-group toolbar-group--appearance">
+          <AppearanceControl />
+          <LanguageControl />
+        </div>
       </div>
       <ToolbarDialog
         showNewProjectDialog={toolbar.showNewProjectDialog}

@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+import { useI18n } from '../i18n/i18nContext'
 import { useFileActions } from '../platform/useFileActions'
 import { useProjectStore } from '../store/projectStore'
 
@@ -22,6 +23,7 @@ export type FileCommandId =
   | 'openProject'
   | 'importGeometry'
   | 'exportModel'
+  | 'printDesign'
   | 'saveProject'
   | 'undo'
   | 'redo'
@@ -39,18 +41,21 @@ interface UseFileCommandsArgs {
   onNewProject: () => void
   onImportGeometry: () => void
   onExportModel: () => void
+  onPrintDesign: () => void
 }
 
 export function useFileCommands({
   onNewProject,
   onImportGeometry,
   onExportModel,
+  onPrintDesign,
 }: UseFileCommandsArgs): {
   dirty: boolean
   historyPastLength: number
   historyFutureLength: number
   commands: Record<FileCommandId, FileCommandDescriptor>
 } {
+  const { t } = useI18n()
   const fileActions = useFileActions()
   const { dirty, history, undo, redo } = useProjectStore()
 
@@ -77,7 +82,7 @@ export function useFileCommands({
       newProject: {
         id: 'newProject',
         icon: 'new',
-        label: 'New project',
+        label: t('file.newProject'),
         enabled: true,
         active: false,
         onActivate: handleNewProject,
@@ -85,7 +90,7 @@ export function useFileCommands({
       openProject: {
         id: 'openProject',
         icon: 'open',
-        label: 'Open project',
+        label: t('file.openProject'),
         enabled: true,
         active: false,
         onActivate: handleOpenProject,
@@ -93,7 +98,7 @@ export function useFileCommands({
       importGeometry: {
         id: 'importGeometry',
         icon: 'import',
-        label: 'Import geometry',
+        label: t('file.importGeometry'),
         enabled: true,
         active: false,
         onActivate: onImportGeometry,
@@ -101,15 +106,23 @@ export function useFileCommands({
       exportModel: {
         id: 'exportModel',
         icon: 'export',
-        label: 'Export model',
+        label: t('file.exportModel'),
         enabled: true,
         active: false,
         onActivate: onExportModel,
       },
+      printDesign: {
+        id: 'printDesign',
+        icon: 'print',
+        label: t('file.printDesign'),
+        enabled: true,
+        active: false,
+        onActivate: onPrintDesign,
+      },
       saveProject: {
         id: 'saveProject',
         icon: 'save',
-        label: dirty ? 'Save project with unsaved changes' : 'Save project',
+        label: dirty ? t('file.saveProjectDirty') : t('file.saveProject'),
         enabled: true,
         active: false,
         onActivate: handleSaveProject,
@@ -117,7 +130,7 @@ export function useFileCommands({
       undo: {
         id: 'undo',
         icon: 'undo',
-        label: 'Undo',
+        label: t('file.undo'),
         enabled: history.past.length > 0,
         active: false,
         onActivate: undo,
@@ -125,7 +138,7 @@ export function useFileCommands({
       redo: {
         id: 'redo',
         icon: 'redo',
-        label: 'Redo',
+        label: t('file.redo'),
         enabled: history.future.length > 0,
         active: false,
         onActivate: redo,

@@ -34,7 +34,7 @@ import type { DimensionAnchor, DimensionAnnotation, Point, Project, SketchFeatur
 import type { FeatureClipboardPayload } from '../../platform/featureClipboard'
 import { formatLength, parseLengthInput } from '../../utils/units'
 import { chamferDistanceFromPoint, filletRadiusFromPoint } from '../../store/helpers/referenceTransforms'
-import { resolvedProjectFeatures } from '../../store/helpers/resolveFeatures'
+import { resolveFeatureInstance, resolveFeatureInstances, resolvedProjectFeatures } from '../../store/helpers/resolveFeatures'
 import {
   canvasToWorld,
   computeViewTransform,
@@ -50,6 +50,7 @@ import {
   findHitClampId,
   findHitFeatureId,
   findHitTabId,
+  resolveFeatureSelectionHit,
   segmentHitTest,
 } from './hitTest'
 import { hitBackdrop } from './scenePrimitives'
@@ -67,6 +68,7 @@ import type { MoveWorkflow } from './useMoveWorkflow'
 import type { TransformExactWorkflow } from './useTransformExactWorkflow'
 import type { FilletWorkflow } from './useFilletWorkflow'
 import type { UseSnapPreviewReturn } from './useSnapPreview'
+import type { OverlapFeatureCandidate } from './useOverlapFeaturePicker'
 
 const POLYGON_CLOSE_RADIUS = 12
 
@@ -102,6 +104,8 @@ export interface ClickPlacementCtx {
   isDraggingNodeRef: MutableRefObject<boolean>
   zoomWindowActive: boolean
   multiSelectMode: boolean
+  clearOverlapFeaturePicker: () => void
+  openOverlapFeaturePicker: (candidates: readonly OverlapFeatureCandidate[], additive: boolean) => void
   selectionRef: MutableRefObject<SelectionState>
   projectRef: MutableRefObject<Project>
   pendingAddRef: MutableRefObject<PendingAddTool | null>
@@ -208,6 +212,7 @@ export interface ClickPlacementCtx {
   placePendingAddAt: (point: Point) => void
   placePendingSlotAt: (point: Point) => void
   placePendingNgonAt: (point: Point) => void
+  setPendingGearRadiusAt: (point: Point) => void
   placePendingTextAt: (point: Point) => void
   placeOriginAt: (point: Point) => void
   addPendingPolygonPoint: (point: Point) => void
@@ -234,6 +239,8 @@ export function useClickPlacement(ctx: ClickPlacementCtx): UseClickPlacementRetu
     isDraggingNodeRef,
     zoomWindowActive,
     multiSelectMode,
+    clearOverlapFeaturePicker,
+    openOverlapFeaturePicker,
     selectionRef,
     projectRef,
     pendingAddRef,
@@ -306,6 +313,7 @@ export function useClickPlacement(ctx: ClickPlacementCtx): UseClickPlacementRetu
     placePendingAddAt,
     placePendingSlotAt,
     placePendingNgonAt,
+    setPendingGearRadiusAt,
     placePendingTextAt,
     placeOriginAt,
     addPendingPolygonPoint,
@@ -350,6 +358,8 @@ export function useClickPlacement(ctx: ClickPlacementCtx): UseClickPlacementRetu
     const point = canvasCoordinates(event)
     const canvas = canvasRef.current
     if (!canvas) return
+
+    clearOverlapFeaturePicker()
 
     const vt = computeViewTransform(project.stock, canvas.width, canvas.height, viewState)
     const world = canvasToWorld(point.cx, point.cy, vt)
@@ -785,6 +795,14 @@ export function useClickPlacement(ctx: ClickPlacementCtx): UseClickPlacementRetu
           placePendingNgonAt(snapped)
           setPendingPreviewPointRef(null)
         }
+      } else if (pendingAdd.shape === 'gear') {
+        if (!pendingAdd.anchor) {
+          setPendingAddAnchor(snapped)
+          setPendingPreviewPointRef({ point: snapped, session: pendingAdd.session })
+        } else if (pendingAdd.outsideRadius === null) {
+          setPendingGearRadiusAt(snapped)
+          setPendingPreviewPointRef({ point: snapped, session: pendingAdd.session })
+        }
       } else if (pendingAdd.shape === 'text') {
         placePendingTextAt(snapped)
         setPendingPreviewPointRef(null)
@@ -858,9 +876,7 @@ export function useClickPlacement(ctx: ClickPlacementCtx): UseClickPlacementRetu
     }
 
     if (pendingOffset) {
-      const sourceFeatures = pendingOffset.entityIds
-        .map((id) => project.features.find((f) => f.id === id) ?? null)
-        .filter((f): f is SketchFeature => f !== null)
+      const sourceFeatures = resolveFeatureInstances(project, pendingOffset.entityIds)
         .filter((f) => f.sketch.profile.closed)
       if (!pickedPoint) {
         return
@@ -883,7 +899,7 @@ export function useClickPlacement(ctx: ClickPlacementCtx): UseClickPlacementRetu
           point.cx >= rect.cx - rect.halfW && point.cx <= rect.cx + rect.halfW &&
           point.cy >= rect.cy - rect.halfH && point.cy <= rect.cy + rect.halfH
         ) {
-          const feature = project.features.find((f) => f.id === rect.featureId)
+          const feature = resolveFeatureInstance(project, rect.featureId)
           const foundConstraint = feature?.sketch.constraints.find((c) => c.id === rect.constraintId)
           if (foundConstraint && typeof foundConstraint.value === 'number') {
             constraint.setConstraintEdit({
@@ -909,10 +925,22 @@ export function useClickPlacement(ctx: ClickPlacementCtx): UseClickPlacementRetu
       return
     }
 
-    const hitId = findHitFeatureId(world, resolvedProjectFeatures(project), vt)
+    const resolvedFeatures = resolvedProjectFeatures(project)
+    const featureHit = resolveFeatureSelectionHit(world, resolvedFeatures, vt)
     const additive = event.metaKey || event.ctrlKey || event.shiftKey || multiSelectMode || !!pendingShapeAction
-    if (hitId) {
-      selectFeature(hitId, additive)
+
+    if (featureHit.kind === 'direct') {
+      selectFeature(featureHit.featureId, additive)
+    } else if (featureHit.kind === 'ambiguous') {
+      const featuresById = new Map(resolvedFeatures.map((feature) => [feature.id, feature]))
+      const hitCandidates: OverlapFeatureCandidate[] = []
+      for (const id of featureHit.candidateIds) {
+        const feature = featuresById.get(id)
+        if (feature) {
+          hitCandidates.push({ id: feature.id, name: feature.name, kind: feature.kind })
+        }
+      }
+      openOverlapFeaturePicker(hitCandidates, additive)
     } else if (project.backdrop?.visible && hitBackdrop(world, project.backdrop)) {
       selectBackdrop()
     } else if (!additive) {

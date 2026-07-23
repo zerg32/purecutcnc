@@ -17,6 +17,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Icon } from '../../Icon'
+import { useI18n } from '../../../i18n/i18nContext'
+import type { MessageKey } from '../../../i18n/locales/en'
 import { useOutsideDismiss } from '../../../hooks/useOutsideDismiss'
 import { usePortalPosition } from '../../../hooks/usePortalPosition'
 import type { CreationTarget } from '../../../store/types'
@@ -27,6 +29,20 @@ import {
 } from './shared'
 import type { CreationShape, PopoverOpenMode } from './shared'
 import { ToolbarAction, ToolbarActionButton } from './primitives'
+
+const CREATION_TARGET_LABEL_KEYS: Record<CreationTarget, MessageKey> = {
+  feature: 'sketch.target.createFeatures',
+  line: 'sketch.target.createLines',
+  region: 'sketch.target.createRegions',
+  construction: 'sketch.target.createConstruction',
+}
+
+const CREATION_TARGET_NOUN_KEYS: Record<CreationTarget, MessageKey> = {
+  feature: 'sketch.target.feature',
+  line: 'sketch.target.line',
+  region: 'sketch.target.region',
+  construction: 'sketch.target.construction',
+}
 
 function CreationActions({
   pendingShape,
@@ -42,6 +58,7 @@ function CreationActions({
   onText,
   onSlot,
   onNgon,
+  onGear,
   onRoundRect,
   onChamferRect,
 }: {
@@ -58,9 +75,11 @@ function CreationActions({
   onText: () => void
   onSlot: () => void
   onNgon: () => void
+  onGear: () => void
   onRoundRect: () => void
   onChamferRect: () => void
 }) {
+  const { t } = useI18n()
   const [lastShape, setLastShape] = useState<CreationShape>('rect')
   const [drawerOpen, setDrawerOpen] = useState(false)
   const pickerRef = useRef<HTMLDivElement | null>(null)
@@ -69,12 +88,13 @@ function CreationActions({
   const closeTimerRef = useRef<number | null>(null)
   const openModeRef = useRef<PopoverOpenMode | null>(null)
   const side = tooltipSide ?? 'bottom'
-  const availableShapeOptions = creationTarget === 'region'
-    ? CREATION_SHAPE_OPTIONS.filter((option) => option.value !== 'text')
+  const availableShapeOptions = creationTarget !== 'feature'
+    ? CREATION_SHAPE_OPTIONS.filter((option) => option.value !== 'text' && option.value !== 'gear')
     : CREATION_SHAPE_OPTIONS
   const lastShapeOption = availableShapeOptions.find((option) => option.value === lastShape) ?? availableShapeOptions[0]
   const primaryOptions = availableShapeOptions.filter((o) => o.tier === 'primary')
   const secondaryOptions = availableShapeOptions.filter((o) => o.tier === 'secondary')
+  const targetNoun = t(CREATION_TARGET_NOUN_KEYS[creationTarget])
 
   function clearDrawerTimers() {
     if (openTimerRef.current !== null) {
@@ -104,6 +124,8 @@ function CreationActions({
       onSlot()
     } else if (shape === 'ngon') {
       onNgon()
+    } else if (shape === 'gear') {
+      onGear()
     } else if (shape === 'roundrect') {
       onRoundRect()
     } else if (shape === 'chamferrect') {
@@ -180,7 +202,7 @@ function CreationActions({
           className={[
             'toolbar-icon-btn',
             'toolbar-target-btn',
-            target === 'region' ? 'toolbar-target-btn--region' : '',
+            target !== 'feature' ? `toolbar-target-btn--${target}` : '',
             active ? 'toolbar-icon-btn--active toolbar-target-btn--active' : '',
           ].join(' ')}
           onClick={() => onCreationTargetChange(target)}
@@ -197,8 +219,10 @@ function CreationActions({
   return (
     <div className={`toolbar-creation-block toolbar-creation-block--${creationTarget}`}>
       <div className="toolbar-target-toggle" role="group" aria-label="Creation target">
-        {renderCreationTargetButton('feature', 'plus', 'Create features')}
-        {renderCreationTargetButton('region', 'pocket', 'Create regions')}
+        {renderCreationTargetButton('feature', 'plus', t(CREATION_TARGET_LABEL_KEYS.feature))}
+        {renderCreationTargetButton('line', 'snap-line', t(CREATION_TARGET_LABEL_KEYS.line))}
+        {renderCreationTargetButton('region', 'pocket', t(CREATION_TARGET_LABEL_KEYS.region))}
+        {renderCreationTargetButton('construction', 'construction', t(CREATION_TARGET_LABEL_KEYS.construction))}
       </div>
       <div
         className="toolbar-group toolbar-group--drawing toolbar-creation-picker"
@@ -214,7 +238,7 @@ function CreationActions({
           }
         }}
       >
-        <ToolbarAction label={drawerOpen ? 'Close shape drawer' : `Choose ${creationTarget} shape`} tooltipSide={tooltipSide}>
+        <ToolbarAction label={drawerOpen ? t('sketch.creation.closeDrawer') : t('sketch.creation.chooseTarget', { target: t(CREATION_TARGET_NOUN_KEYS[creationTarget]) })} tooltipSide={tooltipSide}>
           <button
             type="button"
             className={`toolbar-icon-btn toolbar-creation-picker__drawer-btn ${drawerOpen ? 'toolbar-icon-btn--active' : ''}`}
@@ -229,7 +253,7 @@ function CreationActions({
               }
               event.currentTarget.blur()
             }}
-            aria-label={drawerOpen ? 'Close shape drawer' : `Choose ${creationTarget} shape`}
+            aria-label={drawerOpen ? t('sketch.creation.closeDrawer') : t('sketch.creation.chooseTarget', { target: t(CREATION_TARGET_NOUN_KEYS[creationTarget]) })}
             aria-haspopup="menu"
             aria-expanded={drawerOpen}
           >
@@ -238,7 +262,9 @@ function CreationActions({
         </ToolbarAction>
         <ToolbarActionButton
           icon={lastShapeOption.icon}
-          label={pendingShape === lastShapeOption.value ? `Cancel ${lastShapeOption.noun} tool` : `Add ${creationTarget} ${lastShapeOption.noun}`}
+          label={pendingShape === lastShapeOption.value
+            ? t('sketch.creation.cancelTool', { shape: t(lastShapeOption.nounKey) })
+            : t('sketch.creation.addShape', { target: targetNoun, shape: t(lastShapeOption.nounKey) })}
           active={pendingShape === lastShapeOption.value}
           tooltipSide={tooltipSide}
           onClick={() => runShapeTool(lastShapeOption.value)}
@@ -273,7 +299,7 @@ function CreationActions({
                     <ToolbarActionButton
                       key={option.value}
                       icon={option.icon}
-                      label={`Add ${creationTarget} ${option.noun}`}
+                      label={t('sketch.creation.addShape', { target: targetNoun, shape: t(option.nounKey) })}
                       active={lastShapeOption.value === option.value}
                       tooltipSide="bottom"
                       onClick={() => { selectShape(option.value) }}
@@ -288,7 +314,7 @@ function CreationActions({
                         <ToolbarActionButton
                           key={option.value}
                           icon={option.icon}
-                          label={`Add ${creationTarget} ${option.noun}`}
+                          label={t('sketch.creation.addShape', { target: targetNoun, shape: t(option.nounKey) })}
                           active={lastShapeOption.value === option.value}
                           tooltipSide="bottom"
                           onClick={() => { selectShape(option.value) }}

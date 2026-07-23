@@ -23,8 +23,9 @@
  * Run with: npx tsx src/engine/toolpaths/toolpaths.test.ts
  */
 
-import type { Operation, Project, SketchFeature, Tool } from '../../types/project'
+import type { Operation, Project, RegionMaskMode, SketchFeature, Tool } from '../../types/project'
 import { circleProfile, defaultTool, newProject, polygonProfile, rectProfile } from '../../types/project'
+import { projectWithFeatures } from '../../test/projectFixtures'
 import type { ToolpathBounds, ToolpathMove, ToolpathResult } from './types'
 import { mergePocketToolpathResults, mergeToolpathResults, perFeatureOperations } from './multiFeature'
 import { generatePocketToolpath } from './pocket'
@@ -35,7 +36,12 @@ import { generateSurfaceCleanToolpath } from './surface'
 import { generateFollowLineToolpath } from './carving'
 import { generateDrillingToolpath } from './drilling'
 import { generatePocketRestRegionDrafts } from './restRegions'
-import { buildMaskFromClipperPaths, clipToolpathResultToRegionMask } from './regions'
+import {
+  buildMaskFromClipperPaths,
+  buildRegionMask,
+  clipToolpathResultToRegionMask,
+  splitFeatureTargets,
+} from './regions'
 import { DEFAULT_CLIPPER_SCALE } from './geometry'
 import type { ClipperPath } from './types'
 
@@ -121,7 +127,14 @@ function makeModelFeature(
   }
 }
 
-function makeRegionFeature(id: string, x: number, y: number, w: number, h: number): SketchFeature {
+function makeRegionFeature(
+  id: string,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  regionMaskMode?: RegionMaskMode,
+): SketchFeature {
   return {
     id,
     name: id,
@@ -135,6 +148,29 @@ function makeRegionFeature(id: string, x: number, y: number, w: number, h: numbe
       constraints: [],
     },
     operation: 'region',
+    regionMaskMode,
+    z_top: 0,
+    z_bottom: 0,
+    visible: true,
+    locked: false,
+  }
+}
+
+function makePolygonRegionFeature(id: string, points: Array<{ x: number; y: number }>, regionMaskMode?: RegionMaskMode): SketchFeature {
+  return {
+    id,
+    name: id,
+    kind: 'polygon',
+    folderId: null,
+    sketch: {
+      profile: polygonProfile(points),
+      origin: { x: 0, y: 0 },
+      orientationAngle: 0,
+      dimensions: [],
+      constraints: [],
+    },
+    operation: 'region',
+    regionMaskMode,
     z_top: 0,
     z_bottom: 0,
     visible: true,
@@ -196,11 +232,10 @@ function makeVBit(id: string): Tool {
 function baseProject(tools: Tool[], features: SketchFeature[]): Project {
   const project = newProject('test', 'mm')
   // Stock large enough to fit the pockets; thickness doesn't matter here.
-  return {
+  return projectWithFeatures({
     ...project,
     tools,
-    features,
-  }
+  }, features)
 }
 
 function makePocketOp(
@@ -223,6 +258,7 @@ function makePocketOp(
     rpm: 18000,
     pocketPattern: 'offset',
     pocketAngle: 0,
+    roundOutsideCorners: false,
     stockToLeaveRadial: 0,
     stockToLeaveAxial: 0,
     finishWalls: true,
@@ -241,6 +277,45 @@ function makePocketOp(
 
 function cutMoves(moves: ToolpathMove[]): ToolpathMove[] {
   return moves.filter((m) => m.kind === 'cut')
+}
+
+function cutMoveGroups(moves: ToolpathMove[]): ToolpathMove[][] {
+  const groups: ToolpathMove[][] = []
+  let current: ToolpathMove[] = []
+  for (const move of moves) {
+    if (move.kind === 'cut') {
+      current.push(move)
+    } else if (current.length > 0) {
+      groups.push(current)
+      current = []
+    }
+  }
+  if (current.length > 0) {
+    groups.push(current)
+  }
+  return groups
+}
+
+function toolpathMoveSignature(moves: ToolpathMove[]): string[] {
+  const fmt = (value: number) => Number(value.toFixed(6))
+  return moves.map((move) => JSON.stringify({
+    kind: move.kind,
+    from: { x: fmt(move.from.x), y: fmt(move.from.y), z: fmt(move.from.z) },
+    to: { x: fmt(move.to.x), y: fmt(move.to.y), z: fmt(move.to.z) },
+  }))
+}
+
+function hasUndirectedCutMoveNear(
+  moves: ToolpathMove[],
+  a: { x: number; y: number },
+  b: { x: number; y: number },
+  epsilon = 0.01,
+): boolean {
+  const near = (point: { x: number; y: number }, expected: { x: number; y: number }) =>
+    approx(point.x, expected.x, epsilon) && approx(point.y, expected.y, epsilon)
+  return moves.some((move) =>
+    (near(move.from, a) && near(move.to, b))
+    || (near(move.from, b) && near(move.to, a)))
 }
 
 /** Dedup consecutive equal Z values in the sequence of cut-move Zs. */
@@ -426,7 +501,7 @@ function testMergeToolpathResults() {
   const partA: ToolpathResult = {
     operationId: 'sub1',
     moves: [{ kind: 'cut', from: { x: 0, y: 0, z: -2 }, to: { x: 10, y: 0, z: -2 } }],
-    warnings: ['warn A'],
+    warnings: [{ code: 'debug' as const, params: { text: 'warn A' } }],
     bounds: bounds1,
     collidingClampIds: ['c1'],
   }
@@ -442,7 +517,7 @@ function testMergeToolpathResults() {
   assert(merged.operationId === 'op-parent', 'operationId comes from parent')
   assert(merged.moves.length === 2, 'moves concatenated')
   assert(merged.moves[0].from.x === 0 && merged.moves[1].from.x === 10, 'move order preserved')
-  assert(merged.warnings.length === 1 && merged.warnings[0] === 'warn A', 'warnings concatenated')
+  assert(merged.warnings.length === 1 && merged.warnings[0].params?.text === 'warn A', 'warnings concatenated')
   assert(merged.bounds !== null, 'bounds present')
   assert(merged.bounds!.minX === 0 && merged.bounds!.maxX === 30, 'bounds X unioned')
   assert(merged.bounds!.minZ === -6 && merged.bounds!.maxZ === 1, 'bounds Z unioned')
@@ -730,7 +805,8 @@ function testPocketRejectsRegionOnlyTarget() {
   const result = generatePocketToolpath(project, op)
 
   assert(cutMoves(result.moves).length === 0, 'region-only pocket should generate no cuts')
-  assert(result.warnings.some((warning) => warning.includes('No valid subtract features')), 'region-only pocket should warn about missing subtract targets')
+  assert(result.warnings.some((warning) => warning.code === 'resolverNoValidSubtracts'
+    || (warning.code === 'resolverNoValidKindTargets' && String(warning.params?.kind ?? '').includes('subtract'))), 'region-only pocket should warn about missing subtract targets')
   console.log('pocket region-only rejection: PASSED')
 }
 
@@ -814,6 +890,274 @@ function draftArea(draft: { profile: { start: { x: number; y: number }; segments
     area += current.x * next.y - next.x * current.y
   }
   return Math.abs(area / 2)
+}
+
+function testRegionMaskHonorsOrderedIncludeExcludeNesting() {
+  console.log('Testing ordered include/exclude region-mask nesting...')
+  const mask = buildRegionMask([
+    makeRegionFeature('outer-include', 0, 0, 10, 10, 'include'),
+    makeRegionFeature('middle-exclude', 2, 2, 6, 6, 'exclude'),
+    makeRegionFeature('inner-include', 4, 4, 2, 2, 'include'),
+  ])
+
+  assert(mask !== null, 'expected ordered region mask')
+  if (!mask) throw new Error('expected ordered region mask')
+  assert(mask.containsPoint({ x: 1, y: 1 }), 'outer include should be active')
+  assert(!mask.containsPoint({ x: 3, y: 3 }), 'exclude region should cut a hole')
+  assert(mask.containsPoint({ x: 5, y: 5 }), 'later include should add an island back inside the hole')
+  console.log('ordered include/exclude region-mask nesting: PASSED')
+}
+
+function testRegionMaskExcludeOnlyPreservesOutsideArea() {
+  console.log('Testing exclude-only region mask preserves outside area...')
+  const mask = buildRegionMask([
+    makeRegionFeature('exclude-only', 0, 0, 10, 10, 'exclude'),
+  ])
+  assert(mask !== null, 'exclude-only region masks should create an outside-area mask')
+  if (!mask) throw new Error('expected exclude-only region mask')
+  assert(mask.containsPoint({ x: 20, y: 20 }), 'exclude-only mask should keep points outside the excluded region')
+  assert(!mask.containsPoint({ x: 5, y: 5 }), 'exclude-only mask should reject points inside the excluded region')
+  console.log('exclude-only region mask: PASSED')
+}
+
+function testRegionMaskLeadingExcludeCanBeReincluded() {
+  console.log('Testing leading exclude region can be re-included...')
+  const mask = buildRegionMask([
+    makeRegionFeature('outer-exclude', 0, 0, 10, 10, 'exclude'),
+    makeRegionFeature('inner-include', 4, 4, 2, 2, 'include'),
+  ])
+  assert(mask !== null, 'expected leading exclude region mask')
+  if (!mask) throw new Error('expected leading exclude region mask')
+  assert(mask.containsPoint({ x: -1, y: -1 }), 'leading exclude should keep subject area outside the excluded region')
+  assert(!mask.containsPoint({ x: 2, y: 2 }), 'leading exclude should remove the excluded region')
+  assert(mask.containsPoint({ x: 5, y: 5 }), 'later include should add an island back inside the excluded region')
+  console.log('leading exclude region re-include: PASSED')
+}
+
+function testSplitFeatureTargetsOrdersRegionsByProjectSequence() {
+  console.log('Testing selected region targets follow project order...')
+  const tool = makeFlatEndmill('t1', 2)
+  const pocket = makePocketFeature('pocket', 0, 0, 24, 12, 4, 0)
+  const outerInclude = makeRegionFeature('outer-include', 0, 0, 24, 12, 'include')
+  const middleExclude = makeRegionFeature('middle-exclude', 4, 2, 16, 8, 'exclude')
+  const innerInclude = makeRegionFeature('inner-include', 8, 4, 8, 4, 'include')
+  const finalExclude = makeRegionFeature('final-exclude', 10, 5, 4, 2, 'exclude')
+  const project = baseProject([tool], [
+    pocket,
+    outerInclude,
+    middleExclude,
+    innerInclude,
+    finalExclude,
+  ])
+  const split = splitFeatureTargets(project, [
+    'pocket',
+    'middle-exclude',
+    'inner-include',
+    'final-exclude',
+    'outer-include',
+  ])
+
+  assert(
+    split.machiningFeatures.map((feature) => feature.id).join(',') === 'pocket',
+    'machining targets should stay in selected target order',
+  )
+  assert(
+    split.regionFeatures.map((feature) => feature.id).join(',')
+      === 'outer-include,middle-exclude,inner-include,final-exclude',
+    `region targets should follow project order, got ${split.regionFeatures.map((feature) => feature.id).join(',')}`,
+  )
+
+  const mask = buildRegionMask(split.regionFeatures)
+  assert(mask !== null, 'expected project-ordered region mask')
+  if (!mask) throw new Error('expected project-ordered region mask')
+  assert(mask.containsPoint({ x: 2, y: 2 }), 'outer include should keep the corner area')
+  assert(!mask.containsPoint({ x: 5, y: 5 }), 'middle exclude should remove its area')
+  assert(mask.containsPoint({ x: 9, y: 5 }), 'inner include should add its area back')
+  assert(!mask.containsPoint({ x: 11, y: 6 }), 'final exclude should cut the nested area again')
+  console.log('selected region target project ordering: PASSED')
+}
+
+function pointInsideRect(point: { x: number; y: number }, x: number, y: number, w: number, h: number): boolean {
+  return point.x > x && point.x < x + w && point.y > y && point.y < y + h
+}
+
+function pointInsidePolygon(point: { x: number; y: number }, polygon: Array<{ x: number; y: number }>): boolean {
+  let inside = false
+  for (let index = 0, previous = polygon.length - 1; index < polygon.length; previous = index, index += 1) {
+    const currentPoint = polygon[index]
+    const previousPoint = polygon[previous]
+    if (((currentPoint.y > point.y) !== (previousPoint.y > point.y))
+      && point.x < ((previousPoint.x - currentPoint.x) * (point.y - currentPoint.y))
+        / (previousPoint.y - currentPoint.y) + currentPoint.x) {
+      inside = !inside
+    }
+  }
+  return inside
+}
+
+function testPocketFinishExcludeOnlyRegionRemovesMachiningArea() {
+  console.log('Testing pocket finish honors exclude-only region masks...')
+  const tool = makeFlatEndmill('t1', 2)
+  const pocket = makePocketFeature('p1', 0, 0, 30, 16, 4, 0)
+  const exclude = makeRegionFeature('r-exclude', 10, 5, 10, 6, 'exclude')
+  const project = baseProject([tool], [pocket, exclude])
+  const op = makePocketOp({
+    kind: 'pocket',
+    pass: 'finish',
+    target: { source: 'features', featureIds: ['p1', 'r-exclude'] },
+    toolRef: 't1',
+    pocketPattern: 'parallel',
+    pocketAngle: 0,
+  })
+  const result = generatePocketToolpath(project, op)
+  const cuts = cutMoves(result.moves)
+
+  assert(cuts.length > 0, 'expected pocket finish cuts')
+  for (const move of cuts) {
+    const samples = [0.25, 0.5, 0.75].map((t) => ({
+      x: move.from.x + (move.to.x - move.from.x) * t,
+      y: move.from.y + (move.to.y - move.from.y) * t,
+    }))
+    assert(
+      samples.every((point) => !pointInsideRect(point, 10, 5, 10, 6)),
+      `exclude-only region should remove pocket finish cuts inside the excluded area, got move ${JSON.stringify(move)}`,
+    )
+  }
+  console.log('pocket finish exclude-only region mask: PASSED')
+}
+
+function testPocketOffsetFinishExcludeOnlyRegionStillGeneratesToolpath() {
+  console.log('Testing pocket offset finish honors exclude-only region masks...')
+  const tool = makeFlatEndmill('t1', 0.25)
+  const pocket = makePocketFeature('p1', 0.5, 0.5, 3, 2, 0.75, 0)
+  const excludePoints = [
+    { x: 0.5, y: 0.9 },
+    { x: 0.9, y: 0.5 },
+    { x: 3.1, y: 0.5 },
+    { x: 3.5, y: 0.9 },
+    { x: 3.5, y: 2.1 },
+    { x: 3.1, y: 2.5 },
+    { x: 0.9, y: 2.5 },
+    { x: 0.5, y: 2.1 },
+  ]
+  const exclude = makePolygonRegionFeature('r-exclude', excludePoints, 'exclude')
+  const project = baseProject([tool], [pocket, exclude])
+  const op = makePocketOp({
+    kind: 'pocket',
+    pass: 'finish',
+    target: { source: 'features', featureIds: ['p1', 'r-exclude'] },
+    toolRef: 't1',
+    pocketPattern: 'offset',
+    stepdown: 0.125,
+    stepover: 0.32,
+    machiningOrder: 'feature_first',
+  })
+  const result = generatePocketToolpath(project, op)
+  const cuts = cutMoves(result.moves)
+
+  assert(cuts.length > 0, `expected offset finish cuts outside excluded region, warnings: ${result.warnings.join(', ')}`)
+  for (const move of cuts) {
+    const samples = [0.1, 0.25, 0.5, 0.75, 0.9].map((t) => ({
+      x: move.from.x + (move.to.x - move.from.x) * t,
+      y: move.from.y + (move.to.y - move.from.y) * t,
+    }))
+    assert(
+      samples.every((point) => !pointInsidePolygon(point, excludePoints)),
+      `exclude-only region should remove offset finish cuts inside the excluded area, got move ${JSON.stringify(move)}`,
+    )
+  }
+  console.log('pocket offset finish exclude-only region mask: PASSED')
+}
+
+function testPocketOffsetFinishLeadingExcludeWithInnerInclude() {
+  console.log('Testing pocket offset finish honors leading exclude with inner include...')
+  const tool = makeFlatEndmill('t1', 0.25)
+  const pocket = makePocketFeature('p1', 0.5, 0.5, 3, 2, 0.75, 0)
+  const excludePoints = [
+    { x: 0.5, y: 0.9 },
+    { x: 0.9, y: 0.5 },
+    { x: 3.1, y: 0.5 },
+    { x: 3.5, y: 0.9 },
+    { x: 3.5, y: 2.1 },
+    { x: 3.1, y: 2.5 },
+    { x: 0.9, y: 2.5 },
+    { x: 0.5, y: 2.1 },
+  ]
+  const includePoints = [
+    { x: 1.5, y: 1 },
+    { x: 2.5, y: 1 },
+    { x: 2.5, y: 1.875 },
+    { x: 1.5, y: 1.875 },
+  ]
+  const exclude = makePolygonRegionFeature('r-exclude', excludePoints, 'exclude')
+  const include = makePolygonRegionFeature('r-include', includePoints, 'include')
+  const project = baseProject([tool], [pocket, exclude, include])
+  const op = makePocketOp({
+    kind: 'pocket',
+    pass: 'finish',
+    target: { source: 'features', featureIds: ['p1', 'r-exclude', 'r-include'] },
+    toolRef: 't1',
+    pocketPattern: 'offset',
+    stepdown: 0.125,
+    stepover: 0.32,
+    machiningOrder: 'feature_first',
+  })
+  const result = generatePocketToolpath(project, op)
+  const cuts = cutMoves(result.moves)
+  let hasCornerCut = false
+  let hasInnerCut = false
+
+  assert(cuts.length > 0, `expected offset finish cuts, warnings: ${result.warnings.join(', ')}`)
+  for (const move of cuts) {
+    const samples = [0.1, 0.25, 0.5, 0.75, 0.9].map((t) => ({
+      x: move.from.x + (move.to.x - move.from.x) * t,
+      y: move.from.y + (move.to.y - move.from.y) * t,
+    }))
+    hasCornerCut ||= samples.some((point) => point.x < 0.9 && point.y < 0.9)
+    hasInnerCut ||= samples.some((point) => pointInsidePolygon(point, includePoints))
+    assert(
+      samples.every((point) => !pointInsidePolygon(point, excludePoints) || pointInsidePolygon(point, includePoints)),
+      `exclude/include region mask should keep only outside-exclude or inner-include cuts, got move ${JSON.stringify(move)}`,
+    )
+  }
+  assert(hasCornerCut, 'expected cuts in the corner area outside the excluded region')
+  assert(hasInnerCut, 'expected cuts inside the re-included inner region')
+  console.log('pocket offset finish leading exclude with inner include: PASSED')
+}
+
+function testPocketRestRegionsEmitHoleCapableMaskModes() {
+  console.log('Testing pocket rest-region generation emits include/exclude mask modes...')
+  const tool = makeFlatEndmill('t1', 4)
+  const pocket = makePocketFeature('p1', 0, 0, 40, 24, 4, 0)
+  const island = makeIslandFeature('i1', 12, 6, 16, 12, 4, 0)
+  const project = baseProject([tool], [pocket, island])
+  const op = makePocketOp({
+    kind: 'pocket',
+    target: { source: 'features', featureIds: ['p1'] },
+    toolRef: 't1',
+    stockToLeaveRadial: 100,
+  })
+  const result = generatePocketRestRegionDrafts(project, op)
+
+  assert(result.drafts.some((draft) => (draft.regionMaskMode ?? 'include') === 'include'), 'expected at least one include rest region')
+  assert(result.drafts.some((draft) => draft.regionMaskMode === 'exclude'), 'expected at least one exclude rest region for the island hole')
+
+  const regionFeatures = result.drafts.map((draft, index): SketchFeature => ({
+    ...makeRegionFeature(`rest-${index}`, 0, 0, 1, 1, draft.regionMaskMode ?? 'include'),
+    sketch: {
+      profile: draft.profile,
+      origin: { x: 0, y: 0 },
+      orientationAngle: 0,
+      dimensions: [],
+      constraints: [],
+    },
+  }))
+  const mask = buildRegionMask(regionFeatures)
+  assert(mask !== null, 'expected rest-region mask')
+  if (!mask) throw new Error('expected rest-region mask')
+  assert(mask.containsPoint({ x: 4, y: 4 }), 'rest mask should include pocket area')
+  assert(!mask.containsPoint({ x: 20, y: 12 }), 'rest mask should exclude the island hole')
+  console.log('pocket rest-region include/exclude mask modes: PASSED')
 }
 
 function testRegionMaskVisitsNearestRegionFirst() {
@@ -1031,7 +1375,7 @@ function testEdgeOutsideAcceptsModelSilhouette() {
   const result = generateEdgeRouteToolpath(project, op)
   assert(result.moves.length > 0, 'outside edge route produces moves for model silhouette')
   assert(
-    !result.warnings.some((warning) => warning.includes('not add/model/region')),
+    !result.warnings.some((warning) => warning.code === 'targetsMissingOrWrongRole' && String(warning.params?.roles ?? '').includes('add/model/region')),
     `model target should be accepted; warnings: ${result.warnings.join(', ')}`,
   )
 
@@ -1187,6 +1531,55 @@ function testEdgeOutsideClipsAroundNonSelectedAddFeatures() {
   console.log('edge_route_outside obstacle clipping (non-selected): PASSED')
 }
 
+function testEdgeOutsideRoundCornersOptIn() {
+  console.log('Testing edge_route_outside round outside corners opt-in...')
+
+  const tool = makeFlatEndmill('t1', 4)
+  const feature = makeAddFeature('a', 0, 0, 20, 12, 2, 0)
+  const project = baseProject([tool], [feature])
+  const baseOp = makePocketOp({
+    kind: 'edge_route_outside',
+    pass: 'finish',
+    target: { source: 'features', featureIds: ['a'] },
+    toolRef: 't1',
+  })
+
+  const miter = generateEdgeRouteToolpath(project, baseOp)
+  const rounded = generateEdgeRouteToolpath(project, { ...baseOp, roundOutsideCorners: true })
+  const miterCuts = cutMoves(miter.moves)
+  const roundedCuts = cutMoves(rounded.moves)
+
+  assert(miterCuts.length === 4, 'disabled outside route should keep four mitered rectangle cuts')
+  assert(roundedCuts.length > miterCuts.length, 'enabled outside route should emit rounded multi-segment corners')
+  assert(roundedCuts.length < 100, `rounded outside route should stay coarsely tessellated, got ${roundedCuts.length} cuts`)
+  console.log('edge_route_outside round outside corners opt-in: PASSED')
+}
+
+function testEdgeOutsideCombinedRoundCorners() {
+  console.log('Testing combined edge_route_outside respects round outside corners...')
+
+  const tool = makeFlatEndmill('t1', 4)
+  const featureA = makeAddFeature('a', 0, 0, 20, 12, 2, 0)
+  const featureB = makeAddFeature('b', 30, 0, 20, 12, 2, 0)
+  const project = baseProject([tool], [featureA, featureB])
+  const baseOp = makePocketOp({
+    kind: 'edge_route_outside',
+    pass: 'finish',
+    target: { source: 'features', featureIds: ['a', 'b'] },
+    toolRef: 't1',
+  })
+
+  const miter = generateEdgeRouteToolpath(project, baseOp)
+  const rounded = generateEdgeRouteToolpath(project, { ...baseOp, roundOutsideCorners: true })
+  const miterCuts = cutMoves(miter.moves)
+  const roundedCuts = cutMoves(rounded.moves)
+
+  assert(miterCuts.length === 8, 'disabled combined outside route should keep two four-corner contours')
+  assert(roundedCuts.length > miterCuts.length, 'enabled combined outside route should round both contours')
+  assert(roundedCuts.length < 200, `combined rounded outside route should stay coarsely tessellated, got ${roundedCuts.length} cuts`)
+  console.log('combined edge_route_outside round outside corners: PASSED')
+}
+
 // ---------------------------------------------------------------------------
 // V-carve: feature_first emits independent per-feature toolpath
 // ---------------------------------------------------------------------------
@@ -1311,11 +1704,10 @@ function testSurfaceCleanMultiTargetProtectsTallerTarget() {
   const circA = makeCircleBoss('a', 0, 0, 0.5, 0.5, 0)
   const circB = makeCircleBoss('b', 1, 0, 0.5, 0.4, 0)
 
-  const project: Project = {
+  const project = projectWithFeatures({
     ...newProject('surface-test', 'inch'),
     tools: [tool],
-    features: [circA, circB],
-  }
+  }, [circA, circB])
   project.stock = { ...project.stock, thickness: 0.75 }
 
   const op = makePocketOp({
@@ -1346,6 +1738,77 @@ function testSurfaceCleanMultiTargetProtectsTallerTarget() {
   )
 
   console.log('surface_clean multi-target protects taller target: PASSED')
+}
+
+function testSurfaceCleanRegionMaskClipsGeneratedToolpathOnly() {
+  console.log('Testing surface_clean applies region mask after generating the base toolpath...')
+  const tool = makeFlatEndmill('t1', 2)
+  const boss = makeAddFeature('boss', 0, 0, 24, 12, 4, 0)
+  const include = makeRegionFeature('include-region', 8, 3, 8, 5, 'include')
+  const project = baseProject([tool], [boss, include])
+  project.stock = { ...project.stock, thickness: 6 }
+  const baseOp = makePocketOp({
+    kind: 'surface_clean',
+    target: { source: 'features', featureIds: ['boss'] },
+    toolRef: 't1',
+    stepdown: 1,
+    stepover: 0.4,
+  })
+  const regionOp = {
+    ...baseOp,
+    target: { source: 'features' as const, featureIds: ['boss', 'include-region'] },
+  }
+  const fullResult = generateSurfaceCleanToolpath(project, baseOp)
+  const mask = buildRegionMask([include])
+  assert(mask !== null, 'expected include region mask')
+  const expected = clipToolpathResultToRegionMask(project, fullResult, mask)
+  const actual = generateSurfaceCleanToolpath(project, regionOp)
+
+  assert(cutMoves(actual.moves).length > 0, 'expected surface_clean cuts inside include region')
+  assert(
+    toolpathMoveSignature(actual.moves).join('\n') === toolpathMoveSignature(expected.moves).join('\n'),
+    'surface_clean region target should match clipping the generated full toolpath',
+  )
+  console.log('surface_clean post-generation region clipping: PASSED')
+}
+
+function testSurfaceCleanHonorsOrderedRegionMaskModes() {
+  console.log('Testing surface_clean honors ordered include/exclude region masks...')
+  const tool = makeFlatEndmill('t1', 2)
+  const boss = makeAddFeature('boss', 0, 0, 24, 12, 4, 0)
+  const excludeMiddle = makeRegionFeature('middle-exclude', 4, 2, 16, 8, 'exclude')
+  const includeInner = makeRegionFeature('inner-include', 10, 5, 4, 2, 'include')
+  const project = baseProject([tool], [boss, excludeMiddle, includeInner])
+  project.stock = { ...project.stock, thickness: 6 }
+  const op = makePocketOp({
+    kind: 'surface_clean',
+    target: { source: 'features', featureIds: ['boss', 'middle-exclude', 'inner-include'] },
+    toolRef: 't1',
+    stepdown: 1,
+    stepover: 0.4,
+  })
+
+  const result = generateSurfaceCleanToolpath(project, op)
+  const cuts = cutMoves(result.moves)
+  let hasOuterCut = false
+  let hasInnerCut = false
+
+  assert(cuts.length > 0, `expected surface_clean cuts, warnings: ${result.warnings.join(', ')}`)
+  for (const move of cuts) {
+    const samples = [0.1, 0.25, 0.5, 0.75, 0.9].map((t) => ({
+      x: move.from.x + (move.to.x - move.from.x) * t,
+      y: move.from.y + (move.to.y - move.from.y) * t,
+    }))
+    hasOuterCut ||= samples.some((point) => point.x < 4 && point.y < 4)
+    hasInnerCut ||= samples.some((point) => pointInsideRect(point, 10, 5, 4, 2))
+    assert(
+      samples.every((point) => !pointInsideRect(point, 4, 2, 16, 8) || pointInsideRect(point, 10, 5, 4, 2)),
+      `surface_clean should remove excluded cut fragments except the later include, got move ${JSON.stringify(move)}`,
+    )
+  }
+  assert(hasOuterCut, 'expected surface_clean cuts outside the leading excluded region')
+  assert(hasInnerCut, 'expected surface_clean cuts in the later included inner region')
+  console.log('surface_clean ordered region mask modes: PASSED')
 }
 
 function testFollowLineRegionClipsOpenPath() {
@@ -1508,7 +1971,7 @@ function testFinishSurfaceCleanupRejectsRegionOnlyTarget() {
   const result = generateFinishSurfaceCleanupToolpath(project, op)
 
   assert(cutMoves(result.moves).length === 0, 'region-only cleanup should generate no cuts')
-  assert(result.warnings.some((warning) => warning.includes('imported mesh model')), 'region-only cleanup should warn about the missing imported model target')
+  assert(result.warnings.some((warning) => warning.code === 'finishNotMesh' || warning.code === 'surface3dNotMesh'), 'region-only cleanup should warn about the missing imported model target')
   console.log('finish_surface_cleanup region-only rejection: PASSED')
 }
 
@@ -1528,6 +1991,32 @@ function makeIslandFeature(
   return { ...makePocketFeature(id, x, y, w, h, zTop, zBottom), operation: 'add' }
 }
 
+function makePolygonIslandFeature(
+  id: string,
+  points: Array<{ x: number; y: number }>,
+  zTop: number,
+  zBottom: number,
+): SketchFeature {
+  return {
+    id,
+    name: id,
+    kind: 'polygon',
+    folderId: null,
+    sketch: {
+      profile: polygonProfile(points),
+      origin: { x: 0, y: 0 },
+      orientationAngle: 0,
+      dimensions: [],
+      constraints: [],
+    },
+    operation: 'add',
+    z_top: zTop,
+    z_bottom: zBottom,
+    visible: true,
+    locked: false,
+  }
+}
+
 function stampedCutMoves(moves: ToolpathMove[]): ToolpathMove[] {
   return cutMoves(moves).filter((move) => move.feedScale !== undefined)
 }
@@ -1542,6 +2031,250 @@ function horizontalFillMoves(moves: ToolpathMove[], boundaryYs: number[], minLen
     approx(move.from.y, move.to.y)
     && Math.abs(move.to.x - move.from.x) > minLength
     && !boundaryYs.some((y) => approx(move.from.y, y)))
+}
+
+function testPocketFinishRoundsIslandWallsOnly() {
+  console.log('Testing pocket finish rounds island walls while keeping the main boundary mitered...')
+  const tool = makeFlatEndmill('t1', 4)
+  const pocket = makePocketFeature('p1', 0, 0, 40, 24, 2, 0)
+  const island = makePolygonIslandFeature('i1', [
+    { x: 13.75, y: 10 },
+    { x: 27.5, y: 10 },
+    { x: 25, y: 16.25 },
+    { x: 12.5, y: 20 },
+  ], 2, 0)
+  const project = baseProject([tool], [pocket, island])
+  const baseOp = makePocketOp({
+    kind: 'pocket',
+    pass: 'finish',
+    target: { source: 'features', featureIds: ['p1'] },
+    toolRef: 't1',
+    finishFloor: false,
+  })
+
+  const miter = generatePocketToolpath(project, baseOp)
+  const rounded = generatePocketToolpath(project, { ...baseOp, roundOutsideCorners: true })
+  const roundedGroups = cutMoveGroups(rounded.moves)
+  const miterCuts = cutMoves(miter.moves)
+  const roundedCuts = cutMoves(rounded.moves)
+
+  assert(roundedGroups.length >= 2, `expected rounded wall contours, got ${roundedGroups.length}`)
+  assert(roundedGroups[0].length === 4, 'rounded setting should keep the main pocket boundary mitered')
+  assert(
+    !hasUndirectedCutMoveNear(roundedCuts, { x: 26.499, y: 17.889 }, { x: 10.135, y: 22.798 }),
+    'enabled island wall should not include a full mitered cleanup edge that makes the rounded finish look sharp',
+  )
+  assert(
+    !hasUndirectedCutMoveNear(roundedCuts, { x: 13.75, y: 6.4 }, { x: 27.5, y: 6.4 }),
+    'enabled island wall should not include a full outer cleanup contour on non-acute edges',
+  )
+  assert(
+    hasUndirectedCutMoveNear(roundedCuts, { x: 31.014, y: 10.78 }, { x: 31.091, y: 10.249 }, 0.02),
+    'enabled island wall should include localized rounded cleanup at acute island corners',
+  )
+  assert(roundedCuts.length > miterCuts.length + 20, 'enabled island wall should finish with multi-segment rounded corners')
+  assert(roundedCuts.length < 120, `rounded island wall pass should stay coarsely tessellated, got ${roundedCuts.length} cuts`)
+
+  const squareIsland = makeIslandFeature('i2', 12, 6, 16, 12, 2, 0)
+  const squareRounded = generatePocketToolpath(baseProject([tool], [pocket, squareIsland]), { ...baseOp, roundOutsideCorners: true })
+  assert(
+    !hasUndirectedCutMoveNear(cutMoves(squareRounded.moves), { x: 12, y: 2.4 }, { x: 28, y: 2.4 }, 0.02),
+    'right-angle island corners should not receive the acute-corner cleanup contour',
+  )
+  console.log('pocket finish rounded island walls only: PASSED')
+}
+
+// ---------------------------------------------------------------------------
+// Corner smoothing (round corners) of inner clearing rings
+// ---------------------------------------------------------------------------
+
+function totalCutLength(moves: ToolpathMove[]): number {
+  return cutMoves(moves).reduce((sum, move) => sum + Math.hypot(move.to.x - move.from.x, move.to.y - move.from.y), 0)
+}
+
+/** Turn angles (degrees) at junctions where two cut moves actually connect. */
+function connectedCutTurns(moves: ToolpathMove[]): number[] {
+  const cuts = cutMoves(moves)
+  const turns: number[] = []
+  for (let index = 0; index + 1 < cuts.length; index += 1) {
+    const a = cuts[index]
+    const b = cuts[index + 1]
+    if (!approx(a.to.x, b.from.x) || !approx(a.to.y, b.from.y)) continue
+    const inX = a.to.x - a.from.x
+    const inY = a.to.y - a.from.y
+    const outX = b.to.x - b.from.x
+    const outY = b.to.y - b.from.y
+    const inLen = Math.hypot(inX, inY)
+    const outLen = Math.hypot(outX, outY)
+    if (inLen < 1e-9 || outLen < 1e-9) continue
+    const cos = Math.max(-1, Math.min(1, (inX * outX + inY * outY) / (inLen * outLen)))
+    turns.push((Math.acos(cos) * 180) / Math.PI)
+  }
+  return turns
+}
+
+function sharpTurnCount(moves: ToolpathMove[], thresholdDeg = 60): number {
+  return connectedCutTurns(moves).filter((turn) => turn > thresholdDeg).length
+}
+
+function testPocketRoughRoundsInnerRings() {
+  console.log('Testing pocket rough offset rounds the inner clearing-ring corners when enabled...')
+  const tool = makeFlatEndmill('t1', 4)
+  const pocket = makePocketFeature('p1', 0, 0, 30, 30, 2, 0)
+  const project = baseProject([tool], [pocket])
+  const baseOp = makePocketOp({
+    kind: 'pocket',
+    target: { source: 'features', featureIds: ['p1'] },
+    toolRef: 't1',
+  })
+
+  const disabled = generatePocketToolpath(project, baseOp)
+  const enabled = generatePocketToolpath(project, { ...baseOp, roundOutsideCorners: true })
+
+  // Disabled: concentric square rings keep their sharp 90° corners.
+  assert(sharpTurnCount(disabled.moves) >= 8, `disabled rough rings should keep sharp corners, got ${sharpTurnCount(disabled.moves)}`)
+  // Enabled: the ring corners become arcs, so far fewer sharp junctions remain
+  // (only ring-to-ring links, never the ring corners themselves).
+  assert(
+    sharpTurnCount(enabled.moves) * 3 < sharpTurnCount(disabled.moves),
+    `enabling round corners should remove most sharp ring corners (disabled ${sharpTurnCount(disabled.moves)}, enabled ${sharpTurnCount(enabled.moves)})`,
+  )
+  // Arc tessellation adds points; cutting the corners shortens the path.
+  assert(cutMoves(enabled.moves).length > cutMoves(disabled.moves).length, 'rounded rings should tessellate into more cut moves')
+  assert(totalCutLength(enabled.moves) < totalCutLength(disabled.moves), 'rounded rings should shorten the total cut path')
+
+  // Disabled parity: false and undefined must be byte-identical (no-op when off).
+  const undefinedFlag = generatePocketToolpath(project, { ...baseOp, roundOutsideCorners: undefined })
+  assert(movesEqual(disabled.moves, undefinedFlag.moves), 'roundOutsideCorners false vs undefined must produce identical moves')
+  console.log('pocket rough rounds inner rings: PASSED')
+}
+
+function testPocketRoughKeepsBoundaryRingSharpEveryLevel() {
+  console.log('Testing rounded rough keeps the wall-adjacent ring sharp at every Z level (no corner column)...')
+  const tool = makeFlatEndmill('t1', 4)
+  // 6 mm deep, stepdown 2 => rough levels at z = 4, 2, 0.
+  const pocket = makePocketFeature('p1', 0, 0, 40, 40, 6, 0)
+  const project = baseProject([tool], [pocket])
+  const result = generatePocketToolpath(project, makePocketOp({
+    kind: 'pocket',
+    target: { source: 'features', featureIds: ['p1'] },
+    toolRef: 't1',
+    finishWalls: false,
+    finishFloor: false,
+    roundOutsideCorners: true,
+  }))
+
+  // The wall-adjacent ring corner sits one tool radius in from the pocket
+  // corner, at (2, 2). If the outermost ring were rounded away, no cut would
+  // reach it — and the uncut crescent would stack into a tall chip. With walls
+  // and floor finish OFF, only the rough pass runs, so reaching (2, 2) at every
+  // level proves the boundary ring stays sharp per level.
+  const corner = { x: 2, y: 2 }
+  const near = (p: { x: number; y: number }) => Math.hypot(p.x - corner.x, p.y - corner.y) < 0.3
+  for (const z of [4, 2, 0]) {
+    const reached = cutMoves(result.moves).some((move) => approx(move.to.z, z) && (near(move.to) || near(move.from)))
+    assert(reached, `rough level z=${z} must reach the wall-adjacent corner (boundary ring must not be rounded away)`)
+  }
+  console.log('pocket rough keeps boundary ring sharp every level: PASSED')
+}
+
+function testPocketRoughRoundsIslandRings() {
+  console.log('Testing pocket rough wraps islands with rounded (non-gouging) rings when enabled...')
+  const tool = makeFlatEndmill('t1', 4) // radius 2
+  const pocket = makePocketFeature('p1', 0, 0, 50, 40, 2, 0)
+  const island = makeIslandFeature('i1', 16, 12, 18, 16, 2, 0) // rect island 16..34 x 12..28
+  const project = baseProject([tool], [pocket, island])
+  const baseOp = makePocketOp({ kind: 'pocket', target: { source: 'features', featureIds: ['p1'] }, toolRef: 't1' })
+
+  const off = generatePocketToolpath(project, baseOp)
+  const on = generatePocketToolpath(project, { ...baseOp, roundOutsideCorners: true })
+
+  const distIsland = (x: number, y: number) =>
+    Math.hypot(Math.max(16 - x, 0, x - 34), Math.max(12 - y, 0, y - 28))
+  const minToolDistToIsland = (moves: ToolpathMove[]) =>
+    Math.min(...cutMoves(moves).flatMap((move) => {
+      const steps = Math.max(1, Math.ceil(Math.hypot(move.to.x - move.from.x, move.to.y - move.from.y) / 0.2))
+      const distances: number[] = []
+      for (let i = 0; i <= steps; i += 1) {
+        const t = i / steps
+        distances.push(distIsland(move.from.x + (move.to.x - move.from.x) * t, move.from.y + (move.to.y - move.from.y) * t))
+      }
+      return distances
+    }))
+
+  // Rounded island rings must never pull the tool into the island. The tool
+  // radius is 2; allow only the jtRound arc-tessellation tolerance (~0.01 mm).
+  assert(
+    minToolDistToIsland(on.moves) > 2 - 0.05,
+    `rounded island rings must not gouge the island (min tool-center distance ${minToolDistToIsland(on.moves).toFixed(3)} vs radius 2)`,
+  )
+
+  // The island-hugging ring (~2 mm off the island) is a sharp rectangle when
+  // off (corners sit at ~2.8 mm, no vertices in the band) and a tessellated
+  // rounded rectangle when on (many arc vertices land in the band).
+  const hugRingVertices = (moves: ToolpathMove[]) =>
+    cutMoves(moves).filter((move) => Math.abs(distIsland(move.to.x, move.to.y) - 2) < 0.25).length
+  assert(
+    hugRingVertices(on.moves) > hugRingVertices(off.moves) + 8,
+    `enabled island ring should be tessellated into arcs (${hugRingVertices(off.moves)} -> ${hugRingVertices(on.moves)})`,
+  )
+
+  const undefinedFlag = generatePocketToolpath(project, { ...baseOp, roundOutsideCorners: undefined })
+  assert(movesEqual(off.moves, undefinedFlag.moves), 'off vs undefined must be identical around islands')
+  console.log('pocket rough rounds island rings: PASSED')
+}
+
+function testPocketFinishFloorRoundsWhenEnabled() {
+  console.log('Testing pocket finish-floor clearing rings round when enabled, exact when off...')
+  const tool = makeFlatEndmill('t1', 4)
+  const pocket = makePocketFeature('p1', 0, 0, 30, 30, 2, 0)
+  const project = baseProject([tool], [pocket])
+  const baseOp = makePocketOp({
+    kind: 'pocket',
+    pass: 'finish',
+    target: { source: 'features', featureIds: ['p1'] },
+    toolRef: 't1',
+    finishWalls: false,
+    finishFloor: true,
+  })
+
+  const disabled = generatePocketToolpath(project, baseOp)
+  const enabled = generatePocketToolpath(project, { ...baseOp, roundOutsideCorners: true })
+
+  // The floor is cleared with concentric rings; enabling rounds their corners.
+  assert(sharpTurnCount(disabled.moves) >= 4, `disabled finish floor should keep sharp corners, got ${sharpTurnCount(disabled.moves)}`)
+  assert(
+    sharpTurnCount(enabled.moves) * 2 < sharpTurnCount(disabled.moves),
+    `enabling round corners should smooth the finish-floor rings (disabled ${sharpTurnCount(disabled.moves)}, enabled ${sharpTurnCount(enabled.moves)})`,
+  )
+  assert(!movesEqual(disabled.moves, enabled.moves), 'finish-floor moves should change when round corners is enabled')
+
+  // Disabled parity holds.
+  const undefinedFlag = generatePocketToolpath(project, { ...baseOp, roundOutsideCorners: undefined })
+  assert(movesEqual(disabled.moves, undefinedFlag.moves), 'finish-floor false vs undefined must produce identical moves')
+  console.log('pocket finish-floor rounds when enabled: PASSED')
+}
+
+function testSurfaceCleanRoughRoundsInnerRings() {
+  console.log('Testing surface_clean rough offset rounds inner clearing rings when enabled...')
+  const tool = makeFlatEndmill('t1', 4)
+  const boss = { ...makePocketFeature('b1', 4, 4, 30, 30, 6, 0), operation: 'add' as const }
+  const project = baseProject([tool], [boss])
+  project.stock = { ...project.stock, thickness: 8 }
+  const baseOp = makePocketOp({
+    kind: 'surface_clean',
+    target: { source: 'features', featureIds: ['b1'] },
+    toolRef: 't1',
+  })
+
+  const disabled = generateSurfaceCleanToolpath(project, baseOp)
+  const enabled = generateSurfaceCleanToolpath(project, { ...baseOp, roundOutsideCorners: true })
+  assert(cutMoves(disabled.moves).length > 0, 'expected surface_clean cuts')
+  assert(sharpTurnCount(enabled.moves) < sharpTurnCount(disabled.moves), 'surface_clean should smooth rings when enabled')
+
+  const undefinedFlag = generateSurfaceCleanToolpath(project, { ...baseOp, roundOutsideCorners: undefined })
+  assert(movesEqual(disabled.moves, undefinedFlag.moves), 'surface_clean false vs undefined must produce identical moves')
+  console.log('surface_clean rough rounds inner rings: PASSED')
 }
 
 function testPocketOffsetSlotFeedSimple() {
@@ -1940,6 +2673,14 @@ try {
   testPocketRestRegionsFindUnreachableArea()
   testPocketRestRegionsFindCornerCusps()
   testPocketRestRegionsUniformCorners()
+  testRegionMaskHonorsOrderedIncludeExcludeNesting()
+  testRegionMaskExcludeOnlyPreservesOutsideArea()
+  testRegionMaskLeadingExcludeCanBeReincluded()
+  testSplitFeatureTargetsOrdersRegionsByProjectSequence()
+  testPocketFinishExcludeOnlyRegionRemovesMachiningArea()
+  testPocketOffsetFinishExcludeOnlyRegionStillGeneratesToolpath()
+  testPocketOffsetFinishLeadingExcludeWithInnerInclude()
+  testPocketRestRegionsEmitHoleCapableMaskModes()
   testRegionMaskVisitsNearestRegionFirst()
   testEdgeInsideLevelFirstVsFeatureFirst()
   testEdgeInsideFeatureFirstNearestBlockOrder()
@@ -1948,14 +2689,24 @@ try {
   testEdgeOutsideUsesStoredModelSilhouettePaths()
   testEdgeOutsideIgnoresTinyStoredModelSilhouetteArtifacts()
   testEdgeOutsideClipsAroundNonSelectedAddFeatures()
+  testEdgeOutsideRoundCornersOptIn()
+  testEdgeOutsideCombinedRoundCorners()
   testVCarveDisjointFeaturesAreMachiningOrderInvariant()
   testSurfaceCleanMultiTargetProtectsTallerTarget()
+  testSurfaceCleanRegionMaskClipsGeneratedToolpathOnly()
+  testSurfaceCleanHonorsOrderedRegionMaskModes()
   testFollowLineRegionClipsOpenPath()
   testDrillingRegionFiltersHolePoints()
   testDrillingOrdersByNearestNeighbor()
   testDrillingTieBreaksByOriginalOrder()
   testDrillingMinimizesSafeZTravelDistance()
   testFinishSurfaceCleanupRejectsRegionOnlyTarget()
+  testPocketFinishRoundsIslandWallsOnly()
+  testPocketRoughRoundsInnerRings()
+  testPocketRoughKeepsBoundaryRingSharpEveryLevel()
+  testPocketRoughRoundsIslandRings()
+  testPocketFinishFloorRoundsWhenEnabled()
+  testSurfaceCleanRoughRoundsInnerRings()
   testPocketOffsetSlotFeedSimple()
   testPocketOffsetSlotFeedIslandSections()
   testPocketOffsetSlotFeedPerLevel()

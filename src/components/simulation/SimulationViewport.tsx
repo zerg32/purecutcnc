@@ -14,12 +14,13 @@
  * limitations under the License.
  */
 
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react'
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { Icon } from '../Icon'
 import { buildClampMesh, buildOriginTriad } from '../../engine/csg'
-import { createHeightfieldTexture, createStockPlaneGeometries, createDynamicProfileBoundaryGeometries, createShaderDrivenBoundaryGeometries, updateHeightfieldTexture } from '../../engine/simulation/gpuMesh'
-import { createDynamicBoundaryMaterial, createHeightfieldMaterial, createShaderDrivenBoundaryMaterial } from '../../engine/simulation/heightfieldShader'
+import { createHeightfieldTexture, createStockPlaneGeometries, updateHeightfieldTexture, uploadHeightfieldRegion } from '../../engine/simulation/gpuMesh'
+import { createHeightfieldMaterial } from '../../engine/simulation/heightfieldShader'
+import { createInstancedBoundaryGroup } from '../../engine/simulation/instancedBoundary'
 import { PlaybackController } from '../../engine/simulation/playback'
 import { buildToolMesh, disposeToolMesh } from '../../engine/simulation/toolMesh'
 import { attachWebglContextGuard } from '../viewport3d/webglContextGuard'
@@ -27,6 +28,8 @@ import type { PlaybackPose } from '../../engine/simulation/playback'
 import type { SimulationGrid, SimulationResult } from '../../engine/simulation'
 import type { ToolpathMove } from '../../engine/toolpaths/types'
 import type { Clamp, MachineOrigin, Operation, ToolType } from '../../types/project'
+import { useTheme } from '../../theme/themeContext'
+import { useI18n } from '../../i18n/i18nContext'
 
 const EMPTY_PLAYBACK_POSE: PlaybackPose = { x: 0, y: 0, z: 0, moveKind: null, feedScale: undefined }
 
@@ -80,7 +83,13 @@ const VIEW_PRESETS: Record<ViewPreset, { theta: number; phi: number; up: THREE.V
 }
 
 export interface SimulationPlaybackInput {
-  baseGrid: SimulationGrid
+  /**
+   * Starting stock state (prior operations already applied). A thunk so the
+   * heightfield replay of prior operations runs when the user actually starts
+   * playback — not eagerly on every project change while the tab is open. The
+   * provider caches the result until its inputs change.
+   */
+  getBaseGrid: () => SimulationGrid
   moves: ToolpathMove[]
   toolType: ToolType
   toolRadius: number
@@ -140,16 +149,6 @@ const SIMULATION_DETAIL_MIN = 240
 const SIMULATION_DETAIL_MAX = 1500
 const SIMULATION_DETAIL_STEP = 40
 
-// Above this cell count the shader-driven playback boundary mesh (which emits
-// ~18 vertices × ~48 B per cell) would allocate hundreds of MB of typed
-// arrays at build time. We fall back to the static dynamic-profile mesh
-// (walls only at material/empty boundaries at build time, no cut-through
-// rebuilds) for very high detail playback. The cosmetic "missing walls at
-// cut-through" issue from before #103 reappears at the upper end of the
-// detail slider — but it's never a crash, and the perf stays smooth.
-// 500×500 ≈ 250 000 cells → ~108 MB of shader-driven attribute buffers.
-const SHADER_DRIVEN_BOUNDARY_MAX_CELLS = 500 * 500
-
 /**
  * Playback speed is a multiplier of the operation's feed rate ("1×" means "play at
  * the real cutting feed"). The UI renders a log-scaled slider so the low end (where
@@ -200,7 +199,6 @@ const PLAYBACK_STEP_SIZES_IN = [0.002, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5]
 // 0.1 in ≈ 2.5 mm — same visual cadence in either unit system.
 const PLAYBACK_DEFAULT_STEP_MM = 2.5
 const PLAYBACK_DEFAULT_STEP_IN = 0.1
-const PLAYBACK_REBUILD_INTERVAL_MS = 0
 
 function disposeSceneObject(object: THREE.Object3D): void {
   const geometries = new Set<THREE.BufferGeometry>()
@@ -227,38 +225,6 @@ function buildHeightfieldSurfaceObject(
   material: THREE.Material,
 ): THREE.Object3D {
   const geometries = createStockPlaneGeometries(grid)
-  if (geometries.length === 1) {
-    return new THREE.Mesh(geometries[0], material)
-  }
-
-  const group = new THREE.Group()
-  for (const geometry of geometries) {
-    group.add(new THREE.Mesh(geometry, material))
-  }
-  return group
-}
-
-function buildDynamicProfileBoundaryObject(
-  grid: SimulationGrid,
-  material: THREE.Material,
-): THREE.Object3D {
-  const geometries = createDynamicProfileBoundaryGeometries(grid)
-  if (geometries.length === 1) {
-    return new THREE.Mesh(geometries[0], material)
-  }
-
-  const group = new THREE.Group()
-  for (const geometry of geometries) {
-    group.add(new THREE.Mesh(geometry, material))
-  }
-  return group
-}
-
-function buildShaderDrivenBoundaryObject(
-  grid: SimulationGrid,
-  material: THREE.Material,
-): THREE.Object3D {
-  const geometries = createShaderDrivenBoundaryGeometries(grid)
   if (geometries.length === 1) {
     return new THREE.Mesh(geometries[0], material)
   }
@@ -611,6 +577,20 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
   isActive = true,
   projectKey,
 }, ref) {
+  const { palette } = useTheme()
+  const { t, languageTag } = useI18n()
+  const presetTitles = useMemo(() => ({
+    top: t('viewport.presets.top'),
+    bottom: t('viewport.presets.bottom'),
+    front: t('viewport.presets.front'),
+    back: t('viewport.presets.back'),
+    right: t('viewport.presets.right'),
+    left: t('viewport.presets.left'),
+    iso: t('viewport.presets.iso'),
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- t is identity-stable; languageTag drives locale recomputes
+  }), [t, languageTag])
+  const threePalette = palette.three
+  const initialThreePaletteRef = useRef(threePalette)
   const playbackUnits = playbackInput?.units ?? 'mm'
   const fallbackFeed = playbackUnits === 'in' ? PLAYBACK_FALLBACK_FEED_IN : PLAYBACK_FALLBACK_FEED_MM
   // Anchor the playback speed multiplier to the operation's feed (units/sec). If the
@@ -639,12 +619,19 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
   // Mirror isActive into a ref so the render loop (raw RAF, not React-driven)
   // can read it without re-binding the closure each prop change.
   const isActiveRef = useRef(isActive)
+  // Render-on-demand: the RAF loop only draws when something changed (scene
+  // mutation, texture upload, tool pose, resize) or playback is running.
+  // Camera interaction renders imperatively via the orbit controls' onChange.
+  // Without this the viewport re-rendered a potentially multi-million-vertex
+  // scene at 60 fps while completely idle.
+  const needsRenderRef = useRef(true)
   useEffect(() => {
     isActiveRef.current = isActive
     // When becoming active again, kick a render so the scene is current
     // immediately instead of after the next animate() tick fires (which can
     // be up to ~16 ms away and reads stale buffers on the first paint).
     if (isActive) {
+      needsRenderRef.current = true
       const renderer = rendererRef.current
       const scene = sceneRef.current
       const camera = cameraRef.current
@@ -674,7 +661,9 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
   const boundaryMeshRef = useRef<THREE.Object3D | null>(null)
   const playbackFrameRef = useRef<number>(0)
   const playbackLastTimeRef = useRef<number>(0)
-  const playbackLastRebuildRef = useRef<number>(0)
+  // Scrub coalescing: latest requested slider fraction + the RAF that applies it.
+  const pendingSeekFractionRef = useRef<number | null>(null)
+  const seekFrameRef = useRef<number>(0)
   const isPlayingRef = useRef(false)
   const playbackSpeedRef = useRef(baseSpeed * PLAYBACK_DEFAULT_MULTIPLIER)
   const playbackMaxStepRef = useRef(playbackMaxStep)
@@ -721,6 +710,7 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
       disposeSceneObject(boundaryMeshRef.current)
       boundaryMeshRef.current = null
     }
+    needsRenderRef.current = true
   }, [])
 
   const disposeClampMeshes = useCallback((scene: THREE.Scene) => {
@@ -734,6 +724,7 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
       }
     }
     clampObjectsRef.current = []
+    needsRenderRef.current = true
   }, [])
 
   const disposeOriginMesh = useCallback((scene: THREE.Scene) => {
@@ -752,6 +743,7 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
       }
     })
     originObjectRef.current = null
+    needsRenderRef.current = true
   }, [])
 
   const zoomToModel = useCallback(() => {
@@ -800,32 +792,35 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
     }
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     renderer.setSize(mount.clientWidth, mount.clientHeight)
-    renderer.setClearColor(0x141820, 1)
+    renderer.setClearColor(initialThreePaletteRef.current.background, 1)
     renderer.domElement.style.display = 'block'
     renderer.domElement.style.touchAction = 'none'
     mount.appendChild(renderer.domElement)
-    // eslint-disable-next-line react-hooks/immutability -- three.js renderer/scene/camera live in refs across effects: populated in this mount effect, read in the resize/mesh sibling effect. No behavior-preserving restructure satisfies the rule.
+     
     rendererRef.current = renderer
 
     const scene = new THREE.Scene()
-    // eslint-disable-next-line react-hooks/immutability -- see rendererRef above (three.js objects in cross-effect refs).
+     
     sceneRef.current = scene
 
-    const ambient = new THREE.AmbientLight(0xffffff, 0.7)
+    const ambient = new THREE.AmbientLight(0xffffff, 0.7) // theme-exempt: scene lighting rig
     scene.add(ambient)
-    const key = new THREE.DirectionalLight(0xffffff, 0.9)
+    const key = new THREE.DirectionalLight(0xffffff, 0.9) // theme-exempt: scene lighting rig
     key.position.set(120, 180, 120)
     scene.add(key)
-    const fill = new THREE.DirectionalLight(0x96b6ff, 0.35)
+    const fill = new THREE.DirectionalLight(0x96b6ff, 0.35) // theme-exempt: scene lighting rig
     fill.position.set(-120, 80, -80)
     scene.add(fill)
 
     const camera = new THREE.PerspectiveCamera(45, mount.clientWidth / mount.clientHeight, 0.1, 5000)
-    // eslint-disable-next-line react-hooks/immutability -- see rendererRef above (three.js objects in cross-effect refs).
+     
     cameraRef.current = camera
 
+    // Camera changes request a draw from the RAF loop rather than rendering
+    // inline: pointermove can outpace the display refresh, and the loop
+    // coalesces those into at most one render per frame.
     const controls = createOrbitControls(camera, renderer.domElement, () => {
-      renderer.render(scene, camera)
+      needsRenderRef.current = true
     }, () => zoomWindowActiveRef.current)
     controlsRef.current = controls
 
@@ -842,7 +837,8 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
       onRestored: () => {
         // three rebuilds its GL state itself and re-uploads textures/geometry
         // from CPU-side data on the next animate() frame — only the overlay
-        // needs clearing.
+        // needs clearing (plus a render request, since draws are on-demand).
+        needsRenderRef.current = true
         setWebglStatus('ok')
       },
     })
@@ -853,6 +849,9 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
       // would otherwise have to wait for the current frame's heavy render to
       // finish before React could commit the new layout.
       if (!isActiveRef.current) return
+      // Draw only when something changed (or playback animates every frame).
+      if (!needsRenderRef.current && !isPlayingRef.current) return
+      needsRenderRef.current = false
       renderer.render(scene, camera)
     }
     animate()
@@ -861,6 +860,7 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
       renderer.setSize(mount.clientWidth, mount.clientHeight)
       camera.aspect = mount.clientWidth / mount.clientHeight
       camera.updateProjectionMatrix()
+      needsRenderRef.current = true
     })
     resizeObserver.observe(mount)
 
@@ -875,6 +875,11 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
       mount.removeChild(renderer.domElement)
     }
   }, [disposeClampMeshes, disposeCurrentMesh])
+
+  useEffect(() => {
+    rendererRef.current?.setClearColor(threePalette.background, 1)
+    needsRenderRef.current = true
+  }, [threePalette])
 
   useEffect(() => {
     const scene = sceneRef.current
@@ -894,7 +899,7 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
     const camera = cameraRef.current
     if (mount && renderer && camera) {
       renderer.setSize(mount.clientWidth, mount.clientHeight)
-      // eslint-disable-next-line react-hooks/immutability -- camera comes from cameraRef (populated in the mount effect); adjusting its aspect here is the canonical three.js resize path.
+       
       camera.aspect = mount.clientWidth / mount.clientHeight
       camera.updateProjectionMatrix()
     }
@@ -912,16 +917,19 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
 
     const grid = simulation.grid
     const heightfieldTexture = createHeightfieldTexture(grid)
-    const color = stockColor ? new THREE.Color(stockColor) : new THREE.Color(0xb5beca)
+    const color = stockColor ? new THREE.Color(stockColor) : new THREE.Color(threePalette.stockDefault)
     const material = createHeightfieldMaterial(heightfieldTexture, grid, color)
     const surface = buildHeightfieldSurfaceObject(grid, material)
     scene.add(surface)
     objectRef.current = surface
 
-    const boundaryMaterial = createDynamicBoundaryMaterial(heightfieldTexture, grid, color)
-    const boundary = buildDynamicProfileBoundaryObject(grid, boundaryMaterial)
+    // Walls at every height step + underside, all shader-driven: nothing to
+    // rebuild on the CPU when the simulation result changes, and interior
+    // pocket walls render as true verticals instead of one-cell-wide slants.
+    const boundary = createInstancedBoundaryGroup(heightfieldTexture, grid, color)
     scene.add(boundary)
     boundaryMeshRef.current = boundary
+    needsRenderRef.current = true
 
     if (!hasAutoFramedRef.current) {
       const bounds = new THREE.Box3().setFromObject(surface)
@@ -930,19 +938,34 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
         hasAutoFramedRef.current = true
       }
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- threePalette is read from a stable theme; adding it would rebuild geometry on theme toggle
   }, [disposeCurrentMesh, playbackEnabled, simulation, stockColor])
 
-  // The playback boundary is a static shader-driven mesh: walls are emitted at
-  // every grid edge once, and the vertex shader samples both adjacent cells'
-  // heightfields per frame to set wall heights. The only per-tick work here is
-  // marking the heightfield texture dirty so the GPU re-uploads it.
-  const rebuildPlaybackGeometry = useCallback(() => {
+  // The playback boundary mesh is static — walls track the heightfield texture
+  // in the vertex shader — so the only per-tick GPU work is pushing the cells
+  // the cutter actually touched this frame (the controller's dirty region)
+  // into the texture. Falls back to a full re-upload until the texture has
+  // been rendered once (no GL handle yet) or when partial upload is
+  // unavailable. No-ops when nothing changed since the last flush.
+  const flushPlaybackGridToGpu = useCallback(() => {
     const texture = playbackHeightfieldTextureRef.current
-    if (!texture) {
+    const controller = playbackControllerRef.current
+    if (!texture || !controller) {
       return
     }
-    updateHeightfieldTexture(texture)
-    playbackControllerRef.current?.clearDirtyRegion()
+    const region = controller.getDirtyRegion()
+    if (!region) {
+      return
+    }
+    const renderer = rendererRef.current
+    const uploaded = renderer
+      ? uploadHeightfieldRegion(renderer, texture, controller.liveGrid, region)
+      : false
+    if (!uploaded) {
+      updateHeightfieldTexture(texture)
+    }
+    controller.clearDirtyRegion()
+    needsRenderRef.current = true
   }, [])
 
 
@@ -957,13 +980,16 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
     latestPoseRef.current = pose
     // Toolpath (x, y, z) → world (x, z, y): the viewport treats world Y as vertical.
     tool.position.set(pose.x, pose.z, pose.y)
+    needsRenderRef.current = true
   }, [])
 
   const resetPlaybackRuntime = useCallback((building: boolean) => {
     cancelAnimationFrame(playbackFrameRef.current)
     playbackFrameRef.current = 0
+    cancelAnimationFrame(seekFrameRef.current)
+    seekFrameRef.current = 0
+    pendingSeekFractionRef.current = null
     playbackLastTimeRef.current = 0
-    playbackLastRebuildRef.current = 0
     isPlayingRef.current = false
     setIsPlaying(false)
     setIsPlaybackReady(false)
@@ -1002,6 +1028,7 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
       }
       playbackControllerRef.current = null
       resetPlaybackRuntime(false)
+      needsRenderRef.current = true
       return
     }
 
@@ -1016,7 +1043,7 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
       if (cancelled) return
 
       const controller = new PlaybackController(
-        playbackInput.baseGrid,
+        playbackInput.getBaseGrid(),
         playbackInput.moves,
         {
           toolType: playbackInput.toolType,
@@ -1037,29 +1064,17 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
       const grid = controller.liveGrid
       const heightfieldTexture = createHeightfieldTexture(grid)
       playbackHeightfieldTextureRef.current = heightfieldTexture
-      const color = stockColor ? new THREE.Color(stockColor) : new THREE.Color(0xb5beca)
+      const color = stockColor ? new THREE.Color(stockColor) : new THREE.Color(threePalette.stockDefault)
       const material = createHeightfieldMaterial(heightfieldTexture, grid, color)
       const surface = buildHeightfieldSurfaceObject(grid, material)
       scene.add(surface)
       playbackMaterialMeshRef.current = surface
 
-      // Guarded fallback for very high detail: the shader-driven mesh emits
-      // ~18 verts/cell, so >SHADER_DRIVEN_BOUNDARY_MAX_CELLS would allocate
-      // hundreds of MB. Fall back to the static dynamic-profile boundary
-      // (build-once, no rebuilds) at the cost of cosmetic walls not appearing
-      // at brand-new cut-through cells. Better than OOMing.
-      const totalCells = grid.cols * grid.rows
-      if (totalCells <= SHADER_DRIVEN_BOUNDARY_MAX_CELLS) {
-        const boundaryMaterial = createShaderDrivenBoundaryMaterial(heightfieldTexture, grid, color)
-        const boundary = buildShaderDrivenBoundaryObject(grid, boundaryMaterial)
-        scene.add(boundary)
-        playbackBoundaryMeshRef.current = boundary
-      } else {
-        const boundaryMaterial = createDynamicBoundaryMaterial(heightfieldTexture, grid, color)
-        const boundary = buildDynamicProfileBoundaryObject(grid, boundaryMaterial)
-        scene.add(boundary)
-        playbackBoundaryMeshRef.current = boundary
-      }
+      // Instanced walls: no per-cell attributes, so any detail level builds
+      // instantly and stays within memory — no cell cap needed.
+      const boundary = createInstancedBoundaryGroup(heightfieldTexture, grid, color)
+      scene.add(boundary)
+      playbackBoundaryMeshRef.current = boundary
 
       const tool = buildToolMesh({
         toolType: playbackInput.toolType,
@@ -1067,6 +1082,7 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
         vBitAngle: playbackInput.vBitAngle,
         cutLength: playbackInput.toolCutLength,
         shankLength: playbackInput.toolShankLength,
+        threePalette,
       })
       scene.add(tool)
       toolMeshRef.current = tool
@@ -1103,6 +1119,7 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
       playbackControllerRef.current = null
       setIsPlaybackReady(false)
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- threePalette is from stable theme; adding rebuilds on toggle
   }, [playbackEnabled, playbackInput, resetPlaybackRuntime, stockColor, updateToolMeshPose])
 
   useEffect(() => {
@@ -1118,7 +1135,6 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
     }
 
     playbackLastTimeRef.current = performance.now()
-    playbackLastRebuildRef.current = performance.now()
 
     const tick = () => {
       const controllerInner = playbackControllerRef.current
@@ -1138,20 +1154,16 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
       const step = playbackMaxStepRef.current > 0
         ? Math.min(requested, playbackMaxStepRef.current)
         : requested
-      const gridChanged = controllerInner.advance(step)
+      controllerInner.advance(step)
       updateToolMeshPose()
-
-      if (gridChanged && now - playbackLastRebuildRef.current >= PLAYBACK_REBUILD_INTERVAL_MS) {
-        rebuildPlaybackGeometry()
-        playbackLastRebuildRef.current = now
-      }
+      flushPlaybackGridToGpu()
 
       latestProgressRef.current = controllerInner.totalPathLength > 0
         ? controllerInner.getDistanceTraveled() / controllerInner.totalPathLength
         : 1
 
       if (controllerInner.isFinished()) {
-        rebuildPlaybackGeometry()
+        flushPlaybackGridToGpu()
 
         setPlaybackProgress(latestProgressRef.current)
         setIsPlaying(false)
@@ -1168,7 +1180,7 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
       cancelAnimationFrame(playbackFrameRef.current)
       playbackFrameRef.current = 0
     }
-  }, [isPlaying, playbackEnabled, rebuildPlaybackGeometry, updateToolMeshPose])
+  }, [isPlaying, playbackEnabled, flushPlaybackGridToGpu, updateToolMeshPose])
 
   // Convert a toolpath pose to machine-relative coordinates.
   // X and Z follow the usual origin-relative subtraction.
@@ -1228,13 +1240,13 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
     }
     if (controller.isFinished()) {
       controller.reset()
-      rebuildPlaybackGeometry()
+      flushPlaybackGridToGpu()
       latestProgressRef.current = 0
       setPlaybackProgress(0)
       updateToolMeshPose()
     }
     setIsPlaying((current) => !current)
-  }, [rebuildPlaybackGeometry, updateToolMeshPose])
+  }, [flushPlaybackGridToGpu, updateToolMeshPose])
 
   const handleStop = useCallback(() => {
     const controller = playbackControllerRef.current
@@ -1243,23 +1255,37 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
     }
     setIsPlaying(false)
     controller.reset()
-    rebuildPlaybackGeometry()
+    flushPlaybackGridToGpu()
     updateToolMeshPose()
     latestProgressRef.current = 0
     setPlaybackProgress(0)
-  }, [rebuildPlaybackGeometry, updateToolMeshPose])
+  }, [flushPlaybackGridToGpu, updateToolMeshPose])
 
+  // Scrubbing fires a change event per mousemove; each engine seek can replay a
+  // large slice of the toolpath. Coalesce to one seek per animation frame: the
+  // slider position updates immediately, the engine applies the latest
+  // requested fraction on the next RAF. Forward drags are incremental in the
+  // controller (cuts are monotonic), so only leftward drags pay for a replay.
   const handleSeek = useCallback((fraction: number) => {
-    const controller = playbackControllerRef.current
-    if (!controller) {
-      return
-    }
-    controller.seekToFraction(fraction)
-    rebuildPlaybackGeometry()
-    updateToolMeshPose()
     latestProgressRef.current = fraction
     setPlaybackProgress(fraction)
-  }, [rebuildPlaybackGeometry, updateToolMeshPose])
+    pendingSeekFractionRef.current = fraction
+    if (seekFrameRef.current) {
+      return
+    }
+    seekFrameRef.current = requestAnimationFrame(() => {
+      seekFrameRef.current = 0
+      const controller = playbackControllerRef.current
+      const pending = pendingSeekFractionRef.current
+      pendingSeekFractionRef.current = null
+      if (!controller || pending === null) {
+        return
+      }
+      controller.seekToFraction(pending)
+      flushPlaybackGridToGpu()
+      updateToolMeshPose()
+    })
+  }, [flushPlaybackGridToGpu, updateToolMeshPose])
 
   useEffect(() => {
     const scene = sceneRef.current
@@ -1275,16 +1301,18 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
 
     const collidingClampIdSet = new Set(collidingClampIds)
     const nextClampMeshes = clamps.map((clamp) =>
-      buildClampMesh(clamp, clamp.id === selectedClampId, collidingClampIdSet.has(clamp.id)),
+      buildClampMesh(clamp, clamp.id === selectedClampId, collidingClampIdSet.has(clamp.id), threePalette),
     )
     for (const mesh of nextClampMeshes) {
       scene.add(mesh)
     }
     clampObjectsRef.current = nextClampMeshes
+    needsRenderRef.current = true
 
     return () => {
       disposeClampMeshes(scene)
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- threePalette is from stable theme; adding rebuilds on toggle
   }, [clamps, collidingClampIds, disposeClampMeshes, selectedClampId])
 
   useEffect(() => {
@@ -1308,13 +1336,15 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
       ) * 0.05,
       0.05,
     )
-    const triad = buildOriginTriad(origin, axisSize)
+    const triad = buildOriginTriad(origin, axisSize, threePalette)
     scene.add(triad)
     originObjectRef.current = triad
+    needsRenderRef.current = true
 
     return () => {
       disposeOriginMesh(scene)
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- threePalette is from stable theme; adding rebuilds on toggle
   }, [disposeOriginMesh, origin, simulation])
 
   // Reset camera on project change so the viewport doesn't keep the previous
@@ -1371,22 +1401,16 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
       {webglStatus === 'unavailable' && (
         <div className="simulation-viewport__webgl-overlay">
           <div className="simulation-viewport__webgl-message">
-            <strong>3D simulation isn&apos;t available</strong>
-            <p>
-              This view requires WebGL2, which your browser or graphics driver did not provide.
-              Try updating your browser or enabling hardware acceleration in its settings.
-            </p>
+            <strong>{t('viewport.sim.webglUnavailableTitle')}</strong>
+            <p>{t('viewport.sim.webglUnavailableBody')}</p>
           </div>
         </div>
       )}
       {webglStatus === 'context-lost' && (
         <div className="simulation-viewport__webgl-overlay">
           <div className="simulation-viewport__webgl-message">
-            <strong>3D graphics context lost</strong>
-            <p>
-              Waiting for the browser to restore it — playback has been paused.
-              If this message persists, reload the app.
-            </p>
+            <strong>{t('viewport.sim.webglLostTitle')}</strong>
+            <p>{t('viewport.sim.webglLostBody')}</p>
           </div>
         </div>
       )}
@@ -1441,24 +1465,24 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
       )}
       <div className="viewport-presets">
         <div className="viewport-presets__group viewport-presets__group--status">
-          <div className="simulation-mode-toggle" role="tablist" aria-label="Simulation mode">
+          <div className="simulation-mode-toggle" role="tablist" aria-label={t('viewport.sim.modeLabel')}>
             <button
               className={`simulation-mode-toggle__btn ${mode === 'selected' ? 'simulation-mode-toggle__btn--active' : ''}`}
               type="button"
               onClick={() => onModeChange('selected')}
             >
-              Selected
+              {t('viewport.sim.modeSelected')}
             </button>
             <button
               className={`simulation-mode-toggle__btn ${mode === 'visible' ? 'simulation-mode-toggle__btn--active' : ''}`}
               type="button"
               onClick={() => onModeChange('visible')}
             >
-              Visible
+              {t('viewport.sim.modeVisible')}
             </button>
           </div>
-          <label className="simulation-detail-control" title="Simulation detail">
-            <span className="simulation-detail-control__label">Detail</span>
+          <label className="simulation-detail-control" title={t('viewport.sim.detailTitle')}>
+            <span className="simulation-detail-control__label">{t('viewport.sim.detailLabel')}</span>
             <input
               className="simulation-detail-control__slider"
               type="range"
@@ -1476,23 +1500,23 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
             onClick={handlePlaybackToggle}
             disabled={mode !== 'selected' || !playbackInput || webglStatus === 'unavailable'}
             title={mode !== 'selected'
-              ? 'Switch to Selected mode to use Tool playback'
+              ? t('viewport.sim.playToolDisabledMode')
               : !playbackInput
-                ? 'Select an operation with a valid toolpath to play'
-                : 'Toggle tool playback'}
+                ? t('viewport.sim.playToolDisabledNoOp')
+                : t('viewport.sim.playToolToggle')}
           >
-            Play Tool
+            {t('viewport.sim.playTool')}
           </button>
         </div>
         <div className="viewport-presets__group viewport-presets__group--views">
           <div className="preset-btn-panel">
-            <button className="preset-btn preset-btn--icon" onClick={() => controlsRef.current?.setPreset('top')} title="Top view" type="button"><Icon id="view-top" size={16} /></button>
-            <button className="preset-btn preset-btn--icon" onClick={() => controlsRef.current?.setPreset('bottom')} title="Bottom view" type="button"><Icon id="view-bottom" size={16} /></button>
-            <button className="preset-btn preset-btn--icon" onClick={() => controlsRef.current?.setPreset('front')} title="Front view" type="button"><Icon id="view-front" size={16} /></button>
-            <button className="preset-btn preset-btn--icon" onClick={() => controlsRef.current?.setPreset('back')} title="Back view" type="button"><Icon id="view-back" size={16} /></button>
-            <button className="preset-btn preset-btn--icon" onClick={() => controlsRef.current?.setPreset('right')} title="Right view" type="button"><Icon id="view-right" size={16} /></button>
-            <button className="preset-btn preset-btn--icon" onClick={() => controlsRef.current?.setPreset('left')} title="Left view" type="button"><Icon id="view-left" size={16} /></button>
-            <button className="preset-btn preset-btn--icon" onClick={() => controlsRef.current?.setPreset('iso')} title="Isometric view" type="button"><Icon id="view-iso" size={16} /></button>
+            <button className="preset-btn preset-btn--icon" onClick={() => controlsRef.current?.setPreset('top')} title={presetTitles.top} type="button"><Icon id="view-top" size={16} /></button>
+            <button className="preset-btn preset-btn--icon" onClick={() => controlsRef.current?.setPreset('bottom')} title={presetTitles.bottom} type="button"><Icon id="view-bottom" size={16} /></button>
+            <button className="preset-btn preset-btn--icon" onClick={() => controlsRef.current?.setPreset('front')} title={presetTitles.front} type="button"><Icon id="view-front" size={16} /></button>
+            <button className="preset-btn preset-btn--icon" onClick={() => controlsRef.current?.setPreset('back')} title={presetTitles.back} type="button"><Icon id="view-back" size={16} /></button>
+            <button className="preset-btn preset-btn--icon" onClick={() => controlsRef.current?.setPreset('right')} title={presetTitles.right} type="button"><Icon id="view-right" size={16} /></button>
+            <button className="preset-btn preset-btn--icon" onClick={() => controlsRef.current?.setPreset('left')} title={presetTitles.left} type="button"><Icon id="view-left" size={16} /></button>
+            <button className="preset-btn preset-btn--icon" onClick={() => controlsRef.current?.setPreset('iso')} title={presetTitles.iso} type="button"><Icon id="view-iso" size={16} /></button>
           </div>
         </div>
       </div>
@@ -1504,7 +1528,7 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
               className="simulation-playback-bar__btn simulation-playback-bar__btn--primary"
               onClick={handlePlayPause}
               disabled={playbackControlsDisabled}
-              title={isPlaying ? 'Pause' : 'Play'}
+              title={isPlaying ? t('viewport.sim.pause') : t('viewport.sim.play')}
             >
               {isPlaying ? '❚❚' : '▶'}
             </button>
@@ -1513,7 +1537,7 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
               className="simulation-playback-bar__btn"
               onClick={handleStop}
               disabled={playbackControlsDisabled}
-              title="Stop & reset"
+              title={t('viewport.sim.stop')}
             >
               ■
             </button>
@@ -1530,18 +1554,18 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
               value={Math.round(playbackProgress * 1000)}
               onChange={(event) => handleSeek(Number(event.target.value) / 1000)}
               disabled={playbackControlsDisabled}
-              aria-label="Playback progress"
+              aria-label={t('viewport.sim.progressAria')}
             />
           </div>
           <label
             className="simulation-playback-bar__speed simulation-playback-bar__speed--slider"
             title={
               playbackInput.feedPerSecond && playbackInput.feedPerSecond > 0
-                ? `Speed multiplier of operation feed (${formatSpeedLabel(baseSpeed, playbackUnits)} = 1×). Current: ${formatMultiplierLabel(playbackMultiplier)}`
-                : `Speed multiplier of fallback feed (${formatSpeedLabel(baseSpeed, playbackUnits)} = 1×). Current: ${formatMultiplierLabel(playbackMultiplier)}`
+                ? t('viewport.sim.speedTooltipFeed', { feed: formatSpeedLabel(baseSpeed, playbackUnits), multiplier: formatMultiplierLabel(playbackMultiplier) })
+                : t('viewport.sim.speedTooltipFallback', { feed: formatSpeedLabel(baseSpeed, playbackUnits), multiplier: formatMultiplierLabel(playbackMultiplier) })
             }
           >
-            <span>Speed</span>
+            <span>{t('viewport.sim.speedLabel')}</span>
             <input
               type="range"
               min={0}
@@ -1550,14 +1574,14 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
               value={multiplierToSliderPosition(playbackMultiplier)}
               onChange={(event) => setPlaybackMultiplier(sliderPositionToMultiplier(Number(event.target.value)))}
               disabled={playbackControlsDisabled}
-              aria-label="Playback speed multiplier"
+              aria-label={t('viewport.sim.speedAria')}
             />
           </label>
           <label
             className="simulation-playback-bar__speed"
-            title="Maximum distance the tool advances per frame. Smaller = smoother motion, larger = faster playback."
+            title={t('viewport.sim.stepTooltip')}
           >
-            <span>Step</span>
+            <span>{t('viewport.sim.stepLabel')}</span>
             <select
               value={playbackMaxStep}
               onChange={(event) => setPlaybackMaxStep(Number(event.target.value))}
@@ -1578,11 +1602,11 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
           </div>
           <div
             className="simulation-playback-bar__feed"
-            title="Cutting feed of the current move. Reduced slotting pocket cuts show their scaled feed here; the dot colour marks the move kind (rapids have no feed)."
+            title={t('viewport.sim.feedTooltip')}
           >
             <span
               className={`simulation-playback-bar__move-kind simulation-playback-bar__move-kind--${displayPose.moveKind ?? 'none'}`}
-              title={displayPose.moveKind ?? 'Idle'}
+              title={t('viewport.sim.moveKindIdle')}
             />
             <span className="simulation-playback-bar__feed-value">
               {(() => {

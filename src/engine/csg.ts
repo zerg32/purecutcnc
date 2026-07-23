@@ -16,21 +16,25 @@
 
 import * as THREE from 'three'
 import ManifoldModule, { type Manifold as ManifoldSolid, type ManifoldToplevel } from 'manifold-3d'
-import { bezierPoint, rectProfile } from '../types/project'
+import { rectProfile } from '../types/project'
 import type { Clamp, DimensionRef, MachineOrigin, Project, SketchFeature, SketchProfile, Segment, Stock, Tab } from '../types/project'
-import { expandFeatureGeometry, getFeatureGeometryProfiles } from '../text'
+import { expandFeatureGeometry } from '../text'
+import { modelFeatures } from '../store/helpers/featureRoles'
+import { resolvedProjectFeatures } from '../store/helpers/resolveFeatures'
 import { loadPersistedBufferGeometryChunks, loadPersistedTriangleMesh } from './importedMesh'
+import {
+  importedModelInstanceTransform,
+  importedModelMatrix4,
+  importedModelTransformKey,
+  transformImportedModelPoint,
+} from './importedModelTransform'
 import type { MeshSliceIndex } from './toolpaths/meshSlicing'
-import { Line2 } from 'three/examples/jsm/lines/Line2.js'
-import { LineGeometry } from 'three/examples/jsm/lines/LineGeometry.js'
-import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
+import { buildBatchedLines, type BatchLineMeta } from './lineBatcher'
+import type { ThreeThemePalette } from '../theme/palette'
+import { profileToPolygon } from './profilePolyline'
 
-const ARC_STEP_RADIANS = Math.PI / 18
-
-/** Default 10° per arc segment — matches the 3D viewport tessellation. */
-export const DEFAULT_ARC_STEP_RADIANS = ARC_STEP_RADIANS
-/** Default 18 segments per bezier — derived from the default arc step. */
-const DEFAULT_BEZIER_SEGMENTS = 18
+export { closeLinePolygonIfNeeded, profileToPolygon } from './profilePolyline'
+import { DEFAULT_ARC_STEP_RADIANS } from './profilePolyline'
 
 let manifoldModulePromise: Promise<ManifoldToplevel> | null = null
 let manifoldModuleInstance: ManifoldToplevel | null = null
@@ -122,72 +126,9 @@ export function profileToShape(profile: SketchProfile): THREE.Shape {
   return shape
 }
 
-function profileToPolygon(
-  profile: SketchProfile,
-  arcStepRadians: number = ARC_STEP_RADIANS,
-): [number, number][] {
-  const points: [number, number][] = [[profile.start.x, profile.start.y]]
-  let current = profile.start
-
-  // Scale bezier subdivision the same way arcs scale, so curve quality is consistent.
-  const bezierSegments = Math.max(
-    8,
-    Math.round(DEFAULT_BEZIER_SEGMENTS * (ARC_STEP_RADIANS / arcStepRadians)),
-  )
-
-  for (const seg of profile.segments) {
-    if (seg.type === 'line') {
-      points.push([seg.to.x, seg.to.y])
-      current = seg.to
-      continue
-    }
-
-    if (seg.type === 'bezier') {
-      for (let index = 1; index <= bezierSegments; index += 1) {
-        const point = bezierPoint(current, seg.control1, seg.control2, seg.to, index / bezierSegments)
-        points.push([point.x, point.y])
-      }
-      current = seg.to
-      continue
-    }
-
-    const { type, to, center, clockwise } = seg as Extract<Segment, { type: 'arc' | 'circle' }>
-    const startAngle = Math.atan2(current.y - center.y, current.x - center.x)
-    const endAngle = Math.atan2(to.y - center.y, to.x - center.x)
-    const radius = Math.hypot(current.x - center.x, current.y - center.y)
-
-    let sweep = endAngle - startAngle
-    if (type === 'circle') {
-      sweep = clockwise ? -Math.PI * 2 : Math.PI * 2
-    } else {
-      if (clockwise && sweep > 0) sweep -= Math.PI * 2
-      else if (!clockwise && sweep < 0) sweep += Math.PI * 2
-    }
-
-    const segmentCount = Math.max(8, Math.ceil(Math.abs(sweep) / arcStepRadians))
-    for (let index = 1; index <= segmentCount; index += 1) {
-      const angle = startAngle + (sweep * index) / segmentCount
-      points.push([
-        center.x + Math.cos(angle) * radius,
-        center.y + Math.sin(angle) * radius,
-      ])
-    }
-    current = to
-  }
-
-  const first = points[0]
-  const last = points.at(-1)
-  if (last && Math.hypot(last[0] - first[0], last[1] - first[1]) < 1e-6) {
-    points.pop()
-  }
-
-  return points
-}
-
-
 // ── Stock mesh ───────────────────────────────────────────────────────────────
 
-export function buildStockMesh(stock: Stock): THREE.Mesh {
+export function buildStockMesh(stock: Stock, threePalette: ThreeThemePalette): THREE.Mesh {
   const shape = profileToShape(stock.profile)
   const geometry = new THREE.ExtrudeGeometry(shape, {
     depth: stock.thickness,
@@ -197,7 +138,7 @@ export function buildStockMesh(stock: Stock): THREE.Mesh {
   geometry.rotateX(-Math.PI / 2)
 
   const material = new THREE.MeshStandardMaterial({
-    color: new THREE.Color(stock.color ?? '#8899aa'),
+    color: new THREE.Color(stock.color ?? threePalette.stockMeshFallback),
     transparent: true,
     opacity: 0.35,
     side: THREE.DoubleSide,
@@ -284,14 +225,13 @@ function stlTransformedGeometryCacheKey(
   const asset = featureModelAsset(project, feature)
   const zTop = resolveDimension(feature.z_top, project)
   const zBottom = resolveDimension(feature.z_bottom, project)
+  const transform = importedModelInstanceTransform(feature)
   return [
     feature.id,
     stl?.format ?? 'stl',
     stl?.axisSwap ?? 'none',
     stl?.scale ?? 1,
-    feature.sketch.origin.x,
-    feature.sketch.origin.y,
-    feature.sketch.orientationAngle ?? 0,
+    importedModelTransformKey(transform),
     zTop,
     zBottom,
     stl?.meshAssetId ?? 'missing',
@@ -371,16 +311,11 @@ export function loadSTLTransformedGeometry(
 
   // BuildFeatureSolid-style transformations (same as buildFeatureMesh)
   const scale = stl?.scale ?? 1
-  const angleDeg = feature.sketch.orientationAngle ?? 0
+  const transform = importedModelInstanceTransform(feature)
   const zTop = resolveDimension(feature.z_top, project)
   const zBottom = resolveDimension(feature.z_bottom, project)
   const targetHeight = Math.max(0.1, Math.abs(zTop - zBottom))
   const zScale = targetHeight / ((meshHeight || 1) * scale)
-  const angleRad = (angleDeg * Math.PI) / 180
-  const cosA = Math.cos(angleRad)
-  const sinA = Math.sin(angleRad)
-  const originX = feature.sketch.origin.x
-  const originY = feature.sketch.origin.y
   const bottomZ = Math.min(zTop, zBottom)
 
   // Apply transforms to vertex positions
@@ -391,8 +326,7 @@ export function loadSTLTransformedGeometry(
     const iz = i * 3 + 2
 
     // Uniform scale
-    let x = rawPos[ix] * scale
-    let y = rawPos[iy] * scale
+    const xy = transformImportedModelPoint(transform, rawPos[ix] * scale, rawPos[iy] * scale)
     let z = rawPos[iz] * scale
 
     // Translate bottom to Z=0, then Z-only scale, then translate to target
@@ -400,18 +334,8 @@ export function loadSTLTransformedGeometry(
     z *= zScale
     z += bottomZ
 
-    // Rotate around Z
-    const rx = x * cosA - y * sinA
-    const ry = x * sinA + y * cosA
-    x = rx
-    y = ry
-
-    // Translate to sketch origin
-    x += originX
-    y += originY
-
-    positions[ix] = x
-    positions[iy] = y
+    positions[ix] = xy.x
+    positions[iy] = xy.y
     positions[iz] = z
   }
 
@@ -428,13 +352,18 @@ export function buildFeatureMesh(
   selected = false,
   hovered = false,
   stockThickness?: number,
+  threePalette?: ThreeThemePalette,
 ): THREE.Object3D {
   const asset = feature.kind === 'stl' ? featureModelAsset(project, feature) : null
   if (asset) {
     const stl = feature.stl
     const chunks = loadPersistedBufferGeometryChunks(asset, false)
     const material = new THREE.MeshStandardMaterial({
-      color: selected ? 0xffaa00 : hovered ? 0x44aaff : 0xb7c2cf,
+      color: selected
+        ? (threePalette?.meshFeatureSelected ?? 0xffaa00) // theme-exempt: dark fallback
+        : hovered
+          ? (threePalette?.meshFeatureHovered ?? 0x44aaff) // theme-exempt: dark fallback
+          : (threePalette?.meshFeatureDefault ?? 0xb7c2cf), // theme-exempt: dark fallback
       roughness: 0.82,
       metalness: 0.05,
       side: THREE.DoubleSide,
@@ -444,7 +373,7 @@ export function buildFeatureMesh(
     }
 
     const userScale = stl?.scale ?? 1
-    const angleRad = (feature.sketch.orientationAngle ?? 0) * (Math.PI / 180)
+    const transform = importedModelInstanceTransform(feature)
 
     // Resolve z dimensions (DimensionRef → number).
     // STL features always store numeric z values, but the type allows DimensionRef.
@@ -465,22 +394,21 @@ export function buildFeatureMesh(
     //   2. translate(0,0,-minZ)          → move bottom of mesh to z=0
     //   3. scale(1,1,zScaleFactor)       → stretch Z to targetHeight
     //   4. translate(0,0,min(zTop,zBot)) → move bottom to feature's bottom plane
-    //   5. rotateZ(angleRad)
-    //   6. translate(origin.x, origin.y, 0)
-    //   7. rotateX(-π/2)                 → swap Y/Z for viewport convention
-    //   8. mesh.scale.z = -1             → flip Z (final mesh-local axis flip)
+    //   5. apply the strict instance's full 2D affine transform
+    //   6. rotateX(-π/2)                 → swap Y/Z for viewport convention
+    //   7. mesh.scale.z = -1             → flip Z (final mesh-local axis flip)
     //
     // We reproduce that as an Object3D hierarchy so each chunk shares it
     // without baking transforms into per-chunk geometry. Read from outer (last
     // applied) to inner (first applied):
     //
-    //   group (rotateX(-π/2), translate(origin), rotateZ(angleRad))
+    //   group (rotateX(-π/2), instance affine transform)
     //     └── inner (scale Z, translate -minZ*userScale, scale userScale, then
     //                translate by min(zTop,zBot) along Z BEFORE rotateX)
     //
     // The clearest way to assemble this without juggling matrices is two
     // nested groups: an inner that handles the mesh-local scale/translate, and
-    // an outer that handles the world-space rotate/translate. We also fold
+    // an outer that handles the world-space affine placement. We also fold
     // mesh.scale.z = -1 into the inner.
 
     // Inner Z transform reproduces steps 1–4 in mesh-local space:
@@ -494,22 +422,19 @@ export function buildFeatureMesh(
       innerGroup.add(new THREE.Mesh(chunk, material))
     }
 
-    // Each subsequent step in the original sequence (5–7, then mesh.scale.z = -1)
+    // Each subsequent step in the original sequence (5–6, then mesh.scale.z = -1)
     // is wrapped as its own group, outer = applied later. Three.js composes a
     // node's local transform as T * R * S; the inner group already uses both
     // scale and translation, so all subsequent ops use one transform per node
     // to avoid combined-order surprises.
-    const rotateZGroup = new THREE.Group()
-    rotateZGroup.rotation.z = angleRad
-    rotateZGroup.add(innerGroup)
-
-    const translateGroup = new THREE.Group()
-    translateGroup.position.set(feature.sketch.origin.x, feature.sketch.origin.y, 0)
-    translateGroup.add(rotateZGroup)
+    const affineGroup = new THREE.Group()
+    affineGroup.matrixAutoUpdate = false
+    affineGroup.matrix.fromArray(importedModelMatrix4(transform))
+    affineGroup.add(innerGroup)
 
     const rotateXGroup = new THREE.Group()
     rotateXGroup.rotation.x = -Math.PI / 2
-    rotateXGroup.add(translateGroup)
+    rotateXGroup.add(affineGroup)
 
     // Outermost — the equivalent of the original `mesh.scale.z = -1` applied
     // AFTER the geometry's rotateX, so this must live in its own group.
@@ -518,6 +443,11 @@ export function buildFeatureMesh(
     scaleZGroup.add(rotateXGroup)
 
     return scaleZGroup
+  }
+
+  // Line features are flat path geometry rendered as line overlays — never extrude.
+  if (feature.operation === 'line') {
+    return new THREE.Group()
   }
 
   const shape = profileToShape(feature.sketch.profile)
@@ -542,11 +472,12 @@ export function buildFeatureMesh(
   geometry.translate(0, yStart, 0)
 
   const color =
-    selected ? 0xffaa00
-    : hovered ? 0x44aaff
-    : isRegion ? 0x9966cc
-    : feature.operation === 'subtract' ? 0x3366cc
-    : 0x33aa66
+    selected ? (threePalette?.meshFeatureSelected ?? 0xffaa00) // theme-exempt: dark fallback
+    : hovered ? (threePalette?.meshFeatureHovered ?? 0x44aaff) // theme-exempt: dark fallback
+    : isRegion ? (threePalette?.meshFeatureRegion ?? 0x9966cc) // theme-exempt: dark fallback
+    : feature.operation === 'subtract'
+      ? (threePalette?.meshFeatureSubtract ?? 0x3366cc) // theme-exempt: dark fallback
+      : (threePalette?.meshFeatureAdd ?? 0x33aa66) // theme-exempt: dark fallback
 
   const material = new THREE.MeshStandardMaterial({
     color,
@@ -569,7 +500,34 @@ export function buildFeatureMesh(
   return mesh
 }
 
-export function buildClampMesh(clamp: Clamp, selected = false, colliding = false): THREE.Mesh {
+/**
+ * Update a clamp mesh's highlight to reflect selection/collision state.
+ *
+ * Selection and collision only change the fixture's color + opacity, never its
+ * geometry, so this is a cheap recolor that can run without rebuilding the CSG
+ * model (issue #261). `buildClampMesh` calls it for the initial appearance and
+ * Viewport3D calls it again on selection/collision changes.
+ */
+export function applyClampHighlight(mesh: THREE.Mesh, selected: boolean, colliding: boolean, threePalette: ThreeThemePalette): void {
+  const material = mesh.material
+  if (!(material instanceof THREE.MeshStandardMaterial)) return
+  material.color.set(
+    colliding
+      ? (selected ? threePalette.clampCollidingSelected : threePalette.clampColliding)
+      : (selected ? threePalette.clampSelected : threePalette.clampDefault),
+  )
+  material.opacity = colliding ? (selected ? 0.8 : 0.68) : (selected ? 0.72 : 0.58)
+}
+
+/** Update a tab mesh's highlight to reflect selection state (see {@link applyClampHighlight}). */
+export function applyTabHighlight(mesh: THREE.Mesh, selected: boolean, threePalette: ThreeThemePalette): void {
+  const material = mesh.material
+  if (!(material instanceof THREE.MeshStandardMaterial)) return
+  material.color.set(selected ? threePalette.tabSelected : threePalette.tabDefault)
+  material.opacity = selected ? 0.72 : 0.56
+}
+
+export function buildClampMesh(clamp: Clamp, selected = false, colliding = false, threePalette?: ThreeThemePalette): THREE.Mesh {
   const shape = profileToShape(rectProfile(clamp.x, clamp.y, clamp.w, clamp.h))
   const geometry = new THREE.ExtrudeGeometry(shape, {
     depth: Math.max(clamp.height, 0.1),
@@ -578,23 +536,19 @@ export function buildClampMesh(clamp: Clamp, selected = false, colliding = false
   geometry.rotateX(-Math.PI / 2)
 
   const material = new THREE.MeshStandardMaterial({
-    color:
-      colliding
-        ? (selected ? new THREE.Color('#ff9c9c') : new THREE.Color('#d46b6b'))
-        : (selected ? new THREE.Color('#9db9ff') : new THREE.Color('#6c89d1')),
     transparent: true,
-    opacity: colliding ? (selected ? 0.8 : 0.68) : (selected ? 0.72 : 0.58),
     roughness: 0.72,
     metalness: 0.08,
     side: THREE.DoubleSide,
   })
 
   const mesh = new THREE.Mesh(geometry, material)
+  if (threePalette) applyClampHighlight(mesh, selected, colliding, threePalette)
   mesh.scale.z = -1
   return mesh
 }
 
-export function buildTabMesh(tab: Tab, selected = false): THREE.Mesh {
+export function buildTabMesh(tab: Tab, selected = false, threePalette?: ThreeThemePalette): THREE.Mesh {
   const shape = profileToShape(rectProfile(tab.x, tab.y, tab.w, tab.h))
   const zStart = Math.min(tab.z_top, tab.z_bottom)
   const depth = Math.max(Math.abs(tab.z_top - tab.z_bottom), 0.1)
@@ -606,27 +560,26 @@ export function buildTabMesh(tab: Tab, selected = false): THREE.Mesh {
   geometry.translate(0, zStart, 0)
 
   const material = new THREE.MeshStandardMaterial({
-    color: selected ? new THREE.Color('#c7ef94') : new THREE.Color('#9ccd67'),
     transparent: true,
-    opacity: selected ? 0.72 : 0.56,
     roughness: 0.74,
     metalness: 0.06,
     side: THREE.DoubleSide,
   })
 
   const mesh = new THREE.Mesh(geometry, material)
+  if (threePalette) applyTabHighlight(mesh, selected, threePalette)
   mesh.scale.z = -1
   return mesh
 }
 
-export function buildOriginTriad(origin: MachineOrigin, size: number): THREE.Group {
+export function buildOriginTriad(origin: MachineOrigin, size: number, threePalette?: ThreeThemePalette): THREE.Group {
   const group = new THREE.Group()
   group.position.set(origin.x, origin.z, origin.y)
 
   const axisData = [
-    { direction: new THREE.Vector3(1, 0, 0), color: 0xe35b5b },
-    { direction: new THREE.Vector3(0, 0, -1), color: 0x63c07a },
-    { direction: new THREE.Vector3(0, 1, 0), color: 0x5b90e3 },
+    { direction: new THREE.Vector3(1, 0, 0), color: threePalette?.originAxisX ?? 0xe35b5b }, // theme-exempt: dark fallback
+    { direction: new THREE.Vector3(0, 0, -1), color: threePalette?.originAxisY ?? 0x63c07a }, // theme-exempt: dark fallback
+    { direction: new THREE.Vector3(0, 1, 0), color: threePalette?.originAxisZ ?? 0x5b90e3 }, // theme-exempt: dark fallback
   ]
   const shaftRadius = Math.max(size * 0.025, 0.005)
   const tipRadius = Math.max(size * 0.055, shaftRadius * 1.5)
@@ -669,7 +622,7 @@ export function buildOriginTriad(origin: MachineOrigin, size: number): THREE.Gro
 
   const centerGeometry = new THREE.SphereGeometry(Math.max(size * 0.1, shaftRadius * 1.2), 14, 14)
   const centerMaterial = new THREE.MeshStandardMaterial({
-    color: 0xe6edf5,
+    color: threePalette?.originCenter ?? 0xe6edf5, // theme-exempt: dark fallback
     roughness: 0.4,
     metalness: 0.1,
   })
@@ -706,7 +659,7 @@ export function buildFeatureSolid(
   module: ManifoldToplevel,
   project: Project,
   feature: SketchFeature,
-  arcStepRadians: number = ARC_STEP_RADIANS,
+  arcStepRadians: number = DEFAULT_ARC_STEP_RADIANS,
 ): ManifoldSolid | null {
   const asset = feature.kind === 'stl' ? featureModelAsset(project, feature) : null
   if (asset) {
@@ -728,7 +681,7 @@ export function buildFeatureSolid(
       
       const solid = new module.Manifold(manifoldMesh)
       const scale = stl?.scale ?? 1
-      const angleDeg = feature.sketch.orientationAngle ?? 0
+      const transform = importedModelInstanceTransform(feature)
       
       // Resolve z dimensions (DimensionRef → number)
       const zTop = resolveDimension(feature.z_top, project)
@@ -748,8 +701,7 @@ export function buildFeatureSolid(
         .translate([0, 0, -bbox.min[2] * scale]) // Move to 0 (accounting for uniform scale)
         .scale([1, 1, zScale]) // Scale Z to match target height
         .translate([0, 0, Math.min(zTop, zBottom)]) // Move to target bottom
-        .rotate(0, 0, angleDeg)
-        .translate(feature.sketch.origin.x, feature.sketch.origin.y, 0)
+        .transform(importedModelMatrix4(transform))
     } catch (error) {
       console.warn('STL is non-manifold, falling back to 2.5D silhouette extrusion for boolean model.', error)
       
@@ -775,7 +727,7 @@ export function buildFeatureSolid(
     }
   }
 
-  if (!feature.sketch.profile.closed) {
+  if (!feature.sketch.profile.closed || feature.operation === 'line') {
     return null
   }
 
@@ -799,7 +751,8 @@ export function buildFeatureSolid(
 
 async function buildBooleanModel(
   project: Project,
-  visibleFeatures: SketchFeature[]
+  visibleFeatures: SketchFeature[],
+  threePalette: ThreeThemePalette,
 ): Promise<THREE.Mesh | null> {
   const module = await getManifoldModule()
   let current: ManifoldSolid | null = null
@@ -819,7 +772,7 @@ async function buildBooleanModel(
         // because we render the high-resolution mesh as an overlay. This prevents
         // non-manifold STLs from showing their blocky 2.5D fallback extrusion
         // while still allowing 'subtract' STLs to cut holes in the stock.
-        if (feature.operation === 'model' || feature.operation === 'region') {
+        if (feature.operation === 'model' || feature.operation === 'region' || feature.operation === 'line') {
           continue
         }
 
@@ -849,7 +802,7 @@ async function buildBooleanModel(
     const manifoldMesh = current.getMesh()
     const geometry = manifoldMeshToGeometry(manifoldMesh)
     const material = new THREE.MeshStandardMaterial({
-      color: new THREE.Color('#b7c2cf'),
+      color: new THREE.Color(threePalette.meshFeatureDefault),
       roughness: 0.82,
       metalness: 0.05,
       flatShading: true,
@@ -866,7 +819,7 @@ async function buildBooleanModel(
 
 // ── Wireframe outline for stock ──────────────────────────────────────────────
 
-export function buildStockWireframe(stock: Stock): THREE.LineSegments {
+export function buildStockWireframe(stock: Stock, threePalette: ThreeThemePalette): THREE.LineSegments {
   const shape = profileToShape(stock.profile)
   const geometry = new THREE.ExtrudeGeometry(shape, {
     depth: stock.thickness,
@@ -875,59 +828,12 @@ export function buildStockWireframe(stock: Stock): THREE.LineSegments {
   geometry.rotateX(-Math.PI / 2)
   const edges = new THREE.EdgesGeometry(geometry)
   const material = new THREE.LineBasicMaterial({
-    color: new THREE.Color(stock.color ?? '#aabbcc'),
+    color: new THREE.Color(stock.color ?? threePalette.stockWireframeFallback),
     linewidth: 1,
   })
   const lines = new THREE.LineSegments(edges, material)
   lines.scale.z = -1
   return lines
-}
-
-// ── Open feature (polyline) line builder ────────────────────────────
-
-export function buildOpenFeatureLine(
-  project: Project,
-  feature: SketchFeature,
-  selected = false,
-  hovered = false,
-): Line2 {
-  const profile = feature.sketch.profile
-  const zTop = resolveDimension(feature.z_top, project)
-
-  // Subdivide the profile into polyline points (handles arcs, beziers)
-  const polygon = profileToPolygon(profile)
-
-  // Build positions in world space, applying the same transform pipeline as other geometry:
-  //   rotateX(-PI/2): (x, y, 0) → (x, 0, -y)
-  //   translate(0, zTop, 0): (x, 0, -y) → (x, zTop, -y)
-  //   scale.z = -1 (Object3D): (x, zTop, -y) → (x, zTop, y)
-  // Since Line2 bakes transforms into geometry, we produce the final world position directly.
-  const positions: number[] = []
-  for (const [px, py] of polygon) {
-    positions.push(px, zTop, py)
-  }
-
-  const geometry = new LineGeometry()
-  geometry.setPositions(positions)
-
-  const color =
-    selected ? 0xffaa00
-    : hovered ? 0x44aaff
-    : feature.operation === 'subtract' ? 0x3366cc
-    : 0x33aa66
-
-  // Use LineMaterial with screen-pixel linewidth for consistent visibility
-  const material = new LineMaterial({
-    color,
-    linewidth: 4,
-    worldUnits: false,
-    resolution: new THREE.Vector2(window.innerWidth, window.innerHeight),
-  })
-
-  const line = new Line2(geometry, material)
-  line.computeLineDistances()
-
-  return line
 }
 
 // ── Full scene builder ───────────────────────────────────────────────────────
@@ -937,34 +843,44 @@ export interface SceneObjects {
   stockWireframe: THREE.LineSegments
   modelMesh: THREE.Mesh | null
   featureMeshes: Map<string, THREE.Object3D>
-  openFeatureLines: Map<string, THREE.Object3D>
+  /** Batched line overlays — a small array of LineSegments2 objects, not per-feature. */
+  batchedLines: THREE.Object3D[]
+  /** Per-batch metadata for value-level assertions (segment/vertex count, object count). */
+  batchedLinesMeta: BatchLineMeta
   tabMeshes: Map<string, THREE.Mesh>
   clampMeshes: Map<string, THREE.Mesh>
 }
 
-export async function buildScene(
-  project: Project,
-  selectedClampId: string | null = null,
-  selectedTabId: string | null = null,
-  collidingClampIds: string[] = [],
-): Promise<SceneObjects> {
-  const visibleFeatures = project.features.filter((feature) => feature.visible)
+export async function buildScene(project: Project, threePalette: ThreeThemePalette): Promise<SceneObjects> {
+  // Construction geometry is sketch-only — it never reaches the 3D model,
+  // feature meshes, or open-feature lines (issue #199). Regions stay: they
+  // render display-only walls below.
+  //
+  // Fixtures are built unhighlighted: selection/collision only tint the clamp
+  // and tab meshes, which Viewport3D recolors via applyClampHighlight /
+  // applyTabHighlight without rebuilding this (expensive) CSG model (issue #261).
+  const visibleFeatures = modelFeatures(resolvedProjectFeatures(project)).filter((feature) => feature.visible)
   const visibleTabs = project.tabs.filter((tab) => tab.visible)
   const visibleClamps = project.clamps.filter((clamp) => clamp.visible)
-  const collidingClampIdSet = new Set(collidingClampIds)
-  const stockMesh = buildStockMesh(project.stock)
-  const stockWireframe = buildStockWireframe(project.stock)
+  const stockMesh = buildStockMesh(project.stock, threePalette)
+  const stockWireframe = buildStockWireframe(project.stock, threePalette)
   const featureMeshes = new Map<string, THREE.Object3D>()
-  const openFeatureLines = new Map<string, THREE.Object3D>()
+  const batchedLineObjects: THREE.Object3D[] = []
+  let batchedLinesMeta: BatchLineMeta = { objectCount: 0, vertexCount: 0, segmentCount: 0 }
   const tabMeshes = new Map<string, THREE.Mesh>()
   const clampMeshes = new Map<string, THREE.Mesh>()
   let modelMesh: THREE.Mesh | null = null
 
   if (visibleFeatures.length > 0) {
-    try {
-      modelMesh = await buildBooleanModel(project, visibleFeatures)
-    } catch (error) {
-      console.error('Failed to build boolean 3D preview, falling back to feature meshes.', error)
+    const booleanFeatures = visibleFeatures.filter(
+      (feature) => feature.operation === 'add' || feature.operation === 'subtract',
+    )
+    if (booleanFeatures.length > 0) {
+      try {
+        modelMesh = await buildBooleanModel(project, booleanFeatures, threePalette)
+      } catch (error) {
+        console.error('Failed to build boolean 3D preview, falling back to feature meshes.', error)
+      }
     }
 
     // Always include STL meshes for visual detail, even if boolean model succeeded.
@@ -972,7 +888,7 @@ export async function buildScene(
     // Region features also get their own mesh since they are visual-only (not part of boolean model).
     for (const feature of visibleFeatures) {
       if (feature.kind === 'stl' || feature.operation === 'region') {
-        featureMeshes.set(feature.id, buildFeatureMesh(project, feature, false, false, project.stock.thickness))
+        featureMeshes.set(feature.id, buildFeatureMesh(project, feature, false, false, project.stock.thickness, threePalette))
       }
       
       // If buildBooleanModel failed, we need the rest of the meshes too.
@@ -980,22 +896,21 @@ export async function buildScene(
       if (!modelMesh) {
         for (const expanded of expandFeatureGeometry(feature)) {
           if (expanded.kind !== 'stl' && expanded.operation !== 'region') {
-            if (!expanded.sketch.profile.closed) continue
-            featureMeshes.set(expanded.id, buildFeatureMesh(project, expanded, false, false, project.stock.thickness))
+            if (!expanded.sketch.profile.closed || expanded.operation === 'line') continue
+            featureMeshes.set(expanded.id, buildFeatureMesh(project, expanded, false, false, project.stock.thickness, threePalette))
           }
         }
       }
     }
 
-    // Build line representations for open features (polylines, skeleton text, etc.)
-    // These are excluded from the boolean model but should appear as flat lines at z_top.
-    for (const feature of visibleFeatures) {
-      // Check all geometry profiles (text features may have multiple)
-      const profiles = getFeatureGeometryProfiles(feature)
-      if (profiles.some((p) => !p.closed)) {
-        openFeatureLines.set(feature.id, buildOpenFeatureLine(project, feature))
-      }
+    // Build batched line overlays for open profiles and closed Line features.
+    // One independent-segment batch per base colour — no per-feature objects
+    // and no connector segments between contours.
+    const lineResult = buildBatchedLines(project, visibleFeatures, threePalette)
+    for (const line of lineResult.lines) {
+      batchedLineObjects.push(line)
     }
+    batchedLinesMeta = lineResult.meta
   }
 
   const showStockReference = project.stock.visible ?? true
@@ -1004,15 +919,12 @@ export async function buildScene(
   stockWireframe.visible = showStockReference
 
   for (const tab of visibleTabs) {
-    tabMeshes.set(tab.id, buildTabMesh(tab, tab.id === selectedTabId))
+    tabMeshes.set(tab.id, buildTabMesh(tab, false, threePalette))
   }
 
   for (const clamp of visibleClamps) {
-    clampMeshes.set(
-      clamp.id,
-      buildClampMesh(clamp, clamp.id === selectedClampId, collidingClampIdSet.has(clamp.id)),
-    )
+    clampMeshes.set(clamp.id, buildClampMesh(clamp, false, false, threePalette))
   }
 
-  return { stockMesh, stockWireframe, modelMesh, featureMeshes, openFeatureLines, tabMeshes, clampMeshes }
+  return { stockMesh, stockWireframe, modelMesh, featureMeshes, batchedLines: batchedLineObjects, batchedLinesMeta, tabMeshes, clampMeshes }
 }

@@ -35,9 +35,11 @@ declare module 'clipper-lib' {
   interface ClipperStatic {
     new (): ClipperLike
     Area(poly: IntPoint[]): number
+    SimplifyPolygon(poly: IntPoint[], fillType?: number): IntPoint[][]
   }
 
   interface ClipperOffsetLike {
+    ArcTolerance: number
     AddPaths(paths: IntPoint[][], joinType: number, endType: number): void
     Execute(solution: IntPoint[][], delta: number): void
   }
@@ -77,6 +79,7 @@ declare module 'clipper-lib' {
     }
     PolyFillType: {
       pftNonZero: number
+      pftEvenOdd: number
     }
     JoinType: {
       jtMiter: number

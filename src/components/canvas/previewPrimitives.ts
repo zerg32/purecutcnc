@@ -26,14 +26,66 @@ import {
 import { roundedRectProfile, chamferedRectProfile } from '../../store/helpers/cannedRectProfiles'
 import type { Point, Segment, SketchFeature, SketchProfile } from '../../types/project'
 import { formatLength } from '../../utils/units'
+import { buildGearProfile, type GearCreationParams } from '../../sketch/gearProfile'
 import {
   drawLineLengthMeasurement,
 } from './measurements'
 import { appendSplineDraftSegment } from './draftGeometry'
 import { pointsEqual } from './hitTest'
-import { traceProfilePath } from './profilePrimitives'
+import { appendProfilePath, traceProfilePath } from './profilePrimitives'
 import { worldToCanvas } from './viewTransform'
 import type { ViewTransform } from './viewTransform'
+import { canvasColors, canvasRgba, parseRgb } from './canvasPalette'
+
+export function featureUsesSketchFill(operation: SketchFeature['operation']): boolean {
+  return operation !== 'line' && operation !== 'construction'
+}
+
+export function drawLineFeatureBatch(
+  ctx: CanvasRenderingContext2D,
+  features: SketchFeature[],
+  vt: ViewTransform,
+): void {
+  if (features.length === 0) return
+  const batchSize = 128
+  ctx.strokeStyle = canvasColors().featureCutStroke
+  ctx.lineWidth = 1.8
+  ctx.setLineDash([])
+  for (let start = 0; start < features.length; start += batchSize) {
+    ctx.beginPath()
+    const end = Math.min(start + batchSize, features.length)
+    for (let index = start; index < end; index += 1) {
+      for (const profile of getFeatureGeometryProfiles(features[index])) {
+        appendProfilePath(ctx, profile, vt)
+      }
+    }
+    ctx.stroke()
+  }
+}
+
+export function drawFeatureInfo(
+  ctx: CanvasRenderingContext2D,
+  feature: SketchFeature,
+  vt: ViewTransform,
+  units: 'mm' | 'inch',
+): void {
+  const zTop = typeof feature.z_top === 'number' ? feature.z_top : 5
+  const zBottom = typeof feature.z_bottom === 'number' ? feature.z_bottom : 0
+  const bounds = getFeatureGeometryBounds(feature)
+  const center = worldToCanvas(
+    { x: bounds.minX + (bounds.maxX - bounds.minX) / 2, y: bounds.minY + (bounds.maxY - bounds.minY) / 2 },
+    vt,
+  )
+
+  ctx.fillStyle = canvasColors().featureInfoText
+  ctx.font = '11px "IBM Plex Mono", "SFMono-Regular", Consolas, monospace'
+  ctx.textAlign = 'center'
+  ctx.fillText(feature.name, center.cx, center.cy - 5)
+  if (feature.operation !== 'construction') {
+    ctx.fillStyle = canvasColors().featureInfoSubText
+    ctx.fillText(`z ${formatLength(zTop, units)} → ${formatLength(zBottom, units)}`, center.cx, center.cy + 10)
+  }
+}
 
 export function translateProfile(profile: SketchProfile, dx: number, dy: number): SketchProfile {
   return {
@@ -79,77 +131,84 @@ export function drawFeature(
   const zTop = typeof feature.z_top === 'number' ? feature.z_top : 5
   const zBottom = typeof feature.z_bottom === 'number' ? feature.z_bottom : 0
   const depthWeight = Math.min(Math.max(Math.abs(zTop - zBottom) / 30, 0), 1)
+  // Construction geometry reads as reference marks: muted grey-blue, dashed,
+  // thinner, never filled — visibly "not material" next to regular features.
+  const construction = feature.operation === 'construction'
+  const p = canvasColors()
 
-  let fill = 'rgba(78, 126, 170, 0.42)'
-  let stroke = '#4e8dc1'
+  let fill = p.featureCutFill
+  let stroke = p.featureCutStroke
+  let lineDash: number[] = []
 
   if (feature.operation === 'add') {
-    fill = 'rgba(92, 165, 115, 0.43)'
-    stroke = '#63b176'
+    fill = p.featureAddFill
+    stroke = p.featureAddStroke
   }
 
   if (feature.operation === 'model') {
-    fill = 'rgba(188, 200, 212, 0.35)'
-    stroke = '#bcc8d4'
+    fill = p.featureModelFill
+    stroke = p.featureModelStroke
   }
 
   if (feature.operation === 'region') {
-    fill = 'rgba(153, 102, 204, 0.30)'
-    stroke = '#9966cc'
+    const excludeRegion = feature.regionMaskMode === 'exclude'
+    fill = excludeRegion ? canvasRgba('featureRegionStroke', 0.10) : p.featureRegionFill
+    stroke = excludeRegion ? p.featureRegionExcludeStroke : p.featureRegionStroke
+    lineDash = excludeRegion ? [7, 5] : []
+  }
+
+  if (construction) {
+    stroke = p.featureConstructionStroke
   }
 
   if (groupSelected) {
-    fill = 'rgba(94, 196, 196, 0.30)'
-    stroke = '#5ec4c4'
+    fill = p.featureGroupFill
+    stroke = p.featureGroupStroke
   }
 
   if (hovered) {
-    fill = 'rgba(203, 148, 86, 0.35)'
-    stroke = '#d2a064'
+    fill = hexToRgba(p.draft, 0.35)
+    stroke = p.draft
   }
 
   if (selected) {
-    fill = 'rgba(234, 170, 97, 0.45)'
-    stroke = '#efbc7a'
+    fill = hexToRgba(p.active, 0.45)
+    stroke = p.active
   }
 
   if (editing) {
-    fill = 'rgba(247, 201, 132, 0.30)'
-    stroke = '#f7cd87'
+    fill = hexToRgba(p.activeStrong, 0.30)
+    stroke = p.activeStrong
   }
 
   if (feature.operation === 'subtract' && !selected && !hovered && !editing) {
-    const g = Math.round(126 - 45 * depthWeight)
-    const b = Math.round(170 + 35 * depthWeight)
-    fill = `rgba(78, ${g}, ${b}, 0.44)`
+    // Base RGB mirrors featureCutFill (78, 126, 170); vary G/B by depth.
+    // Deepen the cut fill with depth, shifted from the themed base colour.
+    const base = parseRgb(p.featureCutFill)
+    const g = Math.round(base.g - 45 * depthWeight)
+    const b = Math.round(base.b + 35 * depthWeight)
+    fill = `rgba(${base.r}, ${g}, ${b}, 0.44)`
   }
 
   const profiles = getFeatureGeometryProfiles(feature)
   for (const profile of profiles) {
     traceProfilePath(ctx, profile, vt)
-    if (profile.closed) {
+    if (profile.closed && featureUsesSketchFill(feature.operation)) {
       ctx.fillStyle = fill
       ctx.fill()
     }
 
     ctx.strokeStyle = stroke
-    ctx.lineWidth = editing || selected ? 2.5 : 1.8
+    ctx.lineWidth = construction
+      ? editing || selected ? 1.8 : 1.2
+      : editing || selected ? 2.5 : 1.8
+    ctx.setLineDash(construction ? [6, 4] : lineDash)
     ctx.stroke()
+    ctx.setLineDash([])
   }
 
   if (showInfo) {
-    const bounds = getFeatureGeometryBounds(feature)
-    const center = worldToCanvas(
-      { x: bounds.minX + (bounds.maxX - bounds.minX) / 2, y: bounds.minY + (bounds.maxY - bounds.minY) / 2 },
-      vt,
-    )
-
-    ctx.fillStyle = 'rgba(228, 236, 244, 0.9)'
-    ctx.font = '11px "IBM Plex Mono", "SFMono-Regular", Consolas, monospace'
-    ctx.textAlign = 'center'
-    ctx.fillText(feature.name, center.cx, center.cy - 5)
-    ctx.fillStyle = 'rgba(171, 194, 213, 0.9)'
-    ctx.fillText(`z ${formatLength(zTop, units)} → ${formatLength(zBottom, units)}`, center.cx, center.cy + 10)
+    drawFeatureInfo(ctx, feature, vt, units)
   }
 }
 
@@ -161,11 +220,11 @@ export function drawPreviewProfile(
 ): void {
   traceProfilePath(ctx, profile, vt)
   if (profile.closed) {
-    ctx.fillStyle = 'rgba(236, 184, 122, 0.18)'
+    ctx.fillStyle = hexToRgba(canvasColors().draft, 0.18)
     ctx.fill()
   }
   ctx.setLineDash([8, 5])
-  ctx.strokeStyle = '#efbc7a'
+  ctx.strokeStyle = canvasColors().draft
   ctx.lineWidth = 2
   ctx.stroke()
   ctx.setLineDash([])
@@ -179,7 +238,7 @@ export function drawPreviewProfile(
     vt,
   )
 
-  ctx.fillStyle = 'rgba(245, 216, 183, 0.95)'
+  ctx.fillStyle = hexToRgba(canvasColors().draftStrong, 0.95)
   ctx.font = '11px "IBM Plex Mono", "SFMono-Regular", Consolas, monospace'
   ctx.textAlign = 'center'
   if (label) {
@@ -194,9 +253,10 @@ export function drawPendingPoint(
   highlighted = false,
 ): void {
   const { cx, cy } = worldToCanvas(point, vt)
-  const strokeColor = highlighted ? '#8fd6ff' : '#efbc7a'
-  const fillColor = highlighted ? 'rgba(143, 214, 255, 0.28)' : 'rgba(239, 188, 122, 0.25)'
-  const crossColor = highlighted ? 'rgba(170, 233, 255, 0.95)' : 'rgba(239, 188, 122, 0.9)'
+  const p = canvasColors()
+  const strokeColor = highlighted ? p.activeStrong : p.draft
+  const fillColor = highlighted ? canvasRgba('activeStrong', 0.28) : hexToRgba(p.draft, 0.25)
+  const crossColor = highlighted ? canvasRgba('draftStrong', 0.95) : hexToRgba(p.draft, 0.9)
 
   ctx.beginPath()
   ctx.arc(cx, cy, 6, 0, Math.PI * 2)
@@ -221,7 +281,7 @@ export function drawMoveGuide(
   fromPoint: Point,
   toPoint: Point,
   vt: ViewTransform,
-  color = 'rgba(239, 188, 122, 0.75)',
+  color = hexToRgba(canvasColors().draft, 0.75),
 ): void {
   const start = worldToCanvas(fromPoint, vt)
   const end = worldToCanvas(toPoint, vt)
@@ -304,7 +364,7 @@ export function drawPendingPathLoop(
   label: string,
   units: 'mm' | 'inch',
   previewHighlighted = false,
-  strokeColor = '#efbc7a',
+  strokeColor = canvasColors().draft,
 ): void {
   if (points.length === 0) return
 
@@ -354,9 +414,9 @@ export function drawPendingPathLoop(
     const isCloseTarget = isStart && points.length >= 3 && closePreview
     ctx.beginPath()
     ctx.arc(vertex.cx, vertex.cy, isCloseTarget ? 7 : 5, 0, Math.PI * 2)
-    ctx.fillStyle = isStart ? 'rgba(239, 188, 122, 0.32)' : 'rgba(210, 221, 230, 0.22)'
+    ctx.fillStyle = isStart ? hexToRgba(canvasColors().draft, 0.32) : canvasColors().vertexFill
     ctx.fill()
-    ctx.strokeStyle = isCloseTarget ? '#ffd095' : isStart ? '#efbc7a' : '#d2dde6'
+    ctx.strokeStyle = isCloseTarget ? canvasColors().draftStrong : isStart ? canvasColors().draft : canvasColors().vertexStroke
     ctx.lineWidth = 2
     ctx.stroke()
   }
@@ -370,7 +430,7 @@ export function drawPendingSplineLoop(
   closePreview: boolean,
   units: 'mm' | 'inch',
   previewHighlighted = false,
-  strokeColor = '#efbc7a',
+  strokeColor = canvasColors().draft,
 ): void {
   if (points.length === 0) return
 
@@ -409,26 +469,26 @@ export function drawPendingSplineLoop(
     const isCloseTarget = isStart && points.length >= 3 && closePreview
     ctx.beginPath()
     ctx.arc(vertex.cx, vertex.cy, isCloseTarget ? 7 : 5, 0, Math.PI * 2)
-    ctx.fillStyle = isStart ? 'rgba(239, 188, 122, 0.32)' : 'rgba(210, 221, 230, 0.22)'
+    ctx.fillStyle = isStart ? hexToRgba(canvasColors().draft, 0.32) : canvasColors().vertexFill
     ctx.fill()
-    ctx.strokeStyle = isCloseTarget ? '#ffd095' : isStart ? '#efbc7a' : '#d2dde6'
+    ctx.strokeStyle = isCloseTarget ? canvasColors().draftStrong : isStart ? canvasColors().draft : canvasColors().vertexStroke
     ctx.lineWidth = 2
     ctx.stroke()
   }
 }
 
-/** Map a DIAG source tag to a fill colour. */
+/** Map a DIAG source tag to a fill colour. Allowlisted diagnostics — not themeable. */
 function sourceMarkerColor(source: string): string {
-  if (source.includes('tryDirectLink'))   return '#ff6b35'   // orange
-  if (source.includes('bridgeSplitArms'))  return '#ff6b6b'  // red
-  if (source.includes('siblingBridge'))   return '#ffd93d'   // yellow
-  if (source.includes('sameChildBridge')) return '#00f2ff'   // cyan
-  if (source.includes('bootstrap'))       return '#6bcb77'   // green
-  if (source.includes('stepArms'))        return '#4d96ff'   // blue
-  if (source.includes('intCornerBridge')) return '#ff8fab'   // pink
-  if (source.includes('contour'))         return '#c084fc'   // purple
-  if (source.includes('microContour'))    return '#a8a8a8'   // gray
-  return '#ffffff'  // white (fallback)
+  if (source.includes('tryDirectLink'))   return '#ff6b35'   // theme-exempt: debug legend
+  if (source.includes('bridgeSplitArms'))  return '#ff6b6b'  // theme-exempt: debug legend
+  if (source.includes('siblingBridge'))   return '#ffd93d'   // theme-exempt: debug legend
+  if (source.includes('sameChildBridge')) return '#00f2ff'   // theme-exempt: debug legend
+  if (source.includes('bootstrap'))       return '#6bcb77'   // theme-exempt: debug legend
+  if (source.includes('stepArms'))        return '#4d96ff'   // theme-exempt: debug legend
+  if (source.includes('intCornerBridge')) return '#ff8fab'   // theme-exempt: debug legend
+  if (source.includes('contour'))         return '#c084fc'   // theme-exempt: debug legend
+  if (source.includes('microContour'))    return '#a8a8a8'   // theme-exempt: debug legend
+  return '#ffffff'  // theme-exempt: debug legend fallback
 }
 
 /**
@@ -532,10 +592,10 @@ export function drawToolpath(
     horizontalOnly?: boolean
     retractOnly?: boolean
   }> = [
-    { kinds: ['cut', 'lead_in', 'lead_out'], stroke: 'rgba(255, 115, 92, 0.96)', lineWidth: 2.1, dash: [], visible: visibility.cuts },
-    { kinds: ['rapid'], stroke: 'rgba(124, 184, 222, 0.8)', lineWidth: 1.3, dash: [8, 6], visible: visibility.rapids, horizontalOnly: true },
-    { kinds: ['plunge'], stroke: 'rgba(213, 131, 223, 0.95)', lineWidth: 1.5, dash: [3, 4], visible: visibility.plunges },
-    { kinds: ['rapid'], stroke: 'rgba(124, 184, 222, 0.8)', lineWidth: 1.3, dash: [8, 6], visible: visibility.retractions, retractOnly: true },
+    { kinds: ['cut', 'lead_in', 'lead_out'], stroke: canvasColors().toolpathCut, lineWidth: 2.1, dash: [], visible: visibility.cuts },
+    { kinds: ['rapid'], stroke: canvasColors().toolpathRapid, lineWidth: 1.3, dash: [8, 6], visible: visibility.rapids, horizontalOnly: true },
+    { kinds: ['plunge'], stroke: canvasColors().toolpathPlunge, lineWidth: 1.5, dash: [3, 4], visible: visibility.plunges },
+    { kinds: ['rapid'], stroke: canvasColors().toolpathRapid, lineWidth: 1.3, dash: [8, 6], visible: visibility.retractions, retractOnly: true },
   ]
 
   for (const layer of layers) {
@@ -571,7 +631,7 @@ export function drawToolpath(
   }
 
   // Collision warning overlay: segments that cross a clamp zone below required
-  // clearance are re-drawn in amber on top, regardless of layer visibility.
+  // clearance are re-drawn in red on top, regardless of layer visibility.
   if (toolpath.collidingMoveIndices && toolpath.collidingMoveIndices.length > 0) {
     ctx.beginPath()
     for (const index of toolpath.collidingMoveIndices) {
@@ -582,7 +642,7 @@ export function drawToolpath(
       ctx.moveTo(from.cx, from.cy)
       ctx.lineTo(to.cx, to.cy)
     }
-    ctx.strokeStyle = 'rgba(255, 180, 60, 0.95)'
+    ctx.strokeStyle = canvasColors().toolpathCollision
     ctx.globalAlpha = emphasized ? 1 : 0.55
     ctx.lineWidth = emphasized ? 3 : 2.2
     ctx.setLineDash([])
@@ -719,7 +779,7 @@ export function drawToolpath(
       delta.from.cy,
       delta.to.cx,
       delta.to.cy,
-      move.kind === 'rapid' ? 'rgba(124, 184, 222, 0.95)' : 'rgba(255, 115, 92, 0.98)',
+      move.kind === 'rapid' ? canvasRgba('toolpathRapid', 0.95) : canvasRgba('toolpathCut', 0.98),
     )
     distanceSinceLastArrowByKind[move.kind] = 0
   }
@@ -750,7 +810,7 @@ export function drawToolpath(
 
 export function hexToRgba(hex: string, alpha: number): string {
   const normalized = hex.replace('#', '')
-  if (normalized.length !== 6) return `rgba(136, 153, 170, ${alpha})`
+  if (normalized.length !== 6) return `rgba(136, 153, 170, ${alpha})` // theme-exempt: fallback for a malformed colour string
 
   const r = Number.parseInt(normalized.slice(0, 2), 16)
   const g = Number.parseInt(normalized.slice(2, 4), 16)
@@ -801,6 +861,29 @@ export function drawPendingNgon(
   const firstVertexAngle = Math.atan2(cursorPoint.y - anchor.y, cursorPoint.x - anchor.x)
   const profile = ngonProfile(anchor.x, anchor.y, sides, circumradius, firstVertexAngle)
   drawPreviewProfile(ctx, profile, vt, `R = ${formatLength(circumradius, units)}`)
+  drawLineLengthMeasurement(ctx, anchor, cursorPoint, vt, units)
+}
+
+export function drawPendingGear(
+  ctx: CanvasRenderingContext2D,
+  anchor: Point,
+  cursorPoint: Point,
+  params: GearCreationParams,
+  vt: ViewTransform,
+  units: 'mm' | 'inch',
+): void {
+  const outsideRadius = Math.hypot(cursorPoint.x - anchor.x, cursorPoint.y - anchor.y)
+  if (outsideRadius < 1e-10) return
+  try {
+    const profile = buildGearProfile({
+      ...params,
+      center: anchor,
+      outsideRadius,
+    })
+    drawPreviewProfile(ctx, profile, vt, `OD R = ${formatLength(outsideRadius, units)}`)
+  } catch {
+    // Invalid parameter combinations are surfaced in the workflow panel.
+  }
   drawLineLengthMeasurement(ctx, anchor, cursorPoint, vt, units)
 }
 

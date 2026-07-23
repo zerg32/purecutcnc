@@ -26,221 +26,244 @@
 
 import type { SelectionState } from '../../store/types'
 import type { Operation, OperationKind, OperationPass, Project } from '../../types/project'
+import { isConstruction, isMachinable, isRegion } from '../../store/helpers/featureRoles'
+import { isVCarveCompatibleFeature } from '../../store/helpers/vcarveTargets'
 import { featureHasClosedGeometry } from '../../text'
+import { resolvedFeatureMap, type ResolvedSketchFeature } from '../../store/helpers/resolveFeatures'
+import { camT } from './camI18n'
+
+type ResolvedFeatureMap = ReadonlyMap<string, ResolvedSketchFeature>
 
 export function operationKindLabel(kind: OperationKind): string {
   switch (kind) {
     case 'pocket':
-      return 'Pocket'
+      return camT('cam.opLabel.pocket')
     case 'v_carve':
-      return 'V-Carve offset'
-    case 'v_carve_recursive':
-      return 'V-Carve skeleton'
+      return camT('cam.opLabel.vCarve')
+    case 'v_carve_medial':
+      return camT('cam.opLabel.vCarveMedial')
     case 'edge_route_inside':
-      return 'Edge route inside'
+      return camT('cam.opLabel.edgeRouteInside')
     case 'edge_route_outside':
-      return 'Edge route outside'
+      return camT('cam.opLabel.edgeRouteOutside')
     case 'surface_clean':
-      return 'Surface clean'
+      return camT('cam.opLabel.surfaceClean')
     case 'rough_surface':
-      return '3D Surface rough'
+      return camT('cam.opLabel.roughSurface')
     case 'finish_surface':
-      return '3D Surface finish'
+      return camT('cam.opLabel.finishSurface')
     case 'finish_surface_cleanup':
-      return '3D Surface cleanup'
+      return camT('cam.opLabel.finishSurfaceCleanup')
     case 'follow_line':
-      return 'Engrave'
+      return camT('cam.opLabel.followLine')
     case 'drilling':
-      return 'Drill'
+      return camT('cam.opLabel.drilling')
     default:
       return 'Unknown'
   }
 }
 
 export function operationRequiresClosedProfiles(kind: OperationKind): boolean {
-  return kind === 'pocket' || kind === 'v_carve' || kind === 'v_carve_recursive' || kind === 'edge_route_inside' || kind === 'edge_route_outside' || kind === 'surface_clean'
+  return kind === 'pocket' || kind === 'v_carve' || kind === 'v_carve_medial' || kind === 'edge_route_inside' || kind === 'edge_route_outside' || kind === 'surface_clean'
 }
 
-export function getOperationAddHint(project: Project, selection: SelectionState, kind: OperationKind): string | null {
+function emptySelectionHint(kind: OperationKind): string {
+  switch (kind) {
+    case 'drilling':
+      return camT('cam.hint.empty.drilling')
+    case 'follow_line':
+      return camT('cam.hint.empty.followLine')
+    case 'surface_clean':
+      return camT('cam.hint.empty.surfaceClean')
+    case 'v_carve':
+    case 'v_carve_medial':
+      return camT('cam.hint.empty.vCarve')
+    case 'rough_surface':
+    case 'finish_surface':
+    case 'finish_surface_cleanup':
+      return camT('cam.hint.empty.roughSurface')
+    default:
+      return camT('cam.hint.empty.default')
+  }
+}
+
+export function getOperationAddHint(
+  project: Project,
+  selection: SelectionState,
+  kind: OperationKind,
+): string | null {
+  if (selection.selectedFeatureIds.length === 0) {
+    return emptySelectionHint(kind)
+  }
+
+  return getOperationAddHintWithMap(selection, kind, resolvedFeatureMap(project))
+}
+
+function getOperationAddHintWithMap(
+  selection: SelectionState,
+  kind: OperationKind,
+  featureById: ResolvedFeatureMap,
+): string | null {
+  // Construction geometry is sketch-only reference geometry — it can never be
+  // an operation target, so any selection containing it is rejected up front
+  // with one clear message (issue #199).
+  if (selection.selectedFeatureIds.some((featureId) => {
+    const feature = featureById.get(featureId)
+    return feature !== undefined && isConstruction(feature)
+  })) {
+    return camT('cam.hint.construction')
+  }
+
   if (kind === 'drilling') {
-    if (selection.selectedFeatureIds.length === 0) {
-      return 'Select one or more circle features first'
-    }
-
     const features = selection.selectedFeatureIds
-      .map((featureId) => project.features.find((feature) => feature.id === featureId) ?? null)
-      .filter((feature): feature is Project['features'][number] => feature !== null)
+      .map((featureId) => featureById.get(featureId))
+      .filter((feature): feature is ResolvedSketchFeature => feature !== undefined)
 
-    const machiningFeatures = features.filter((feature) => feature.operation !== 'region')
-    const regionFeatures = features.filter((feature) => feature.operation === 'region')
+    const machiningFeatures = features.filter(isMachinable)
+    const regionFeatures = features.filter(isRegion)
     return machiningFeatures.length > 0
       && machiningFeatures.every((feature) => feature.kind === 'circle')
       && regionFeatures.every((feature) => featureHasClosedGeometry(feature))
       ? null
-      : 'Drilling requires circle features; closed regions are optional filters'
+      : camT('cam.hint.drilling')
   }
 
   if (kind === 'follow_line') {
-    if (selection.selectedFeatureIds.length === 0) {
-      return 'Select one or more open or closed features first; closed regions are optional filters'
-    }
     const features = selection.selectedFeatureIds
-      .map((featureId) => project.features.find((feature) => feature.id === featureId) ?? null)
-      .filter((feature): feature is Project['features'][number] => feature !== null)
-    const machiningFeatures = features.filter((feature) => feature.operation !== 'region')
-    const regionFeatures = features.filter((feature) => feature.operation === 'region')
+      .map((featureId) => featureById.get(featureId))
+      .filter((feature): feature is ResolvedSketchFeature => feature !== undefined)
+    const machiningFeatures = features.filter(isMachinable)
+    const regionFeatures = features.filter(isRegion)
     return machiningFeatures.length > 0 && regionFeatures.every((feature) => featureHasClosedGeometry(feature))
       ? null
-      : 'Engrave requires at least one path feature; closed regions are optional filters'
+      : camT('cam.hint.followLine')
   }
 
   if (kind === 'surface_clean') {
-    if (selection.selectedFeatureIds.length === 0) {
-      return 'Select one or more add/model features first; closed regions are optional filters'
-    }
-
     const features = selection.selectedFeatureIds
-      .map((featureId) => project.features.find((feature) => feature.id === featureId) ?? null)
-      .filter((feature): feature is Project['features'][number] => feature !== null)
+      .map((featureId) => featureById.get(featureId))
+      .filter((feature): feature is ResolvedSketchFeature => feature !== undefined)
 
-    const machiningFeatures = features.filter((feature) => feature.operation !== 'region')
-    const regionFeatures = features.filter((feature) => feature.operation === 'region')
+    const machiningFeatures = features.filter(isMachinable)
+    const regionFeatures = features.filter(isRegion)
     if (machiningFeatures.length === 0) {
-      return 'Surface clean requires at least one add/model feature; regions are only filters'
+      return camT('cam.hint.surfaceCleanNoFeature')
     }
     if (!machiningFeatures.every((feature) => feature.operation === 'add' || feature.operation === 'model')) {
-      return 'Surface clean only accepts add/model features plus optional closed regions'
+      return camT('cam.hint.surfaceCleanWrongOp')
     }
     if (!regionFeatures.every((feature) => featureHasClosedGeometry(feature))) {
-      return 'Region filters must be closed profiles'
+      return camT('cam.hint.regionNotClosed')
     }
 
     return machiningFeatures.every((feature) => featureHasClosedGeometry(feature))
       ? null
-      : 'Surface clean only accepts closed profiles'
+      : camT('cam.hint.surfaceCleanClosedOnly')
   }
 
-  if (kind === 'v_carve' || kind === 'v_carve_recursive') {
-    if (selection.selectedFeatureIds.length === 0) {
-      return 'Select one or more closed subtract features first'
-    }
-
+  if (kind === 'v_carve' || kind === 'v_carve_medial') {
     const features = selection.selectedFeatureIds
-      .map((featureId) => project.features.find((feature) => feature.id === featureId) ?? null)
-      .filter((feature): feature is Project['features'][number] => feature !== null)
+      .map((featureId) => featureById.get(featureId))
+      .filter((feature): feature is ResolvedSketchFeature => feature !== undefined)
 
-    const machiningFeatures = features.filter((feature) => feature.operation !== 'region')
-    const regionFeatures = features.filter((feature) => feature.operation === 'region')
+    const machiningFeatures = features.filter(isMachinable)
+    const regionFeatures = features.filter(isRegion)
     if (machiningFeatures.length === 0) {
-      return `${operationKindLabel(kind)} requires at least one subtract feature; regions are only filters`
+      return camT('cam.hint.vCarveRequiresClosed', { kind: operationKindLabel(kind) })
     }
-    if (!machiningFeatures.every((feature) => feature.operation === 'subtract')) {
-      return `${operationKindLabel(kind)} only accepts subtract features plus optional closed regions`
+    if (!machiningFeatures.every((feature) => isVCarveCompatibleFeature(feature))) {
+      return camT('cam.hint.vCarveWrongFeature', { kind: operationKindLabel(kind) })
     }
     if (!regionFeatures.every((feature) => featureHasClosedGeometry(feature))) {
-      return 'Region filters must be closed profiles'
+      return camT('cam.hint.regionNotClosed')
     }
 
-    return machiningFeatures.every((feature) => featureHasClosedGeometry(feature))
-      ? null
-      : `${operationKindLabel(kind)} only accepts closed profiles`
+    return null
   }
 
   if (kind === 'rough_surface') {
-    if (selection.selectedFeatureIds.length === 0) {
-      return 'Select an imported model feature first'
-    }
-
     const features = selection.selectedFeatureIds
-      .map((featureId) => project.features.find((feature) => feature.id === featureId) ?? null)
-      .filter((feature): feature is Project['features'][number] => feature !== null)
+      .map((featureId) => featureById.get(featureId))
+      .filter((feature): feature is ResolvedSketchFeature => feature !== undefined)
 
     if (features.length !== selection.selectedFeatureIds.length) {
-      return 'One or more selected features not found'
+      return camT('cam.hint.featuresNotFound')
     }
 
-    const machiningFeatures = features.filter((feature) => feature.operation !== 'region')
-    const regionFeatures = features.filter((feature) => feature.operation === 'region')
+    const machiningFeatures = features.filter(isMachinable)
+    const regionFeatures = features.filter(isRegion)
     const hasModel = machiningFeatures.some((f) => f.operation === 'model' && f.kind === 'stl')
 
     if (!hasModel) {
-      return 'Rough surface requires at least one imported model feature; closed regions are optional filters'
+      return camT('cam.hint.roughSurfaceNoModel')
     }
     if (!regionFeatures.every((feature) => featureHasClosedGeometry(feature))) {
-      return 'Region filters must be closed profiles'
+      return camT('cam.hint.regionNotClosed')
     }
 
     return null
   }
 
   if (kind === 'finish_surface' || kind === 'finish_surface_cleanup') {
-    if (selection.selectedFeatureIds.length === 0) {
-      return 'Select an imported model feature first'
-    }
-
     const features = selection.selectedFeatureIds
-      .map((featureId) => project.features.find((feature) => feature.id === featureId) ?? null)
-      .filter((feature): feature is Project['features'][number] => feature !== null)
+      .map((featureId) => featureById.get(featureId))
+      .filter((feature): feature is ResolvedSketchFeature => feature !== undefined)
 
     if (features.length !== selection.selectedFeatureIds.length) {
-      return 'One or more selected features not found'
+      return camT('cam.hint.featuresNotFound')
     }
 
     const modelCount = features.filter((feature) => feature.operation === 'model' && feature.kind === 'stl').length
     const regionFeatures = features.filter((feature) => feature.operation === 'region')
 
     if (modelCount !== 1) {
-      return `${operationKindLabel(kind)} requires exactly one imported model feature; closed regions are optional filters`
+      return camT('cam.hint.finishSurfaceCount', { kind: operationKindLabel(kind) })
     }
     if (!regionFeatures.every((feature) => featureHasClosedGeometry(feature))) {
-      return 'Region filters must be closed profiles'
+      return camT('cam.hint.regionNotClosed')
     }
     if (!features.every((feature) => (
       (feature.operation === 'model' && feature.kind === 'stl')
       || feature.operation === 'region'
     ))) {
-      return `${operationKindLabel(kind)} only accepts one imported model plus optional closed regions`
+      return camT('cam.hint.finishSurfaceWrong', { kind: operationKindLabel(kind) })
     }
 
     return null
   }
 
-  if (selection.selectedFeatureIds.length === 0) {
-    return 'Select one or more compatible features first'
-  }
-
   const features = selection.selectedFeatureIds
-    .map((featureId) => project.features.find((feature) => feature.id === featureId) ?? null)
-    .filter((feature): feature is Project['features'][number] => feature !== null)
+    .map((featureId) => featureById.get(featureId))
+    .filter((feature): feature is ResolvedSketchFeature => feature !== undefined)
 
   const wantsSubtract = kind === 'pocket' || kind === 'edge_route_inside'
   const expectedOperation = wantsSubtract ? 'subtract' : 'add'
-  const acceptsOperation = (feature: Project['features'][number]) => (
+  const acceptsOperation = (feature: ResolvedSketchFeature) => (
     feature.operation === expectedOperation
     || (kind === 'edge_route_outside' && feature.operation === 'model')
   )
-  const machiningFeatures = features.filter((feature) => feature.operation !== 'region')
-  const regionFeatures = features.filter((feature) => feature.operation === 'region')
+  const machiningFeatures = features.filter(isMachinable)
+  const regionFeatures = features.filter(isRegion)
   if (machiningFeatures.length === 0) {
     return wantsSubtract
-      ? 'Select at least one subtract feature; closed regions are optional filters'
+      ? camT('cam.hint.noSubtractFeature')
       : kind === 'edge_route_outside'
-        ? 'Select at least one add/model feature; closed regions are optional filters'
-        : 'Select at least one add feature; closed regions are optional filters'
+        ? camT('cam.hint.noAddModelFeature')
+        : camT('cam.hint.noAddFeature')
   }
   if (!machiningFeatures.every(acceptsOperation)) {
     return wantsSubtract
-      ? 'This operation only accepts subtract features plus optional closed regions'
+      ? camT('cam.hint.onlySubtract')
       : kind === 'edge_route_outside'
-        ? 'This operation only accepts add/model features plus optional closed regions'
-        : 'This operation only accepts add features plus optional closed regions'
+        ? camT('cam.hint.onlyAddModel')
+        : camT('cam.hint.onlyAdd')
   }
   if (!regionFeatures.every((feature) => featureHasClosedGeometry(feature))) {
-    return 'Region filters must be closed profiles'
+    return camT('cam.hint.regionNotClosed')
   }
 
   if (operationRequiresClosedProfiles(kind) && !machiningFeatures.every((feature) => featureHasClosedGeometry(feature))) {
-    return `${operationKindLabel(kind)} only accepts closed profiles`
+    return camT('cam.hint.closedProfilesOnly', { kind: operationKindLabel(kind) })
   }
 
   return null
@@ -263,7 +286,7 @@ const QUICK_OPERATION_KINDS: OperationKind[] = [
   'edge_route_inside',
   'edge_route_outside',
   'v_carve',
-  'v_carve_recursive',
+  'v_carve_medial',
   'surface_clean',
   'follow_line',
   'drilling',
@@ -276,29 +299,29 @@ const QUICK_OPERATION_KINDS: OperationKind[] = [
 export function quickOperationLabel(kind: OperationKind): string {
   switch (kind) {
     case 'pocket':
-      return 'Create Pocket'
+      return camT('cam.quickOp.pocket')
     case 'edge_route_inside':
-      return 'Create Inside Route'
+      return camT('cam.quickOp.edgeRouteInside')
     case 'edge_route_outside':
-      return 'Create Outside Route'
+      return camT('cam.quickOp.edgeRouteOutside')
     case 'v_carve':
-      return 'Create V-Carve (offset)'
-    case 'v_carve_recursive':
-      return 'Create V-Carve (skeleton)'
+      return camT('cam.quickOp.vCarve')
+    case 'v_carve_medial':
+      return camT('cam.quickOp.vCarveMedial')
     case 'surface_clean':
-      return 'Create Surface Clean'
+      return camT('cam.quickOp.surfaceClean')
     case 'follow_line':
-      return 'Create Engraving'
+      return camT('cam.quickOp.followLine')
     case 'drilling':
-      return 'Create Drilling'
+      return camT('cam.quickOp.drilling')
     case 'rough_surface':
-      return 'Create Rough Surface'
+      return camT('cam.quickOp.roughSurface')
     case 'finish_surface':
-      return 'Create Finish Surface'
+      return camT('cam.quickOp.finishSurface')
     case 'finish_surface_cleanup':
-      return 'Create Finish Surface Cleanup'
+      return camT('cam.quickOp.finishSurfaceCleanup')
     default:
-      return `Create ${operationKindLabel(kind)}`
+      return camT('cam.quickOp.pocket')
   }
 }
 
@@ -327,15 +350,30 @@ function singleFeatureSelection(featureId: string): SelectionState {
  * the CAM panel's single-add behaviour) and a friendly menu label.
  */
 export function validQuickOperationsForFeature(project: Project, featureId: string): QuickOperation[] {
-  const feature = project.features.find((item) => item.id === featureId)
+  const featureById = resolvedFeatureMap(project)
+  const feature = featureById.get(featureId)
   if (!feature) {
     return []
   }
 
   const selection = singleFeatureSelection(featureId)
   return QUICK_OPERATION_KINDS
-    .filter((kind) => getOperationAddHint(project, selection, kind) === null)
+    .filter((kind) => getOperationAddHintWithMap(selection, kind, featureById) === null)
     .map((kind) => ({ kind, pass: 'rough' as OperationPass, label: quickOperationLabel(kind) }))
+}
+
+function compatibleFeatureIdsForOperationWithMap(
+  project: Project,
+  kind: OperationKind,
+  featureById: ResolvedFeatureMap,
+): string[] {
+  return project.features
+    .filter((feature) => getOperationAddHintWithMap(
+      singleFeatureSelection(feature.id),
+      kind,
+      featureById,
+    ) === null)
+    .map((feature) => feature.id)
 }
 
 /**
@@ -346,9 +384,8 @@ export function validQuickOperationsForFeature(project: Project, featureId: stri
  * operation is armed in the "Add operation" menu.
  */
 export function compatibleFeatureIdsForOperation(project: Project, kind: OperationKind): string[] {
-  return project.features
-    .filter((feature) => getOperationAddHint(project, singleFeatureSelection(feature.id), kind) === null)
-    .map((feature) => feature.id)
+  const featureById = resolvedFeatureMap(project)
+  return compatibleFeatureIdsForOperationWithMap(project, kind, featureById)
 }
 
 /**
@@ -361,7 +398,8 @@ export function compatibleFeatureIdsForOperation(project: Project, kind: Operati
  * unambiguous "all" to select.
  */
 export function selectAllCompatibleFeatureIds(project: Project, kind: OperationKind): string[] {
-  const featureIds = compatibleFeatureIdsForOperation(project, kind)
+  const featureById = resolvedFeatureMap(project)
+  const featureIds = compatibleFeatureIdsForOperationWithMap(project, kind, featureById)
   if (featureIds.length === 0) {
     return []
   }
@@ -374,7 +412,7 @@ export function selectAllCompatibleFeatureIds(project: Project, kind: OperationK
     sketchEditTool: null,
     activeControl: null,
   }
-  return getOperationAddHint(project, selection, kind) === null ? featureIds : []
+  return getOperationAddHintWithMap(selection, kind, featureById) === null ? featureIds : []
 }
 
 /**
@@ -386,6 +424,7 @@ export function operationTargetsRegion(project: Project, operation: Operation): 
   if (operation.target.source !== 'features') {
     return false
   }
+  const featureById = resolvedFeatureMap(project)
   return operation.target.featureIds.some((featureId) =>
-    project.features.find((feature) => feature.id === featureId)?.operation === 'region')
+    featureById.get(featureId)?.operation === 'region')
 }

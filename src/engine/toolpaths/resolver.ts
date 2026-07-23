@@ -15,10 +15,11 @@
  */
 
 import ClipperLib from 'clipper-lib'
+import type { ToolpathWarning } from './warningCodes'
 import type { Operation, Project, SketchFeature } from '../../types/project'
 import { rectProfile } from '../../types/project'
 import { expandFeatureGeometry, featureHasClosedGeometry } from '../../text'
-import { resolveFeatureInstance } from '../../store/helpers/resolveFeatures'
+import { resolveProject } from '../../store/helpers/resolveFeatures'
 import type {
   ClipperPath,
   ResolvedFeatureZSpan,
@@ -34,7 +35,7 @@ import {
   resolveFeatureZSpan,
   toClipperPath,
 } from './geometry'
-import { buildRegionMask } from './regions'
+import { applyRegionMaskToPaths, buildRegionMask } from './regions'
 
 interface FeatureWithSpan {
   feature: SketchFeature
@@ -61,19 +62,7 @@ function getChildren(node: PolyTreeNode): PolyTreeNode[] {
   return node.Childs ? node.Childs() : (node.m_Childs ?? [])
 }
 
-function flattenFeatureToClipperPath(feature: SketchFeature, project: Project, scale = DEFAULT_CLIPPER_SCALE): ClipperPath {
-  const withRefs = feature as SketchFeature & { definitionId?: string }
-  const resolved = resolveFeatureInstance(project, feature.id)
-
-  if (resolved) {
-    const flattened = flattenProfile(resolved.sketch.profile)
-    return toClipperPath(normalizeWinding(flattened.points, false), scale)
-  }
-
-  if (withRefs.definitionId) {
-    return []
-  }
-
+function flattenFeatureToClipperPath(feature: SketchFeature, scale = DEFAULT_CLIPPER_SCALE): ClipperPath {
   const flattened = flattenProfile(feature.sketch.profile)
   return toClipperPath(normalizeWinding(flattened.points, false), scale)
 }
@@ -158,6 +147,30 @@ function unionPaths(paths: ClipperPath[]): ClipperPath[] {
   return solution as ClipperPath[]
 }
 
+/**
+ * Union paths with even-odd fill semantics. When multiple same-winding
+ * contours nest, the even-odd rule creates a hole (unlike non-zero, which
+ * would fill the inner area). Used for closed Line contours so that nested
+ * same-winding Lines produce holes rather than a solid fill (issue #270 S2).
+ */
+function unionPathsEvenOdd(paths: ClipperPath[]): ClipperPath[] {
+  if (paths.length === 0) {
+    return []
+  }
+
+  const clipper = new ClipperLib.Clipper()
+  clipper.AddPaths(paths, ClipperLib.PolyType.ptSubject, true)
+  const solution = new ClipperLib.Paths()
+  clipper.Execute(
+    ClipperLib.ClipType.ctUnion,
+    solution,
+    ClipperLib.PolyFillType.pftEvenOdd,
+    ClipperLib.PolyFillType.pftEvenOdd,
+  )
+
+  return solution as ClipperPath[]
+}
+
 function differencePaths(subjectPaths: ClipperPath[], clipPaths: ClipperPath[]): ClipperPath[] {
   if (subjectPaths.length === 0) {
     return []
@@ -212,15 +225,16 @@ function bandHasThickness(topZ: number, bottomZ: number): boolean {
   return Math.abs(topZ - bottomZ) > Number.EPSILON
 }
 
-export function resolvePocketRegions(project: Project, operation: Operation): ResolvedPocketResult {
-  const warnings: string[] = []
+export function resolvePocketRegions(authoritativeProject: Project, operation: Operation): ResolvedPocketResult {
+  const project = resolveProject(authoritativeProject)
+  const warnings: ToolpathWarning[] = []
   const isPocketLike =
-    operation.kind === 'pocket' || operation.kind === 'v_carve' || operation.kind === 'v_carve_recursive'
+    operation.kind === 'pocket' || operation.kind === 'v_carve' || operation.kind === 'v_carve_medial'
   const operationLabel =
     operation.kind === 'pocket'
       ? 'Pocket'
-      : operation.kind === 'v_carve_recursive'
-        ? 'V-carve recursive'
+      : operation.kind === 'v_carve_medial'
+        ? 'V-carve medial'
         : 'V-carve'
 
   if (!isPocketLike) {
@@ -228,7 +242,7 @@ export function resolvePocketRegions(project: Project, operation: Operation): Re
       operationId: operation.id,
       units: project.meta.units,
       bands: [],
-      warnings: ['Only pocket and V-carve operations can be resolved by this region resolver'],
+      warnings: [{ code: 'resolverOnlyPocketVcarve' }],
     }
   }
 
@@ -237,20 +251,27 @@ export function resolvePocketRegions(project: Project, operation: Operation): Re
       operationId: operation.id,
       units: project.meta.units,
       bands: [],
-      warnings: [`${operationLabel} operation has no feature targets`],
+      warnings: [{ code: 'resolverNoTargets', params: { operation: operationLabel } }],
     }
   }
 
   const selectedTargetFeatures = operation.target.featureIds
     .map((featureId) => project.features.find((feature) => feature.id === featureId) ?? null)
-    .filter((feature): feature is SketchFeature => feature !== null)
+    .filter((feature) => feature !== null)
   const regionFeatures = selectedTargetFeatures
     .filter((feature) => feature.operation === 'region')
   const regionMask = buildRegionMask(regionFeatures)
-  const validTargetSourceFeatures = selectedTargetFeatures
-    .filter((feature) => feature.operation === 'subtract')
 
-  const targetFeatures = validTargetSourceFeatures
+  const isVCarve = operation.kind === 'v_carve' || operation.kind === 'v_carve_medial'
+  const validTargetSourceFeatures = selectedTargetFeatures
+    .filter((feature) => isVCarve
+      ? (feature.operation === 'subtract' || feature.operation === 'line')
+      : feature.operation === 'subtract')
+
+  const subtractSourceFeatures = validTargetSourceFeatures.filter((f) => f.operation === 'subtract')
+  const lineSourceFeatures = validTargetSourceFeatures.filter((f) => f.operation === 'line')
+
+  const subtractTargetFeatures = subtractSourceFeatures
     .flatMap((feature) => expandFeatureGeometry(feature))
     .filter((feature) => feature.operation === 'subtract')
     .map((feature) => ({
@@ -258,30 +279,54 @@ export function resolvePocketRegions(project: Project, operation: Operation): Re
       span: resolveFeatureZSpan(project, feature),
     }))
 
+  const lineTargetFeatures = lineSourceFeatures
+    .flatMap((feature) => expandFeatureGeometry(feature))
+    .filter((feature) => feature.operation === 'line')
+    .map((feature) => ({
+      feature,
+      span: resolveFeatureZSpan(project, feature),
+    }))
+
+  const targetFeatures = [...subtractTargetFeatures, ...lineTargetFeatures]
+
   if (validTargetSourceFeatures.length + regionFeatures.length !== operation.target.featureIds.length) {
-    warnings.push('Some selected target features are missing or are not subtract/region features')
+    const expectedRoles = isVCarve ? 'subtract/line/region' : 'subtract/region'
+    warnings.push({ code: 'targetsMissingOrWrongRole', params: { roles: expectedRoles } })
   }
 
-  const closedTargetFeatures = targetFeatures.filter(({ feature }) => featureHasClosedGeometry(feature))
+  const closedSubtractFeatures = subtractTargetFeatures.filter(({ feature }) => featureHasClosedGeometry(feature))
+  const closedLineFeatures = lineTargetFeatures.filter(({ feature }) => featureHasClosedGeometry(feature))
+  const closedTargetFeatures = [...closedSubtractFeatures, ...closedLineFeatures]
+
   if (closedTargetFeatures.length !== targetFeatures.length) {
-    warnings.push(`${operationLabel} operations only support closed target profiles`)
+    warnings.push({ code: 'closedProfilesOnly', params: { operation: operationLabel } })
   }
 
   if (closedTargetFeatures.length === 0) {
+    const targetKindLabel = isVCarve ? 'subtract or line' : 'subtract'
     return {
       operationId: operation.id,
       units: project.meta.units,
       bands: [],
-      warnings: [...warnings, `No valid subtract features were found for this ${operationLabel.toLowerCase()} operation`],
+      warnings: [...warnings, { code: 'resolverNoValidKindTargets', params: { kind: targetKindLabel, operation: operationLabel.toLowerCase() } }],
     }
   }
 
-  const targetUnionPaths = unionPaths(closedTargetFeatures.map(({ feature }) => flattenFeatureToClipperPath(feature, project)))
+  // Candidate island/tab discovery must be conservative across all depth
+  // bands: union every target path with non-zero fill so an obstacle
+  // inside any target contour is discovered regardless of which bands it
+  // overlaps.  Even-odd topology for closed Lines belongs inside each
+  // band (below) where we know which Lines are simultaneously active.
+  const allTargetPathsForDiscovery = [
+    ...closedSubtractFeatures.map(({ feature }) => flattenFeatureToClipperPath(feature)),
+    ...closedLineFeatures.map(({ feature }) => flattenFeatureToClipperPath(feature)),
+  ]
+  const targetUnionPaths = unionPaths(allTargetPathsForDiscovery)
 
   const candidateIslands = project.features
     .flatMap((feature) => expandFeatureGeometry(feature))
     .filter((feature) => feature.operation === 'add' && featureHasClosedGeometry(feature))
-    .filter((feature) => pathsIntersect(targetUnionPaths, [flattenFeatureToClipperPath(feature, project)]))
+    .filter((feature) => pathsIntersect(targetUnionPaths, [flattenFeatureToClipperPath(feature)]))
     .map((feature) => ({
       feature,
       span: resolveFeatureZSpan(project, feature),
@@ -303,7 +348,8 @@ export function resolvePocketRegions(project: Project, operation: Operation): Re
     ...candidateTabIslands.map(({ span }) => span),
   ])
   const bands: ResolvedPocketBand[] = []
-  const targetIdSet = new Set(closedTargetFeatures.map(({ feature }) => feature.id))
+  const targetIdSet = new Set(closedSubtractFeatures.map(({ feature }) => feature.id))
+  const lineIdSet = new Set(closedLineFeatures.map(({ feature }) => feature.id))
   const expandedFeaturesInOrder = project.features.flatMap((feature) => expandFeatureGeometry(feature))
 
   for (let index = 0; index < depths.length - 1; index += 1) {
@@ -331,7 +377,13 @@ export function resolvePocketRegions(project: Project, operation: Operation): Re
         continue
       }
 
-      const featurePath = flattenFeatureToClipperPath(feature, project)
+      // Skip line features in the subtract/add loop — they are resolved
+      // separately with even-odd semantics below.
+      if (feature.operation === 'line' && lineIdSet.has(feature.id)) {
+        continue
+      }
+
+      const featurePath = flattenFeatureToClipperPath(feature)
       if (feature.operation === 'subtract' && targetIdSet.has(feature.id)) {
         resolvedPaths = unionPaths([...resolvedPaths, featurePath])
         continue
@@ -342,6 +394,44 @@ export function resolvePocketRegions(project: Project, operation: Operation): Re
       }
     }
 
+    // Resolve closed Line targets with even-odd fill semantics (issue #270 S2).
+    // Nested same-winding Lines create holes; disjoint Lines remain separate.
+    const activeLineTargetsForBand = activeForBand(closedLineFeatures, topZ, bottomZ)
+    let lineAreas: ClipperPath[] = []
+    if (activeLineTargetsForBand.length > 0) {
+      const lineEntries = activeLineTargetsForBand.map(({ feature }) => ({
+        feature,
+        path: flattenFeatureToClipperPath(feature),
+      }))
+      lineAreas = unionPathsEvenOdd(lineEntries.map((entry) => entry.path))
+
+      // Subtract add islands from line areas so islands protect material
+      // from line targets as they do from subtract targets. But an add that
+      // fully encloses a line target is parent material the line carves into
+      // — it is not an island there and must not be subtracted from that
+      // line's fill (issue #340). A single add can be parent for the lines
+      // it encloses and a true island elsewhere, so subtract only the part
+      // of the add that lies outside the even-odd fill of the lines it
+      // encloses (empty when it encloses none; the whole add when it
+      // encloses all, which then removes nothing).
+      for (const island of activeIslands) {
+        if (lineAreas.length > 0) {
+          const islandPath = flattenFeatureToClipperPath(island.feature)
+          const enclosedLinePaths = lineEntries
+            .filter((entry) => differencePaths([entry.path], [islandPath]).length === 0)
+            .map((entry) => entry.path)
+          const effectiveIsland = enclosedLinePaths.length > 0
+            ? differencePaths([islandPath], unionPathsEvenOdd(enclosedLinePaths))
+            : [islandPath]
+          if (effectiveIsland.length > 0) {
+            lineAreas = differencePaths(lineAreas, effectiveIsland)
+          }
+        }
+      }
+
+      resolvedPaths = unionPaths([...resolvedPaths, ...lineAreas])
+    }
+
     if (resolvedPaths.length > 0 && activeTabIslands.length > 0) {
       resolvedPaths = differencePaths(
         resolvedPaths,
@@ -349,12 +439,12 @@ export function resolvePocketRegions(project: Project, operation: Operation): Re
       )
     }
 
-    if (operation.kind !== 'pocket' && resolvedPaths.length > 0 && regionMask) {
-      resolvedPaths = executeClipPaths(resolvedPaths, regionMask.paths, ClipperLib.ClipType.ctIntersection)
+    if (resolvedPaths.length > 0 && regionMask && operation.kind !== 'pocket') {
+      resolvedPaths = applyRegionMaskToPaths(resolvedPaths, regionMask)
     }
 
     if (resolvedPaths.length === 0) {
-      warnings.push(`Band ${topZ} -> ${bottomZ} resolved to empty subject geometry`)
+      warnings.push({ code: 'bandEmptySubject', params: { topZ, bottomZ } })
       continue
     }
 
@@ -370,7 +460,7 @@ export function resolvePocketRegions(project: Project, operation: Operation): Re
     )
 
     if (regions.length === 0) {
-      warnings.push(`Band ${topZ} -> ${bottomZ} resolved to no machinable regions`)
+      warnings.push({ code: 'bandNoRegions', params: { topZ, bottomZ } })
       continue
     }
 
@@ -387,7 +477,7 @@ export function resolvePocketRegions(project: Project, operation: Operation): Re
   }
 
   if (bands.length === 0) {
-    warnings.push(`${operationLabel} resolver produced no depth bands`)
+    warnings.push({ code: 'resolverNoBands', params: { operation: operationLabel } })
   }
 
   return {
@@ -398,8 +488,9 @@ export function resolvePocketRegions(project: Project, operation: Operation): Re
   }
 }
 
-export function resolveInsideEdgeRegions(project: Project, operation: Operation): ResolvedPocketResult {
-  const warnings: string[] = []
+export function resolveInsideEdgeRegions(authoritativeProject: Project, operation: Operation): ResolvedPocketResult {
+  const project = resolveProject(authoritativeProject)
+  const warnings: ToolpathWarning[] = []
   const operationLabel = 'Inside edge route'
 
   if (operation.kind !== 'edge_route_inside') {
@@ -407,7 +498,7 @@ export function resolveInsideEdgeRegions(project: Project, operation: Operation)
       operationId: operation.id,
       units: project.meta.units,
       bands: [],
-      warnings: ['Only inside edge-route operations can be resolved by this region resolver'],
+      warnings: [{ code: 'resolverOnlyInsideEdge' }],
     }
   }
 
@@ -416,13 +507,13 @@ export function resolveInsideEdgeRegions(project: Project, operation: Operation)
       operationId: operation.id,
       units: project.meta.units,
       bands: [],
-      warnings: [`${operationLabel} operation has no feature targets`],
+      warnings: [{ code: 'resolverNoTargets', params: { operation: operationLabel } }],
     }
   }
 
   const selectedTargetFeatures = operation.target.featureIds
     .map((featureId) => project.features.find((feature) => feature.id === featureId) ?? null)
-    .filter((feature): feature is SketchFeature => feature !== null)
+    .filter((feature) => feature !== null)
   const regionFeatures = selectedTargetFeatures
     .filter((feature) => feature.operation === 'region')
   const validTargetSourceFeatures = selectedTargetFeatures
@@ -437,12 +528,12 @@ export function resolveInsideEdgeRegions(project: Project, operation: Operation)
     }))
 
   if (validTargetSourceFeatures.length + regionFeatures.length !== operation.target.featureIds.length) {
-    warnings.push('Some selected target features are missing or are not subtract/region features')
+    warnings.push({ code: 'targetsMissingOrWrongRole', params: { roles: 'subtract/region' } })
   }
 
   const closedTargetFeatures = targetFeatures.filter(({ feature }) => featureHasClosedGeometry(feature))
   if (closedTargetFeatures.length !== targetFeatures.length) {
-    warnings.push(`${operationLabel} operations only support closed target profiles`)
+    warnings.push({ code: 'closedProfilesOnly', params: { operation: operationLabel } })
   }
 
   if (closedTargetFeatures.length === 0) {
@@ -450,18 +541,18 @@ export function resolveInsideEdgeRegions(project: Project, operation: Operation)
       operationId: operation.id,
       units: project.meta.units,
       bands: [],
-      warnings: [...warnings, `No valid subtract features were found for this ${operationLabel.toLowerCase()} operation`],
+      warnings: [...warnings, { code: 'resolverNoValidSubtracts', params: { operation: operationLabel.toLowerCase() } }],
     }
   }
 
-  const targetUnionPaths = unionPaths(closedTargetFeatures.map(({ feature }) => flattenFeatureToClipperPath(feature, project)))
+  const targetUnionPaths = unionPaths(closedTargetFeatures.map(({ feature }) => flattenFeatureToClipperPath(feature)))
 
   const candidateIslands = project.features
     .flatMap((feature) => expandFeatureGeometry(feature))
     .filter((feature) => feature.operation === 'add' && featureHasClosedGeometry(feature))
     .map((feature) => ({
       feature,
-      path: flattenFeatureToClipperPath(feature, project),
+      path: flattenFeatureToClipperPath(feature),
     }))
     .filter(({ path }) => pathsIntersect(targetUnionPaths, [path]))
     .filter(({ path }) => differencePaths([path], targetUnionPaths).length > 0)
@@ -502,7 +593,7 @@ export function resolveInsideEdgeRegions(project: Project, operation: Operation)
         continue
       }
 
-      const featurePath = flattenFeatureToClipperPath(feature, project)
+      const featurePath = flattenFeatureToClipperPath(feature)
       if (feature.operation === 'subtract' && targetIdSet.has(feature.id)) {
         resolvedPaths = unionPaths([...resolvedPaths, featurePath])
         continue
@@ -514,7 +605,7 @@ export function resolveInsideEdgeRegions(project: Project, operation: Operation)
     }
 
     if (resolvedPaths.length === 0) {
-      warnings.push(`Band ${topZ} -> ${bottomZ} resolved to empty subject geometry`)
+      warnings.push({ code: 'bandEmptySubject', params: { topZ, bottomZ } })
       continue
     }
 
@@ -527,7 +618,7 @@ export function resolveInsideEdgeRegions(project: Project, operation: Operation)
     )
 
     if (regions.length === 0) {
-      warnings.push(`Band ${topZ} -> ${bottomZ} resolved to no machinable regions`)
+      warnings.push({ code: 'bandNoRegions', params: { topZ, bottomZ } })
       continue
     }
 
@@ -541,7 +632,7 @@ export function resolveInsideEdgeRegions(project: Project, operation: Operation)
   }
 
   if (bands.length === 0) {
-    warnings.push(`${operationLabel} resolver produced no depth bands`)
+    warnings.push({ code: 'resolverNoBands', params: { operation: operationLabel } })
   }
 
   return {

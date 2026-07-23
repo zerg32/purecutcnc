@@ -32,6 +32,7 @@ import {
 } from '../helpers/normalize'
 import { pruneUnusedModelAssets } from '../helpers/modelAssets'
 import { emptySelection } from './selectionSlice'
+import { decodeProjectFormat } from '../helpers/projectFormat'
 
 export interface ProjectLifecycleSliceDependencies {
   rawSet: Parameters<StateCreator<ProjectStore>>[0]
@@ -251,9 +252,10 @@ export function createProjectLifecycleSlice(
       }),
 
     saveProject: () => {
-      const p = pruneUnusedModelAssets(get().project)
+      const p = normalizeProject(pruneUnusedModelAssets(get().project))
       const updated = {
         ...p,
+        version: LATEST_PROJECT_VERSION,
         meta: { ...p.meta, modified: new Date().toISOString() },
       }
       return JSON.stringify(updated, null, 2)
@@ -270,7 +272,8 @@ export function createProjectLifecycleSlice(
       const versionWarning = isProjectVersionNewerThanSupported(rawVersion)
         ? `This project was created with a newer version of PureCutCNC (file format ${rawVersion}; this build supports up to ${LATEST_PROJECT_VERSION}). It will still open, but newer features may be missing or display incorrectly.`
         : null
-      const normalized = normalizeProject(parsed as ReturnType<typeof normalizeProject>)
+      const decoded = decodeProjectFormat(parsed)
+      const normalized = decoded.project
       const stockDefaults = defaultStock(undefined, undefined, undefined, normalized.meta.units)
       const gridDefaults = defaultGrid(normalized.meta.units)
       clearProjectMemoryCaches()
@@ -287,8 +290,10 @@ export function createProjectLifecycleSlice(
           origin: normalized.origin ?? defaultOrigin(normalized.stock ?? stockDefaults),
         },
         filePath: path,
-        dirty: false,
-        loadWarning: versionWarning,
+        dirty: decoded.convertedLegacy,
+        loadWarning: versionWarning ?? (decoded.convertedLegacy
+          ? `This legacy project was converted in memory to file format ${LATEST_PROJECT_VERSION}. The original file is unchanged until you save. Files saved in ${LATEST_PROJECT_VERSION} are not compatible with older PureCutCNC builds.`
+          : null),
         pendingAdd: null,
         pendingMove: null,
         pendingTransform: null,

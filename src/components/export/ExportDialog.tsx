@@ -26,19 +26,41 @@ import {
 import { normalizeToolForProject } from '../../engine/toolpaths/geometry'
 import type { ToolpathResult } from '../../engine/toolpaths/types'
 import type { Operation } from '../../types/project'
+import {
+  listExportOperationOptions,
+  suggestGcodeFileName,
+} from './exportOperationSelection'
+import { dialogsEn } from '../../i18n/locales/en/dialogs'
+import type { MessageParams } from '../../i18n/catalog'
+import { useI18n } from '../../i18n/i18nContext'
+import { toolpathWarningTexts } from '../../i18n/warningText'
 
 interface ExportDialogProps {
   onClose: () => void
   generateToolpath: (operation: Operation) => ToolpathResult | null
+  /** Pre-check only these operations (per-operation export); defaults to the visible set. */
+  initialOperationIds?: string[]
 }
 
-export function ExportDialog({ onClose, generateToolpath }: ExportDialogProps) {
+export function ExportDialog({ onClose, generateToolpath, initialOperationIds }: ExportDialogProps) {
   useRestoreCanvasFocus()
   const { project, selectProject, lastExportPath, markExported } = useProjectStore()
+  const { t, languageTag } = useI18n()
+
+  function td(key: keyof typeof dialogsEn, params?: MessageParams): string {
+    return t(key, params)
+  }
 
   const [emitToolChanges, setEmitToolChanges] = useState(true)
   const [emitCoolant, setEmitCoolant] = useState(false)
   const [previewResult, setPreviewResult] = useState<PostProcessorResult | null>(null)
+  const [selectedOperationIds, setSelectedOperationIds] = useState<ReadonlySet<string>>(() => {
+    const options = listExportOperationOptions(project)
+    const selected = initialOperationIds
+      ? options.filter((option) => option.exportable && initialOperationIds.includes(option.operation.id))
+      : options.filter((option) => option.defaultSelected)
+    return new Set(selected.map((option) => option.operation.id))
+  })
 
   const activeDefinition = useMemo(() => getActiveMachineDefinition(project), [project])
 
@@ -54,32 +76,63 @@ export function ExportDialog({ onClose, generateToolpath }: ExportDialogProps) {
     }
   }
 
+  const operationOptions = useMemo(() => listExportOperationOptions(project), [project])
+
   const activeOperations = useMemo(() => (
-    project.operations
-      .filter((op) => op.enabled && op.showToolpath && op.toolRef)
-      .map((op) => {
-        const toolpath = generateToolpath(op)
-        const toolRecord = project.tools.find((tool) => tool.id === op.toolRef)
+    operationOptions
+      .filter((option) => option.exportable && selectedOperationIds.has(option.operation.id))
+      .map(({ operation }) => {
+        const toolpath = generateToolpath(operation)
+        const toolRecord = project.tools.find((tool) => tool.id === operation.toolRef)
         if (!toolpath || !toolRecord) {
           return null
         }
 
         return {
-          operation: op,
+          operation,
           tool: normalizeToolForProject(toolRecord, project),
           toolpath,
         }
       })
       .filter((item): item is NonNullable<typeof item> => item !== null)
-  ), [generateToolpath, project])
+  ), [generateToolpath, operationOptions, project, selectedOperationIds])
 
   const previewWarnings = useMemo(() => {
-    const warnings = [...(previewResult?.warnings ?? [])]
+    const warnings = toolpathWarningTexts(previewResult?.warnings ?? [])
+    if (operationOptions.length > 0 && selectedOperationIds.size === 0) {
+      warnings.unshift(td('dialogs.export.warning.noOperations'))
+    }
     if (!activeDefinition) {
-      warnings.unshift('No machine selected. Select one in Project Settings before exporting.')
+      warnings.unshift(td('dialogs.export.warning.noMachine'))
     }
     return warnings
-  }, [activeDefinition, previewResult])
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- td wraps stable context t; languageTag drives locale recomputes
+  }, [activeDefinition, operationOptions, previewResult, selectedOperationIds, languageTag])
+
+  function toggleOperationSelected(operationId: string, selected: boolean) {
+    setSelectedOperationIds((current) => {
+      const next = new Set(current)
+      if (selected) {
+        next.add(operationId)
+      } else {
+        next.delete(operationId)
+      }
+      return next
+    })
+  }
+
+  const exportableOperationIds = useMemo(() => (
+    operationOptions
+      .filter((option) => option.exportable)
+      .map((option) => option.operation.id)
+  ), [operationOptions])
+
+  const allExportableSelected = exportableOperationIds.length > 0
+    && exportableOperationIds.every((id) => selectedOperationIds.has(id))
+
+  function toggleAllOperationsSelected() {
+    setSelectedOperationIds(allExportableSelected ? new Set() : new Set(exportableOperationIds))
+  }
 
   useEffect(() => {
     if (!activeDefinition) {
@@ -104,9 +157,12 @@ export function ExportDialog({ onClose, generateToolpath }: ExportDialogProps) {
   }, [activeDefinition, activeOperations, emitCoolant, emitToolChanges, project])
 
   async function handleExport() {
-    if (!previewResult || !activeDefinition) return
+    if (!previewResult || !activeDefinition || activeOperations.length === 0) return
 
-    const suggestedName = project.meta.name.replace(/\s+/g, '_')
+    const suggestedName = suggestGcodeFileName(
+      project.meta.name,
+      activeOperations.map(({ operation }) => operation.name),
+    )
     const ext = activeDefinition.fileExtension
     const exportedPath = await platform.saveTextFile(suggestedName, previewResult.gcode, ext, lastExportPath)
     if (exportedPath) {
@@ -122,53 +178,91 @@ export function ExportDialog({ onClose, generateToolpath }: ExportDialogProps) {
 
   const previewLines = previewResult
     ? previewResult.gcode.split('\n').slice(0, 30).join('\n')
-    : 'Select a machine in Project Settings to generate G-code preview.'
+    : td('dialogs.export.previewPlaceholder')
 
   return (
     <div className="dialog-backdrop" onClick={onClose}>
       <div className="dialog" onClick={(event) => event.stopPropagation()}>
         <div className="dialog-header">
-          <h2 className="dialog-title">Export G-code</h2>
-          <button className="dialog-close" onClick={onClose} aria-label="Close">
+          <h2 className="dialog-title">{td('dialogs.export.title')}</h2>
+          <button className="dialog-close" onClick={onClose} aria-label={td('dialogs.common.close')}>
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M18 6L6 18M6 6l12 12" />
             </svg>
           </button>
         </div>
 
-        <div className="dialog-body">
+        <div className="dialog-body dialog-body--gcode-export">
           <div className="dialog-section">
             <div className="dialog-section-group">
-              <label className="dialog-section-title">Machine</label>
+              <label className="dialog-section-title">{td('dialogs.export.machine')}</label>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px' }}>
                 <div style={{ fontSize: '13px', color: 'var(--text)' }}>
-                  {activeDefinition?.name ?? 'None selected'}
+                  {activeDefinition?.name ?? td('dialogs.export.machineNone')}
                 </div>
                 <button className="btn-secondary" onClick={handleChangeMachine} type="button" style={{ padding: '0 12px' }}>
-                  Change
+                  {td('dialogs.export.change')}
                 </button>
               </div>
             </div>
 
             <div className="dialog-section-group">
-              <label className="dialog-section-title">Origin</label>
+              <label className="dialog-section-title">{td('dialogs.export.origin')}</label>
               <div style={{ fontSize: '13px', color: 'var(--text)', display: 'grid', gap: '6px' }}>
-                <div>Export uses the current project origin as machine X0 Y0 Z0.</div>
+                <div>{td('dialogs.export.originDescription')}</div>
                 <div style={{ fontSize: '11px', color: 'var(--text-dim)' }}>
-                  Edit Origin in the sketch or project tree to change the work zero used for export.
+                  {td('dialogs.export.originNote')}
                 </div>
               </div>
             </div>
 
             <div className="dialog-section-group">
-              <label className="dialog-section-title">Project Units</label>
+              <label className="dialog-section-title">{td('dialogs.export.projectUnits')}</label>
               <div style={{ fontSize: '13px', color: 'var(--text)' }}>
-                {project.meta.units === 'inch' ? 'Inch' : 'Millimeter'}
+                {project.meta.units === 'inch' ? td('dialogs.common.inch') : td('dialogs.common.millimeter')}
               </div>
             </div>
 
+            <div className="dialog-section-group dialog-section-group--operations">
+              <div className="export-operations-header">
+                <label className="dialog-section-title">{td('dialogs.export.operations')}</label>
+                {exportableOperationIds.length > 0 ? (
+                  <button
+                    className="export-operations-toggle"
+                    type="button"
+                    onClick={toggleAllOperationsSelected}
+                  >
+                    {allExportableSelected ? td('dialogs.importGeometry.deselectAll') : td('dialogs.importGeometry.selectAll')}
+                  </button>
+                ) : null}
+              </div>
+              {operationOptions.length === 0 ? (
+                <div style={{ fontSize: '13px', color: 'var(--text-dim)' }}>
+                  {td('dialogs.export.noOperations')}
+                </div>
+              ) : (
+                <div className="export-option-group export-operation-list">
+                  {operationOptions.map(({ operation, exportable, reasonKey }) => (
+                    <label
+                      key={operation.id}
+                      className={`export-option${exportable ? '' : ' export-option--disabled'}`}
+                    >
+                      <input
+                        type="checkbox"
+                        disabled={!exportable}
+                        checked={exportable && selectedOperationIds.has(operation.id)}
+                        onChange={(event) => toggleOperationSelected(operation.id, event.target.checked)}
+                      />
+                      <span className="export-option-label">{operation.name}</span>
+                      {reasonKey ? <span className="export-option-note">{td(reasonKey)}</span> : null}
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+
             <div className="dialog-section-group">
-              <label className="dialog-section-title">Options</label>
+              <label className="dialog-section-title">{td('dialogs.export.options')}</label>
               <div className="export-option-group">
                 <label className="export-option">
                   <input
@@ -176,7 +270,7 @@ export function ExportDialog({ onClose, generateToolpath }: ExportDialogProps) {
                     checked={emitToolChanges}
                     onChange={(event) => setEmitToolChanges(event.target.checked)}
                   />
-                  Emit tool changes (M6)
+                  {td('dialogs.export.emitToolChanges')}
                 </label>
                 <label className="export-option">
                   <input
@@ -184,14 +278,17 @@ export function ExportDialog({ onClose, generateToolpath }: ExportDialogProps) {
                     checked={emitCoolant}
                     onChange={(event) => setEmitCoolant(event.target.checked)}
                   />
-                  Emit coolant commands
+                  {td('dialogs.export.emitCoolant')}
                 </label>
               </div>
             </div>
 
+          </div>
+
+          <div className="dialog-preview-container">
             {previewWarnings.length > 0 && (
               <div className="dialog-section-group">
-                <label className="dialog-section-title">Warnings</label>
+                <label className="dialog-section-title">{td('dialogs.export.warnings')}</label>
                 <div className="export-warning-list">
                   {previewWarnings.map((warning, index) => (
                     <div key={index} className="export-warning">{warning}</div>
@@ -199,31 +296,28 @@ export function ExportDialog({ onClose, generateToolpath }: ExportDialogProps) {
                 </div>
               </div>
             )}
-          </div>
-
-          <div className="dialog-preview-container">
-            <label className="dialog-section-title">Preview (First 30 lines)</label>
+            <label className="dialog-section-title">{td('dialogs.export.preview')}</label>
             <div className="dialog-preview">
               {previewLines}
-              {previewResult && previewResult.gcode.split('\n').length > 30 && '\n...'}
+              {previewResult && previewResult.gcode.split('\n').length > 30 && `\n${td('dialogs.export.previewTruncated')}`}
             </div>
             {previewResult && (
               <div style={{ fontSize: '11px', color: 'var(--text-dim)', textAlign: 'right' }}>
-                {previewResult.stats.moveCount} moves, {previewResult.stats.lineCount} lines total
+                {td('dialogs.export.movesLines', { moves: previewResult.stats.moveCount, lines: previewResult.stats.lineCount })}
               </div>
             )}
           </div>
         </div>
 
         <div className="dialog-footer">
-          <button className="btn-secondary" onClick={onClose} type="button">Cancel</button>
+          <button className="btn-secondary" onClick={onClose} type="button">{td('dialogs.common.cancel')}</button>
           <button
             className="btn-primary"
             onClick={handleExport}
-            disabled={!previewResult || !activeDefinition}
+            disabled={!previewResult || !activeDefinition || activeOperations.length === 0}
             type="button"
           >
-            Export {activeDefinition ? `.${activeDefinition.fileExtension}` : ''}
+            {td('dialogs.export.export', { ext: activeDefinition ? `.${activeDefinition.fileExtension}` : '' })}
           </button>
         </div>
       </div>

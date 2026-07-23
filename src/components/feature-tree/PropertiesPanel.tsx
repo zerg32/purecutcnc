@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { useCallback, useContext, useRef, useState } from 'react'
+import { useCallback, useContext, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent } from 'react'
 import { Icon } from '../Icon'
 import { ExpandedPanelContext } from '../layout/expandedPanelContext'
@@ -24,9 +24,15 @@ import { ZRangeSlider } from './ZRangeSlider'
 import { defaultStock, getStockBounds, profileExceedsStock, profileHasSelfIntersection } from '../../types/project'
 import { useProjectStore } from '../../store/projectStore'
 import { getDefinitionId, getInstanceIdsForDefinition } from '../../store/helpers/featureDefinitions'
+import { isMachinable, isSolid, sectionForOperation } from '../../store/helpers/featureRoles'
+import type { FeatureTreeSection } from '../../store/helpers/featureRoles'
 import { defaultFontIdForStyle, getTextFontOptions } from '../../text'
 import { convertLength, formatLength, parseLengthInput } from '../../utils/units'
 import { MachineDefinitionManagerDialog } from '../machine/MachineDefinitionManagerDialog'
+import { useRequestUnitConversion } from '../project/UnitConversionContext'
+import type { FeatureOperation, RegionMaskMode } from '../../types/project'
+import { resolvedProjectFeatures } from '../../store/helpers/resolveFeatures'
+import { useI18n } from '../../i18n/i18nContext'
 
 interface DraftTextInputProps {
   value: string
@@ -54,6 +60,7 @@ function DraftTextInput({ value, disabled = false, onCommit }: DraftTextInputPro
 
   return (
     <input
+      key={disabled ? value : undefined}
       type="text"
       defaultValue={value}
       disabled={disabled}
@@ -181,7 +188,6 @@ export function PropertiesPanel() {
     setGrid,
     setStock,
     setStockSourceFeature,
-    setUnits,
     updateTab,
     updateClamp,
     updateFeatureFolder,
@@ -197,8 +203,11 @@ export function PropertiesPanel() {
     makeUnique,
     expandTextFeature,
   } = useProjectStore()
+  const features = useMemo(() => resolvedProjectFeatures(project), [project])
+  const { t } = useI18n()
   const backdropFileInputRef = useRef<HTMLInputElement>(null)
   const expandedPanelCtx = useContext(ExpandedPanelContext)
+  const requestUnitConversion = useRequestUnitConversion()
   const closeExpanded = useCallback(
     () => expandedPanelCtx?.closeExpandedPanel(),
     [expandedPanelCtx],
@@ -212,7 +221,7 @@ export function PropertiesPanel() {
   const minimumSnap = convertLength(0.0001, 'mm', units)
 
   const selectedFeature = selectedFeatureId
-    ? project.features.find((feature) => feature.id === selectedFeatureId) ?? null
+    ? features.find((feature) => feature.id === selectedFeatureId) ?? null
     : null
   const selectedNode = selection.selectedNode
   const selectedFolder =
@@ -227,7 +236,7 @@ export function PropertiesPanel() {
     selectedNode?.type === 'tab'
       ? project.tabs.find((tab) => tab.id === selectedNode.tabId) ?? null
       : null
-  const allSelectedFeatures = project.features.filter((feature) => selectedFeatureIds.includes(feature.id))
+  const allSelectedFeatures = features.filter((feature) => selectedFeatureIds.includes(feature.id))
   const commonSelectedFolderId =
     allSelectedFeatures.length > 0 &&
     allSelectedFeatures.every((feature) => feature.folderId === allSelectedFeatures[0]?.folderId)
@@ -246,7 +255,15 @@ export function PropertiesPanel() {
     allSelectedFeatures.every((feature) => feature.operation === allSelectedFeatures[0]?.operation)
       ? allSelectedFeatures[0]?.operation ?? null
       : '__mixed__'
-  const selectedZEditableFeatures = allSelectedFeatures.filter((feature) => feature.operation !== 'region')
+  const selectedRegionFeatures = allSelectedFeatures.filter((feature) => feature.operation === 'region')
+  const commonSelectedRegionMaskMode =
+    selectedRegionFeatures.length > 0 &&
+    selectedRegionFeatures.every(
+      (feature) => (feature.regionMaskMode ?? 'include') === (selectedRegionFeatures[0]?.regionMaskMode ?? 'include'),
+    )
+      ? selectedRegionFeatures[0]?.regionMaskMode ?? 'include'
+      : '__mixed__'
+  const selectedZEditableFeatures = allSelectedFeatures.filter(isMachinable)
   const selectedZEditableFeatureIds = selectedZEditableFeatures.map((feature) => feature.id)
   const selectedClosedEditableFeatures = selectedZEditableFeatures.filter((feature) => feature.sketch.profile.closed)
   const selectedOpenEditableFeatures = selectedZEditableFeatures.filter((feature) => !feature.sketch.profile.closed)
@@ -288,7 +305,7 @@ export function PropertiesPanel() {
     }
 
     if (!file.type.startsWith('image/')) {
-      alert('Backdrop must be a PNG or JPEG image.')
+      alert(t('featureTree.properties.backdrop.mustBeImage'))
       event.target.value = ''
       return
     }
@@ -298,7 +315,7 @@ export function PropertiesPanel() {
     reader.onload = () => {
       const dataUrl = typeof reader.result === 'string' ? reader.result : null
       if (!dataUrl) {
-        alert('Failed to read backdrop image.')
+        alert(t('featureTree.properties.backdrop.readFailed'))
         setBackdropImageLoading(false)
         event.target.value = ''
         return
@@ -316,14 +333,14 @@ export function PropertiesPanel() {
         event.target.value = ''
       }
       image.onerror = () => {
-        alert('Failed to decode backdrop image.')
+        alert(t('featureTree.properties.backdrop.decodeFailed'))
         setBackdropImageLoading(false)
         event.target.value = ''
       }
       image.src = dataUrl
     }
     reader.onerror = () => {
-      alert('Failed to read backdrop image.')
+      alert(t('featureTree.properties.backdrop.readFailed'))
       setBackdropImageLoading(false)
       event.target.value = ''
     }
@@ -334,14 +351,17 @@ export function PropertiesPanel() {
 
   function renderContent() {
 
-  function renderFolderSelect(value: string | '__mixed__' | null, onChange: (folderId: string | null) => void, disabled?: boolean) {
+  function renderFolderSelect(value: string | '__mixed__' | null, onChange: (folderId: string | null) => void, disabled?: boolean, section?: FeatureTreeSection) {
+    const folders = section
+      ? project.featureFolders.filter((folder) => (folder.section ?? 'features') === section)
+      : project.featureFolders
     return (
       <Select
         value={value ?? ''}
         options={[
-          ...(value === '__mixed__' ? [{ value: '__mixed__', label: 'Mixed folders' }] : []),
-          { value: '', label: 'Root' },
-          ...project.featureFolders.map((folder) => ({ value: folder.id, label: folder.name })),
+          ...(value === '__mixed__' ? [{ value: '__mixed__', label: t('featureTree.properties.select.mixedFolders') }] : []),
+          { value: '', label: t('featureTree.properties.select.root') },
+          ...folders.map((folder) => ({ value: folder.id, label: folder.name })),
         ]}
         onChange={(next) => onChange(next === '' || next === '__mixed__' ? null : next)}
         disabled={disabled}
@@ -354,7 +374,7 @@ export function PropertiesPanel() {
       <div className="properties-panel">
         <div className="properties-group">
           <label className="properties-field">
-            <span>Name</span>
+            <span>{t('featureTree.properties.name')}</span>
             <DraftTextInput
               key={`project-name-${project.meta.name}`}
               value={project.meta.name}
@@ -362,14 +382,16 @@ export function PropertiesPanel() {
             />
           </label>
           <label className="properties-field">
-            <span>Units</span>
+            <span>{t('featureTree.properties.units')}</span>
             <Select
               value={project.meta.units}
               options={[
-                { value: 'mm', label: 'Millimeters' },
-                { value: 'inch', label: 'Inches' },
+                { value: 'mm', label: t('featureTree.properties.units.mm') },
+                { value: 'inch', label: t('featureTree.properties.units.inch') },
               ]}
-              onChange={(value) => setUnits(value)}
+              onChange={(value) => {
+                requestUnitConversion(value)
+              }}
             />
           </label>
           <label className="properties-check">
@@ -378,10 +400,10 @@ export function PropertiesPanel() {
               checked={project.meta.showFeatureInfo}
               onChange={(event) => setShowFeatureInfo(event.target.checked)}
             />
-            Show feature info in sketch
+            {t('featureTree.properties.showFeatureInfo')}
           </label>
           <label className="properties-field">
-            <span>Safe Z</span>
+            <span>{t('featureTree.properties.safeZ')}</span>
             <DraftNumberInput
               key={`project-max-travel-z-${project.meta.maxTravelZ}`}
               value={project.meta.maxTravelZ}
@@ -391,7 +413,7 @@ export function PropertiesPanel() {
             />
           </label>
           <label className="properties-field">
-            <span>Op Clear Z</span>
+            <span>{t('featureTree.properties.opClearZ')}</span>
             <DraftNumberInput
               key={`project-operation-clearance-z-${project.meta.operationClearanceZ}`}
               value={project.meta.operationClearanceZ}
@@ -401,7 +423,7 @@ export function PropertiesPanel() {
             />
           </label>
           <label className="properties-field">
-            <span>Clamp Clear XY</span>
+            <span>{t("featureTree.properties.clampClearXY")}</span>
             <DraftNumberInput
               key={`project-clamp-clearance-xy-${project.meta.clampClearanceXY}`}
               value={project.meta.clampClearanceXY}
@@ -411,7 +433,7 @@ export function PropertiesPanel() {
             />
           </label>
           <label className="properties-field">
-            <span>Clamp Clear Z</span>
+            <span>{t("featureTree.properties.clampClearZ")}</span>
             <DraftNumberInput
               key={`project-clamp-clearance-z-${project.meta.clampClearanceZ}`}
               value={project.meta.clampClearanceZ}
@@ -422,13 +444,13 @@ export function PropertiesPanel() {
           </label>
           <label className="properties-field properties-field--machine">
             <div className="properties-field-label-row">
-              <span>Machine</span>
+              <span>{t("featureTree.properties.machine")}</span>
               <button
                 type="button"
                 className="tree-action-btn properties-refresh-btn"
                 onClick={refreshMachineDefinitions}
-                aria-label="Refresh machine definitions"
-                title="Refresh machine definitions"
+                aria-label={t('featureTree.properties.machine.refresh')}
+                title={t('featureTree.properties.machine.refresh')}
               >
                 <Icon id="refresh" size={15} />
               </button>
@@ -436,7 +458,7 @@ export function PropertiesPanel() {
             <Select
               value={project.meta.selectedMachineId ?? ''}
               options={[
-                { value: '', label: 'None' },
+                { value: '', label: t('featureTree.properties.machine.none') },
                 ...project.meta.machineDefinitions.map((definition) => ({ value: definition.id, label: definition.name })),
               ]}
               onChange={(value) => setSelectedMachineId(value || null)}
@@ -445,17 +467,17 @@ export function PropertiesPanel() {
           {selectedMachine ? (
             <div className="properties-machine-status">
               <span className={selectedMachine.builtin ? 'machine-manager-badge machine-manager-badge--builtin' : 'machine-manager-badge machine-manager-badge--custom'}>
-                {selectedMachine.builtin ? 'Built-in' : 'Custom'}
+                {selectedMachine.builtin ? t('featureTree.properties.machine.builtin') : t('featureTree.properties.machine.custom')}
               </span>
               <span className="properties-machine-ext">.{selectedMachine.fileExtension}</span>
               {selectedMachine.builtin ? (
-                <span className="properties-machine-hint">duplicate to edit</span>
+                <span className="properties-machine-hint">{t('featureTree.properties.machine.duplicateHint')}</span>
               ) : null}
             </div>
           ) : null}
           <div className="properties-actions">
             <button type="button" onClick={() => setShowManager(true)}>
-              Manage machines...
+              {t('featureTree.properties.machine.manage')}
             </button>
           </div>
         </div>
@@ -468,11 +490,11 @@ export function PropertiesPanel() {
       <div className="properties-panel">
         <div className="properties-group">
           <label className="properties-field">
-            <span>Name</span>
-            <DraftTextInput value="Grid" disabled />
+            <span>{t('featureTree.properties.name')}</span>
+            <DraftTextInput value={t('featureTree.properties.name.grid')} disabled />
           </label>
           <label className="properties-field">
-            <span>Grid Extent</span>
+            <span>{t("featureTree.properties.gridExtent")}</span>
             <DraftNumberInput
               key={`grid-extent-${project.grid.extent}`}
               value={project.grid.extent}
@@ -482,7 +504,7 @@ export function PropertiesPanel() {
             />
           </label>
           <label className="properties-field">
-            <span>Major Lines</span>
+            <span>{t("featureTree.properties.majorLines")}</span>
             <DraftNumberInput
               key={`grid-major-${project.grid.majorSpacing}-${project.grid.minorSpacing}`}
               value={project.grid.majorSpacing}
@@ -493,7 +515,7 @@ export function PropertiesPanel() {
             />
           </label>
           <label className="properties-field">
-            <span>Minor Lines</span>
+            <span>{t("featureTree.properties.minorLines")}</span>
             <DraftNumberInput
               key={`grid-minor-${project.grid.minorSpacing}-${project.grid.majorSpacing}`}
               value={project.grid.minorSpacing}
@@ -504,7 +526,7 @@ export function PropertiesPanel() {
             />
           </label>
           <label className="properties-field">
-            <span>Snap Increment</span>
+            <span>{t("featureTree.properties.snapIncrement")}</span>
             <DraftNumberInput
               key={`grid-snap-${project.grid.snapIncrement}-${project.meta.units}`}
               value={project.grid.snapIncrement}
@@ -519,7 +541,7 @@ export function PropertiesPanel() {
               checked={project.grid.visible}
               onChange={(event) => setGrid({ ...project.grid, visible: event.target.checked })}
             />
-            <span>Visible</span>
+            <span>{t("featureTree.properties.visible")}</span>
           </label>
         </div>
       </div>
@@ -538,15 +560,15 @@ export function PropertiesPanel() {
         <div className="properties-panel">
           <div className="properties-group">
             <label className="properties-field">
-              <span>Name</span>
-              <DraftTextInput value="Stock" disabled />
+              <span>{t('featureTree.properties.name')}</span>
+              <DraftTextInput value={t('featureTree.properties.stock.nameDisabled')} disabled />
             </label>
             <label className="properties-field">
-              <span>Source Feature</span>
+              <span>{t("featureTree.properties.sourceFeature")}</span>
               <DraftTextInput value={sourceFeature.name} disabled />
             </label>
             <label className="properties-field">
-              <span>Thickness</span>
+              <span>{t("featureTree.properties.thickness")}</span>
               <DraftNumberInput
                 key={`stock-thickness-${project.stock.thickness}`}
                 value={project.stock.thickness}
@@ -558,7 +580,7 @@ export function PropertiesPanel() {
               />
             </label>
             <label className="properties-field">
-              <span>Color</span>
+              <span>{t("featureTree.properties.color")}</span>
               <input
                 type="color"
                 value={project.stock.color}
@@ -575,7 +597,7 @@ export function PropertiesPanel() {
                   setStock({ ...project.stock, visible: event.target.checked })
                 }}
               />
-              <span>Visible</span>
+              <span>{t("featureTree.properties.visible")}</span>
             </label>
             <div className="properties-actions" style={{ display: 'flex', gap: '8px', marginTop: '12px', flexDirection: 'column' }}>
               <button
@@ -583,14 +605,14 @@ export function PropertiesPanel() {
                 type="button"
                 onClick={() => { enterStockSketchEdit(sourceFeature.id); closeExpanded() }}
               >
-                Edit Sketch
+                {t('featureTree.properties.stock.editSketch')}
               </button>
               <button
                 className="feature-context-menu__item"
                 type="button"
                 onClick={() => { setStockSourceFeature(null); closeExpanded() }}
               >
-                Reset to Rectangle
+                {t('featureTree.properties.stock.resetToRect')}
               </button>
             </div>
           </div>
@@ -602,11 +624,11 @@ export function PropertiesPanel() {
       <div className="properties-panel">
         <div className="properties-group">
           <label className="properties-field">
-            <span>Name</span>
-            <DraftTextInput value="Stock" disabled />
+            <span>{t('featureTree.properties.name')}</span>
+            <DraftTextInput value={t('featureTree.properties.stock.nameDisabled')} disabled />
           </label>
           <label className="properties-field">
-            <span>Width</span>
+            <span>{t("featureTree.properties.width")}</span>
             <DraftNumberInput
               key={`stock-width-${width}-${height}-${project.stock.thickness}`}
               value={width}
@@ -622,7 +644,7 @@ export function PropertiesPanel() {
             />
           </label>
           <label className="properties-field">
-            <span>Height</span>
+            <span>{t("featureTree.properties.height")}</span>
             <DraftNumberInput
               key={`stock-height-${width}-${height}-${project.stock.thickness}`}
               value={height}
@@ -638,7 +660,7 @@ export function PropertiesPanel() {
             />
           </label>
           <label className="properties-field">
-            <span>Thickness</span>
+            <span>{t("featureTree.properties.thickness")}</span>
             <DraftNumberInput
               key={`stock-thickness-${width}-${height}-${project.stock.thickness}`}
               value={project.stock.thickness}
@@ -654,7 +676,7 @@ export function PropertiesPanel() {
             />
           </label>
           <label className="properties-field">
-            <span>Color</span>
+            <span>{t("featureTree.properties.color")}</span>
             <input
               type="color"
               value={project.stock.color}
@@ -679,7 +701,7 @@ export function PropertiesPanel() {
                 setStock(stock)
               }}
             />
-            <span>Visible</span>
+            <span>{t("featureTree.properties.visible")}</span>
           </label>
         </div>
       </div>
@@ -693,7 +715,7 @@ export function PropertiesPanel() {
       <div className="properties-panel">
         <div className="properties-group">
           <label className="properties-field">
-            <span>Name</span>
+            <span>{t('featureTree.properties.name')}</span>
             <DraftTextInput
               key={`origin-name-${project.origin.name}`}
               value={project.origin.name}
@@ -701,7 +723,7 @@ export function PropertiesPanel() {
             />
           </label>
           <label className="properties-field">
-            <span>Z</span>
+            <span>{t("featureTree.properties.z")}</span>
             <DraftNumberInput
               key={`origin-z-${project.origin.z}`}
               value={project.origin.z}
@@ -715,39 +737,39 @@ export function PropertiesPanel() {
               checked={project.origin.visible}
               onChange={(event) => setOrigin({ ...project.origin, visible: event.target.checked })}
             />
-            <span>Visible</span>
+            <span>{t("featureTree.properties.visible")}</span>
           </label>
         </div>
 
         <div className="properties-actions">
           <button className="feat-btn" type="button" onClick={() => { startPlaceOrigin(); closeExpanded() }}>
-            Place Origin
+            {t('featureTree.properties.origin.placeOrigin')}
           </button>
         </div>
 
         <div className="properties-group">
-          <span className="dialog-section-title" style={{ fontSize: '11px', marginBottom: '4px', display: 'block' }}>Presets</span>
+          <span className="dialog-section-title" style={{ fontSize: '11px', marginBottom: '4px', display: 'block' }}>{t('featureTree.properties.origin.presets')}</span>
           <div className="properties-actions">
             <button 
               className="feat-btn" 
               type="button"
               onClick={() => setOrigin({ ...project.origin, x: bounds.minX, y: bounds.minY, z: project.stock.thickness })}
             >
-              Top Left
+              {t('featureTree.properties.origin.topLeft')}
             </button>
             <button 
               className="feat-btn" 
               type="button"
               onClick={() => setOrigin({ ...project.origin, x: (bounds.minX + bounds.maxX) / 2, y: (bounds.minY + bounds.maxY) / 2, z: project.stock.thickness })}
             >
-              Center Top
+              {t('featureTree.properties.origin.centerTop')}
             </button>
             <button 
               className="feat-btn" 
               type="button"
               onClick={() => setOrigin({ ...project.origin, x: bounds.minX, y: bounds.maxY, z: 0 })}
             >
-              Bottom Left
+              {t('featureTree.properties.origin.bottomLeft')}
             </button>
           </div>
         </div>
@@ -762,7 +784,7 @@ export function PropertiesPanel() {
       <div className="properties-panel">
         <div className="properties-group">
           <label className="properties-field">
-            <span>Name</span>
+            <span>{t('featureTree.properties.name')}</span>
             <DraftTextInput
               key={`backdrop-name-${backdrop?.name ?? 'Backdrop'}`}
               value={backdrop?.name ?? 'Backdrop'}
@@ -771,10 +793,10 @@ export function PropertiesPanel() {
             />
           </label>
           <label className="properties-field">
-            <span>Image</span>
+            <span>{t("featureTree.properties.image")}</span>
             <DraftTextInput
               key={`backdrop-image-${backdrop?.imageDataUrl ?? 'none'}-${backdrop?.intrinsicWidth ?? 0}-${backdrop?.intrinsicHeight ?? 0}`}
-              value={backdrop ? `${backdrop.name} (${backdrop.intrinsicWidth} × ${backdrop.intrinsicHeight})` : 'No image loaded'}
+              value={backdrop ? `${backdrop.name} (${backdrop.intrinsicWidth} × ${backdrop.intrinsicHeight})` : t('featureTree.properties.backdrop.noImage')}
               disabled
             />
           </label>
@@ -785,10 +807,10 @@ export function PropertiesPanel() {
               disabled={!backdrop}
               onChange={(event) => updateBackdrop({ visible: event.target.checked })}
             />
-            <span>Visible</span>
+            <span>{t("featureTree.properties.visible")}</span>
           </label>
           <label className="properties-field">
-            <span>Opacity</span>
+            <span>{t("featureTree.properties.opacity")}</span>
             <input
               type="range"
               min="5"
@@ -800,7 +822,7 @@ export function PropertiesPanel() {
             />
           </label>
           <label className="properties-field">
-            <span>Width</span>
+            <span>{t("featureTree.properties.width")}</span>
             <DraftNumberInput
               key={`backdrop-width-${backdrop?.width ?? 0}`}
               value={backdrop?.width ?? 0}
@@ -811,7 +833,7 @@ export function PropertiesPanel() {
             />
           </label>
           <label className="properties-field">
-            <span>Height</span>
+            <span>{t("featureTree.properties.height")}</span>
             <DraftNumberInput
               key={`backdrop-height-${backdrop?.height ?? 0}`}
               value={backdrop?.height ?? 0}
@@ -822,7 +844,7 @@ export function PropertiesPanel() {
             />
           </label>
           <label className="properties-field">
-            <span>Angle</span>
+            <span>{t("featureTree.properties.angle")}</span>
             <DraftTextInput
               key={`backdrop-angle-${backdrop?.orientationAngle ?? 90}`}
               value={String(Math.round((backdrop?.orientationAngle ?? 90) * 1000) / 1000)}
@@ -839,25 +861,25 @@ export function PropertiesPanel() {
 
         <div className="properties-actions">
           <button className="feat-btn" type="button" onClick={() => backdropFileInputRef.current?.click()} disabled={backdropImageLoading}>
-            {backdropImageLoading ? 'Loading Image...' : backdrop ? 'Replace Image' : 'Load Image'}
+            {backdropImageLoading ? t('featureTree.properties.backdrop.loading') : backdrop ? t('featureTree.properties.backdrop.replaceImage') : t('featureTree.properties.backdrop.loadImage')}
           </button>
           <button className="feat-btn" type="button" onClick={() => { startMoveBackdrop(); closeExpanded() }} disabled={!backdrop || backdropImageLoading}>
-            Move
+            {t('featureTree.properties.backdrop.move')}
           </button>
           <button className="feat-btn" type="button" onClick={() => { startResizeBackdrop(); closeExpanded() }} disabled={!backdrop || backdropImageLoading}>
-            Resize
+            {t('featureTree.properties.backdrop.resize')}
           </button>
           <button className="feat-btn" type="button" onClick={() => { startRotateBackdrop(); closeExpanded() }} disabled={!backdrop || backdropImageLoading}>
-            Rotate
+            {t('featureTree.properties.backdrop.rotate')}
           </button>
           <button className="feat-btn feat-btn--delete" type="button" onClick={() => { deleteBackdrop(); closeExpanded() }} disabled={!backdrop || backdropImageLoading}>
-            Delete
+            {t('featureTree.properties.backdrop.delete')}
           </button>
         </div>
         {backdropImageLoading ? (
           <div className="properties-inline-status" role="status" aria-live="polite">
             <span className="inline-spinner" aria-hidden="true" />
-            Decoding backdrop image...
+            {t('featureTree.properties.backdrop.decoding')}
           </div>
         ) : null}
 
@@ -877,21 +899,21 @@ export function PropertiesPanel() {
       <div className="properties-panel">
         <div className="properties-group">
           <label className="properties-field">
-            <span>Name</span>
-            <DraftTextInput value="Features" disabled />
+            <span>{t('featureTree.properties.name')}</span>
+            <DraftTextInput value={t('featureTree.properties.name.features')} disabled />
           </label>
           <label className="properties-field">
-            <span>Folders</span>
+            <span>{t("featureTree.properties.folders")}</span>
             <DraftTextInput value={`${project.featureFolders.length}`} disabled />
           </label>
           <label className="properties-field">
-            <span>Features</span>
-            <DraftTextInput value={`${project.features.length}`} disabled />
+            <span>{t("featureTree.properties.features")}</span>
+            <DraftTextInput value={`${features.length}`} disabled />
           </label>
         </div>
         <div className="properties-actions">
           <button className="feat-btn" type="button" onClick={() => { addFeatureFolder(); closeExpanded() }}>
-            Add Folder
+            {t('featureTree.properties.actions.addFolder')}
           </button>
         </div>
       </div>
@@ -903,17 +925,17 @@ export function PropertiesPanel() {
       <div className="properties-panel">
         <div className="properties-group">
           <label className="properties-field">
-            <span>Name</span>
-            <DraftTextInput value="Clamps" disabled />
+            <span>{t('featureTree.properties.name')}</span>
+            <DraftTextInput value={t('featureTree.properties.name.clamps')} disabled />
           </label>
           <label className="properties-field">
-            <span>Clamps</span>
+            <span>{t("featureTree.properties.clamps")}</span>
             <DraftTextInput value={`${project.clamps.length}`} disabled />
           </label>
         </div>
         <div className="properties-actions">
           <button className="feat-btn" type="button" onClick={() => { startAddClampPlacement(); closeExpanded() }}>
-            Add Clamp
+            {t('featureTree.properties.actions.addClamp')}
           </button>
         </div>
       </div>
@@ -925,17 +947,17 @@ export function PropertiesPanel() {
       <div className="properties-panel">
         <div className="properties-group">
           <label className="properties-field">
-            <span>Name</span>
-            <DraftTextInput value="Tabs" disabled />
+            <span>{t('featureTree.properties.name')}</span>
+            <DraftTextInput value={t('featureTree.properties.name.tabs')} disabled />
           </label>
           <label className="properties-field">
-            <span>Tabs</span>
+            <span>{t("featureTree.properties.tabs")}</span>
             <DraftTextInput value={`${project.tabs.length}`} disabled />
           </label>
         </div>
         <div className="properties-actions">
           <button className="feat-btn" type="button" onClick={() => { startAddTabPlacement(); closeExpanded() }}>
-            Add Tab
+            {t('featureTree.properties.actions.addTab')}
           </button>
         </div>
       </div>
@@ -943,13 +965,13 @@ export function PropertiesPanel() {
   }
 
   if (selectedFolder) {
-    const featureCount = project.features.filter((feature) => feature.folderId === selectedFolder.id).length
+    const featureCount = features.filter((feature) => feature.folderId === selectedFolder.id).length
 
     return (
       <div className="properties-panel">
         <div className="properties-group">
           <label className="properties-field">
-            <span>Name</span>
+            <span>{t('featureTree.properties.name')}</span>
             <DraftTextInput
               key={`folder-name-${selectedFolder.id}-${selectedFolder.name}`}
               value={selectedFolder.name}
@@ -957,7 +979,7 @@ export function PropertiesPanel() {
             />
           </label>
           <label className="properties-field">
-            <span>Features</span>
+            <span>{t("featureTree.properties.features")}</span>
             <DraftTextInput value={`${featureCount}`} disabled />
           </label>
           <label className="properties-check">
@@ -968,12 +990,12 @@ export function PropertiesPanel() {
                 updateFeatureFolder(selectedFolder.id, { collapsed: !event.target.checked })
               }
             />
-            <span>Expanded</span>
+            <span>{t("featureTree.properties.expanded")}</span>
           </label>
         </div>
         <div className="properties-actions">
           <button className="feat-btn feat-btn--delete" type="button" onClick={() => { deleteFeatureFolder(selectedFolder.id); closeExpanded() }}>
-            Delete Folder
+            {t('featureTree.properties.actions.deleteFolder')}
           </button>
         </div>
       </div>
@@ -986,7 +1008,7 @@ export function PropertiesPanel() {
       <div className="properties-panel">
         <div className="properties-group">
           <label className="properties-field">
-            <span>Name</span>
+            <span>{t('featureTree.properties.name')}</span>
             <DraftTextInput
               key={`clamp-name-${selectedClamp.id}-${selectedClamp.name}`}
               value={selectedClamp.name}
@@ -994,7 +1016,7 @@ export function PropertiesPanel() {
             />
           </label>
           <label className="properties-field">
-            <span>Z Top</span>
+            <span>{t("featureTree.properties.zTop")}</span>
             <DraftNumberInput
               key={`clamp-height-${selectedClamp.id}-${selectedClamp.height}`}
               value={selectedClamp.height}
@@ -1004,7 +1026,7 @@ export function PropertiesPanel() {
             />
           </label>
           <label className="properties-field">
-            <span>Z Bottom</span>
+            <span>{t("featureTree.properties.zBottom")}</span>
             <DraftNumberInput
               key={`clamp-zbottom-${selectedClamp.id}`}
               value={0}
@@ -1020,15 +1042,15 @@ export function PropertiesPanel() {
               checked={selectedClamp.visible}
               onChange={(event) => updateClamp(selectedClamp.id, { visible: event.target.checked })}
             />
-            <span>Visible</span>
+            <span>{t("featureTree.properties.visible")}</span>
           </label>
         </div>
         <div className="properties-actions">
           <button className="feat-btn" type="button" onClick={() => { enterClampEdit(selectedClamp.id); closeExpanded() }}>
-            Edit Sketch
+            {t('featureTree.properties.stock.editSketch')}
           </button>
           <button className="feat-btn feat-btn--delete" type="button" onClick={() => { deleteClamp(selectedClamp.id); closeExpanded() }}>
-            Delete Clamp
+            {t('featureTree.properties.actions.deleteClamp')}
           </button>
         </div>
       </div>
@@ -1040,7 +1062,7 @@ export function PropertiesPanel() {
       <div className="properties-panel">
         <div className="properties-group">
           <label className="properties-field">
-            <span>Name</span>
+            <span>{t('featureTree.properties.name')}</span>
             <DraftTextInput
               key={`tab-name-${selectedTab.id}-${selectedTab.name}`}
               value={selectedTab.name}
@@ -1048,7 +1070,7 @@ export function PropertiesPanel() {
             />
           </label>
           <label className="properties-field">
-            <span>Z Top</span>
+            <span>{t("featureTree.properties.zTop")}</span>
             <DraftNumberInput
               key={`tab-ztop-${selectedTab.id}-${selectedTab.z_top}`}
               value={selectedTab.z_top}
@@ -1059,7 +1081,7 @@ export function PropertiesPanel() {
             />
           </label>
           <label className="properties-field">
-            <span>Z Bottom</span>
+            <span>{t("featureTree.properties.zBottom")}</span>
             <DraftNumberInput
               key={`tab-zbottom-${selectedTab.id}-${selectedTab.z_bottom}`}
               value={selectedTab.z_bottom}
@@ -1075,15 +1097,15 @@ export function PropertiesPanel() {
               checked={selectedTab.visible}
               onChange={(event) => updateTab(selectedTab.id, { visible: event.target.checked })}
             />
-            <span>Visible</span>
+            <span>{t("featureTree.properties.visible")}</span>
           </label>
         </div>
         <div className="properties-actions">
           <button className="feat-btn" type="button" onClick={() => { enterTabEdit(selectedTab.id); closeExpanded() }}>
-            Edit Sketch
+            {t('featureTree.properties.stock.editSketch')}
           </button>
           <button className="feat-btn feat-btn--delete" type="button" onClick={() => { deleteTab(selectedTab.id); closeExpanded() }}>
-            Delete Tab
+            {t('featureTree.properties.actions.deleteTab')}
           </button>
         </div>
       </div>
@@ -1099,9 +1121,9 @@ export function PropertiesPanel() {
             if (!groupFolder) return null
             return (
               <div className="properties-group">
-                <span className="properties-section-title">Group</span>
+                <span className="properties-section-title">{t('featureTree.properties.multi.group')}</span>
                 <label className="properties-field">
-                  <span>Name</span>
+                  <span>{t('featureTree.properties.name')}</span>
                   <DraftTextInput
                     key={`group-name-${groupFolder.id}-${groupFolder.name}`}
                     value={groupFolder.name}
@@ -1110,10 +1132,10 @@ export function PropertiesPanel() {
                 </label>
                 <div className="properties-actions">
                   <button className="feat-btn" type="button" onClick={() => toggleFolderGrouped(groupFolder.id)}>
-                    Ungroup
+                    {t('featureTree.properties.multi.ungroup')}
                   </button>
                   <button className="feat-btn feat-btn--delete" type="button" onClick={() => { deleteFeatureFolder(groupFolder.id); closeExpanded() }}>
-                    Delete Group
+                    {t('featureTree.properties.multi.deleteGroup')}
                   </button>
                 </div>
               </div>
@@ -1121,63 +1143,85 @@ export function PropertiesPanel() {
           })() : null}
           <div className="properties-group">
             <label className="properties-field">
-              <span>Selection</span>
-              <DraftTextInput value={`${selectedFeatureIds.length} Features`} disabled />
+              <span>{t("featureTree.properties.selection")}</span>
+              <DraftTextInput value={t('featureTree.properties.multi.featuresCount', { count: selectedFeatureIds.length })} disabled />
             </label>
             <label className="properties-field">
-              <span>Edit Sketch</span>
-              <DraftTextInput value="Disabled for multi-select" disabled />
+              <span>{t("featureTree.properties.editSketch")}</span>
+              <DraftTextInput value={t('featureTree.properties.editSketchDisabledMulti')} disabled />
             </label>
             <label className="properties-field">
-              <span>Folder</span>
+              <span>{t("featureTree.properties.folder")}</span>
               {renderFolderSelect(commonSelectedFolderId, (folderId) => {
                 assignFeaturesToFolder(selectedFeatureIds, folderId)
               }, allSelectedInGroupedFolder)}
             </label>
             <label className="properties-field">
-              <span>Operation</span>
-              {allSelectedFeatures.every((f) => !f.sketch.profile.closed || f.operation === 'line') && allSelectedFeatures.length > 0 ? (
-                <div className="properties-locked-field" title="All selected features are open profiles (Line)">
-                  <span>Line</span>
+              <span>{t("featureTree.properties.operation")}</span>
+              {allSelectedFeatures.length > 0 && allSelectedFeatures.every((f) => !f.sketch.profile.closed) ? (
+                <div className="properties-locked-field" title={t('featureTree.properties.multi.editSketchDisabled')}>
+                  <span>{t('featureTree.properties.multi.openProfiles')}</span>
                   <span className="properties-locked-hint" aria-hidden="true">🔒</span>
                 </div>
               ) : allSelectedFeatures.some((f) => f.operation === 'model') ? (
-                <div className="properties-locked-field" title="Model entries cannot change operation type here">
-                  <span>Contains model features</span>
+                <div className="properties-locked-field" title={t('featureTree.properties.multi.modelLockedTooltip')}>
+                  <span>{t('featureTree.properties.multi.containsModel')}</span>
                   <span className="properties-locked-hint" aria-hidden="true">🔒</span>
                 </div>
               ) : (
                 <Select
                   value={commonSelectedOperation ?? ''}
                   options={[
-                    ...(commonSelectedOperation === '__mixed__' ? [{ value: '__mixed__', label: 'Mixed operations' }] : []),
-                    { value: 'subtract', label: 'Subtract' },
-                    { value: 'add', label: 'Add' },
-                    { value: 'region', label: 'Region' },
+                    ...(commonSelectedOperation === '__mixed__' ? [{ value: '__mixed__', label: t('featureTree.properties.select.mixedOperations') }] : []),
+                    { value: 'subtract', label: t('featureTree.properties.operation.subtract') },
+                    { value: 'add', label: t('featureTree.properties.operation.add') },
+                    { value: 'line', label: t('featureTree.properties.operation.line') },
+                    { value: 'region', label: t('featureTree.properties.operation.region') },
+                    { value: 'construction', label: t('featureTree.properties.operation.construction') },
                   ]}
                   onChange={(value) => updateFeatures(selectedFeatureIds, {
-                    operation: value as import('../../types/project').FeatureOperation,
+                    operation: value as FeatureOperation,
                   })}
                 />
               )}
             </label>
+            {selectedRegionFeatures.length > 0 && selectedRegionFeatures.length === allSelectedFeatures.length ? (
+              <label className="properties-field">
+                <span>{t("featureTree.properties.maskMode")}</span>
+                <Select
+                  value={commonSelectedRegionMaskMode}
+                  options={[
+                    ...(commonSelectedRegionMaskMode === '__mixed__' ? [{ value: '__mixed__', label: t('featureTree.properties.select.mixedModes') }] : []),
+                    { value: 'include', label: t('featureTree.properties.maskMode.include') },
+                    { value: 'exclude', label: t('featureTree.properties.maskMode.exclude') },
+                  ]}
+                  onChange={(value) => {
+                    if (value === '__mixed__') return
+                    updateFeatures(
+                      selectedRegionFeatures.map((feature) => feature.id),
+                      { regionMaskMode: value as RegionMaskMode },
+                    )
+                  }}
+                />
+              </label>
+            ) : null}
             {selectedZEditableFeatures.length > 0 ? (
               <>
                 <label className="properties-field">
-                  <span>Z Top</span>
+                  <span>{t("featureTree.properties.zTop")}</span>
                   <DraftNumberInput
                     key={`multi-feature-ztop-${selectedZEditableFeatureIds.join(',')}-${commonSelectedZTop ?? 'mixed'}-${commonSelectedZBottom ?? 'mixed'}`}
                     value={commonSelectedZTop}
                     units={units}
                     min={0}
-                    placeholder="Mixed values"
+                    placeholder={t('featureTree.properties.select.mixedValues')}
                     validate={(next) => multiEditMinZTop === null || next >= multiEditMinZTop}
                     onCommit={(next) => updateFeatures(selectedZEditableFeatureIds, { z_top: next })}
                   />
                 </label>
                 {hasOpenEditableFeatures && selectedClosedEditableFeatures.length === 0 ? (
                   <label className="properties-field">
-                    <span>Z Bottom</span>
+                    <span>{t("featureTree.properties.zBottom")}</span>
                     <DraftNumberInput
                       key={`multi-feature-zbottom-open-${selectedZEditableFeatureIds.join(',')}`}
                       value={0}
@@ -1189,26 +1233,26 @@ export function PropertiesPanel() {
                   </label>
                 ) : hasOpenEditableFeatures ? (
                   <label className="properties-field">
-                    <span>Z Bottom</span>
+                    <span>{t("featureTree.properties.zBottom")}</span>
                     <DraftNumberInput
                       key={`multi-feature-zbottom-mixed-${selectedZEditableFeatureIds.join(',')}-${commonSelectedZBottom ?? 'mixed'}`}
                       value={commonSelectedZBottom}
                       units={units}
                       min={0}
-                      placeholder="Mixed values"
+                      placeholder={t('featureTree.properties.select.mixedValues')}
                       validate={(next) => multiEditMaxZBottom === null || next <= multiEditMaxZBottom}
                       onCommit={(next) => updateFeatures(selectedClosedEditableFeatures.map((f) => f.id), { z_bottom: next })}
                     />
                   </label>
                 ) : (
                   <label className="properties-field">
-                    <span>Z Bottom</span>
+                    <span>{t("featureTree.properties.zBottom")}</span>
                     <DraftNumberInput
                       key={`multi-feature-zbottom-${selectedZEditableFeatureIds.join(',')}-${commonSelectedZTop ?? 'mixed'}-${commonSelectedZBottom ?? 'mixed'}`}
                       value={commonSelectedZBottom}
                       units={units}
                       min={0}
-                      placeholder="Mixed values"
+                      placeholder={t('featureTree.properties.select.mixedValues')}
                       validate={(next) => multiEditMaxZBottom === null || next <= multiEditMaxZBottom}
                       onCommit={(next) => updateFeatures(selectedZEditableFeatureIds, { z_bottom: next })}
                     />
@@ -1217,20 +1261,20 @@ export function PropertiesPanel() {
               </>
             ) : (
               <label className="properties-field">
-                <span>Z Range</span>
-                <div className="properties-locked-field" title="Regions are vertical filters through the stock; their Z range follows the stock automatically">
-                  <span>Follows stock ({formatLength(project.stock.thickness, units)} to 0)</span>
+                <span>{t("featureTree.properties.zRange")}</span>
+                <div className="properties-locked-field" title={t('featureTree.properties.z.followsStockTooltip')}>
+                  <span>{t('featureTree.properties.z.followsStock', { thickness: formatLength(project.stock.thickness, units) })}</span>
                   <span className="properties-locked-hint" aria-hidden="true">🔒</span>
                 </div>
               </label>
             )}
           </div>
           <div className="properties-actions">
-            <button className="feat-btn" type="button" disabled title="Edit Sketch is only available for a single feature">
-              Edit Sketch
+            <button className="feat-btn" type="button" disabled title={t('featureTree.properties.multi.editSketchDisabled')}>
+              {t('featureTree.properties.stock.editSketch')}
             </button>
             <button className="feat-btn feat-btn--delete" type="button" onClick={() => { deleteFeatures(selectedFeatureIds); closeExpanded() }}>
-              Delete Selected
+              {t('featureTree.properties.deleteSelected')}
             </button>
           </div>
         </div>
@@ -1239,7 +1283,7 @@ export function PropertiesPanel() {
 
     return (
       <div className="panel-empty">
-        Select Project, Grid, Stock, or a feature in the tree to edit its properties.
+        {t('featureTree.properties.empty')}
       </div>
     )
   }
@@ -1252,12 +1296,14 @@ export function PropertiesPanel() {
   const exceedsStock = isTextFeature ? false : profileExceedsStock(selectedFeature.sketch.profile, project.stock)
   const textFontOptions = textFeature ? getTextFontOptions(textFeature.style) : []
 
-  // First 2.5D feature in the tree must be 'add'; imported STL models are locked as Model.
-  const firstMachiningFeature = project.features.find((feature) => feature.operation !== 'region') ?? null
+  // First SOLID feature in the tree must be 'add' (lines/regions/construction
+  // don't count as base solids); imported STL models are locked as Model.
+  // The first Add can be converted to a non-solid role (Line, Region,
+  // Construction); only Subtract is disabled on that row.
+  const firstSolidFeature = features.find(isSolid) ?? null
   const isFirstFeature =
-    firstMachiningFeature?.id === selectedFeature.id
-  const isImportedModelFeature = selectedFeature.kind === 'stl' && selectedFeature.operation === 'model'
-  const operationLockedToAdd = isFirstFeature && !isImportedModelFeature
+    firstSolidFeature?.id === selectedFeature.id
+  const subtractDisabled = isFirstFeature && selectedFeature.operation === 'add'
 
   const selectedDefId = getDefinitionId(selectedFeature)
   const linkedInstanceCount = getInstanceIdsForDefinition(project, selectedDefId).length
@@ -1267,43 +1313,77 @@ export function PropertiesPanel() {
     <div className="properties-panel">
       <div className="properties-group">
         <DisclosureSection
-          title={hasLinkedInstances ? `Shape (shared with ${linkedInstanceCount} instances)` : 'Shape'}
+          title={hasLinkedInstances ? t(linkedInstanceCount === 1 ? 'featureTree.properties.shapeShared.one' : 'featureTree.properties.shapeShared.other', { count: linkedInstanceCount }) : t('featureTree.properties.shape')}
           storageKey="feature-shape"
         >
           <label className="properties-field">
-            <span>Operation</span>
-            {!selectedFeature.sketch.profile.closed || selectedFeature.operation === 'line' ? (
-              <div className="properties-locked-field" title="Line features are open profiles and cannot change operation type">
-                <span>Line</span>
-                <span className="properties-locked-hint" aria-hidden="true">🔒</span>
-              </div>
-            ) : operationLockedToAdd || selectedFeature.operation === 'model' ? (
-              <div className="properties-locked-field" title={
-                selectedFeature.operation === 'model'
-                  ? 'Model features are imported 3D objects and cannot change operation type'
-                  : 'The first 2.5D feature must be Add — it defines the base solid of the part model'
-              }>
-                <span>{selectedFeature.operation === 'model' ? 'Model' : 'Add'}</span>
-                <span className="properties-locked-hint" aria-hidden="true">🔒</span>
-              </div>
-            ) : (
+            <span>{t("featureTree.properties.operation")}</span>
+            {!selectedFeature.sketch.profile.closed ? (
+              // Open profiles convert between Line (engraved path) and
+              // Construction (sketch reference) only — mirrors the tree menu.
               <Select
-                value={selectedFeature.operation}
+                value={selectedFeature.operation === 'construction' ? 'construction' : 'line'}
                 options={[
-                  { value: 'subtract', label: 'Subtract' },
-                  { value: 'add', label: 'Add' },
-                  { value: 'region', label: 'Region' },
+                  { value: 'line', label: t('featureTree.properties.operation.line') },
+                  { value: 'construction', label: t('featureTree.properties.operation.construction') },
                 ]}
                 onChange={(value) => updateFeature(selectedFeature.id, {
                   operation: value as import('../../types/project').FeatureOperation,
                 })}
               />
+            ) : selectedFeature.operation === 'model' ? (
+              <div className="properties-locked-field" title={t('featureTree.properties.operation.modelLockedTooltip')}>
+                <span>{t('featureTree.properties.operation.model')}</span>
+                <span className="properties-locked-hint" aria-hidden="true">🔒</span>
+              </div>
+            ) : subtractDisabled ? (
+              <Select
+                value={selectedFeature.operation}
+                options={[
+                  { value: 'add', label: t('featureTree.properties.operation.add') },
+                  { value: 'line', label: t('featureTree.properties.operation.line') },
+                  { value: 'region', label: t('featureTree.properties.operation.region') },
+                  { value: 'construction', label: t('featureTree.properties.operation.construction') },
+                ]}
+                onChange={(value) => updateFeature(selectedFeature.id, {
+                  operation: value as FeatureOperation,
+                })}
+              />
+            ) : (
+              <Select
+                value={selectedFeature.operation}
+                options={[
+                  { value: 'subtract', label: t('featureTree.properties.operation.subtract') },
+                  { value: 'add', label: t('featureTree.properties.operation.add') },
+                  { value: 'line', label: t('featureTree.properties.operation.line') },
+                  { value: 'region', label: t('featureTree.properties.operation.region') },
+                  { value: 'construction', label: t('featureTree.properties.operation.construction') },
+                ]}
+                onChange={(value) => updateFeature(selectedFeature.id, {
+                  operation: value as FeatureOperation,
+                })}
+              />
             )}
           </label>
+          {selectedFeature.operation === 'region' ? (
+            <label className="properties-field">
+              <span>{t("featureTree.properties.maskMode")}</span>
+              <Select
+                value={selectedFeature.regionMaskMode ?? 'include'}
+                options={[
+                  { value: 'include', label: t('featureTree.properties.maskMode.include') },
+                  { value: 'exclude', label: t('featureTree.properties.maskMode.exclude') },
+                ]}
+                onChange={(value) => updateFeature(selectedFeature.id, {
+                  regionMaskMode: value as RegionMaskMode,
+                })}
+              />
+            </label>
+          ) : null}
           {textFeature ? (
             <>
               <label className="properties-field">
-                <span>Text</span>
+                <span>{t("featureTree.properties.text")}</span>
                 <DraftTextInput
                   key={`text-feature-text-${selectedFeature.id}-${textFeature.text}`}
                   value={textFeature.text}
@@ -1317,12 +1397,12 @@ export function PropertiesPanel() {
                 />
               </label>
               <label className="properties-field">
-                <span>Style</span>
+                <span>{t("featureTree.properties.style")}</span>
                 <Select
                   value={textFeature.style}
                   options={[
-                    { value: 'skeleton', label: 'Skeleton' },
-                    { value: 'outline', label: 'Outline' },
+                    { value: 'skeleton', label: t('featureTree.properties.text.skeleton') },
+                    { value: 'outline', label: t('featureTree.properties.text.outline') },
                   ]}
                   onChange={(style) => updateFeature(selectedFeature.id, {
                     text: {
@@ -1334,7 +1414,7 @@ export function PropertiesPanel() {
                 />
               </label>
               <label className="properties-field">
-                <span>Font</span>
+                <span>{t("featureTree.properties.font")}</span>
                 <Select
                   value={textFeature.fontId}
                   options={textFontOptions.map((font) => ({ value: font.id, label: font.label }))}
@@ -1355,14 +1435,20 @@ export function PropertiesPanel() {
                   closeExpanded()
                 }}
               >
-                Expand Text to Features
+                {t('featureTree.properties.expandText')}
               </button>
             </div>
           ) : null}
           {selectedFeature.operation === 'region' ? (
             <div className="properties-region-note">
-              <span className="properties-region-note__badge">mask</span>
-              <span>A region is a filter: it limits where operations may cut, not a shape to machine.</span>
+              <span className="properties-region-note__badge">{t('featureTree.properties.regionNote.badge')}</span>
+              <span>{t('featureTree.properties.regionNote.text')}</span>
+            </div>
+          ) : null}
+          {selectedFeature.operation === 'construction' ? (
+            <div className="properties-construction-note">
+              <span className="properties-construction-note__badge">{t('featureTree.properties.constructionNote.badge')}</span>
+              <span>{t('featureTree.properties.constructionNote.text')}</span>
             </div>
           ) : null}
           {hasLinkedInstances ? (
@@ -1372,14 +1458,14 @@ export function PropertiesPanel() {
                 type="button"
                 onClick={() => { makeUnique(selectedFeature.id); closeExpanded() }}
               >
-                Make Unique
+                {t('featureTree.properties.makeUnique')}
               </button>
             </div>
           ) : null}
         </DisclosureSection>
-        <DisclosureSection title="Instance" storageKey="feature-instance">
+        <DisclosureSection title={t('featureTree.properties.instance')} storageKey="feature-instance">
           <label className="properties-field">
-            <span>Name</span>
+            <span>{t('featureTree.properties.name')}</span>
             <DraftTextInput
               key={`feature-name-${selectedFeature.id}-${selectedFeature.name}`}
               value={selectedFeature.name}
@@ -1389,17 +1475,27 @@ export function PropertiesPanel() {
           {selectedFeature.operation === 'region' ? (
             <>
               <label className="properties-field">
-                <span>Z Range</span>
-                <div className="properties-locked-field" title="Regions are vertical filters through the stock; their Z range follows the stock automatically">
-                  <span>Follows stock ({formatLength(project.stock.thickness, units)} to 0)</span>
+                <span>{t("featureTree.properties.zRange")}</span>
+                <div className="properties-locked-field" title={t('featureTree.properties.z.followsStockTooltip')}>
+                  <span>{t('featureTree.properties.z.followsStock', { thickness: formatLength(project.stock.thickness, units) })}</span>
                   <span className="properties-locked-hint" aria-hidden="true">🔒</span>
                 </div>
               </label>
             </>
-          ) : !selectedFeature.sketch.profile.closed ? (
+          ) : selectedFeature.operation === 'construction' ? (
             <>
               <label className="properties-field">
-                <span>Z Top</span>
+                <span>{t("featureTree.properties.zRange")}</span>
+                <div className="properties-locked-field" title={t('featureTree.properties.z.notMachinedTooltip')}>
+                  <span>{t('featureTree.properties.z.notMachined')}</span>
+                  <span className="properties-locked-hint" aria-hidden="true">🔒</span>
+                </div>
+              </label>
+            </>
+          ) : !selectedFeature.sketch.profile.closed || selectedFeature.operation === 'line' ? (
+            <>
+              <label className="properties-field">
+                <span>{t("featureTree.properties.zTop")}</span>
                 <DraftNumberInput
                   key={`feature-ztop-${selectedFeature.id}-${zTop}`}
                     value={zTop}
@@ -1409,7 +1505,7 @@ export function PropertiesPanel() {
                 />
               </label>
               <label className="properties-field">
-                <span>Z Bottom</span>
+                <span>{t("featureTree.properties.zBottom")}</span>
                 <DraftNumberInput
                   key={`feature-zbottom-open-${selectedFeature.id}`}
                     value={0}
@@ -1433,7 +1529,7 @@ export function PropertiesPanel() {
           ) : (
             <>
               <label className="properties-field">
-                <span>Z Top</span>
+                <span>{t("featureTree.properties.zTop")}</span>
                 <DraftNumberInput
                   key={`feature-ztop-${selectedFeature.id}-${zTop}-${zBottom}`}
                     value={zTop}
@@ -1444,7 +1540,7 @@ export function PropertiesPanel() {
                 />
               </label>
               <label className="properties-field">
-                <span>Z Bottom</span>
+                <span>{t("featureTree.properties.zBottom")}</span>
                 <DraftNumberInput
                   key={`feature-zbottom-${selectedFeature.id}-${zTop}-${zBottom}`}
                     value={zBottom}
@@ -1457,10 +1553,10 @@ export function PropertiesPanel() {
             </>
           )}
           <label className="properties-field">
-            <span>Folder</span>
+            <span>{t("featureTree.properties.folder")}</span>
             {renderFolderSelect(selectedFeature.folderId, (folderId) => {
               assignFeaturesToFolder([selectedFeature.id], folderId)
-            }, project.featureFolders.find((f) => f.id === selectedFeature.folderId)?.grouped === true)}
+            }, project.featureFolders.find((f) => f.id === selectedFeature.folderId)?.grouped === true, sectionForOperation(selectedFeature.operation))}
           </label>
           <label className="properties-check">
             <input
@@ -1468,7 +1564,7 @@ export function PropertiesPanel() {
               checked={selectedFeature.visible}
               onChange={(event) => updateFeature(selectedFeature.id, { visible: event.target.checked })}
             />
-            <span>Visible</span>
+            <span>{t("featureTree.properties.visible")}</span>
           </label>
           <label className="properties-check">
             <input
@@ -1476,63 +1572,63 @@ export function PropertiesPanel() {
               checked={selectedFeature.locked}
               onChange={(event) => updateFeature(selectedFeature.id, { locked: event.target.checked })}
             />
-            <span>Locked</span>
+            <span>{t("featureTree.properties.locked")}</span>
           </label>
         </DisclosureSection>
         {hasSelfIntersection ? (
           <div className="properties-warning">
-            This profile self-intersects. 3D/CAM results may be invalid.
+            {t('featureTree.properties.warning.selfIntersect')}
           </div>
         ) : null}
         {exceedsStock ? (
           <div className="properties-warning">
-            This profile extends outside the stock boundary.
+            {t('featureTree.properties.warning.exceedsStock')}
           </div>
         ) : null}
       </div>
       <div className="properties-actions">
         <button className="feat-btn" type="button" onClick={() => { enterSketchEdit(selectedFeature.id); closeExpanded() }} disabled={isTextFeature}>
-          Edit Sketch
+          {t('featureTree.properties.stock.editSketch')}
         </button>
         <button className="feat-btn feat-btn--delete" type="button" onClick={() => { deleteFeature(selectedFeature.id); closeExpanded() }}>
-          Delete Feature
+          {t('featureTree.properties.deleteFeature')}
         </button>
       </div>
       {selectedFeature.sketch.constraints.filter((c) => c.type === 'fixed_distance').length > 0 ? (
         <div className="properties-group">
-          <span className="properties-section-title">Constraints</span>
+          <span className="properties-section-title">{t('featureTree.properties.constraints.title')}</span>
           {selectedFeature.sketch.constraints
             .filter((c) => c.type === 'fixed_distance')
             .map((c) => {
               const refId = c.reference_feature_id ?? c.segment_ids[0]
-              const refFeature = refId ? project.features.find((f) => f.id === refId) : null
+              const refFeature = refId ? features.find((f) => f.id === refId) : null
               const label = typeof c.value === 'number' ? formatLength(c.value, units) : '—'
-              const refName = refFeature?.name ?? (refId ? `#${refId}` : 'World')
+              const refName = refFeature?.name ?? (refId ? `#${refId}` : t('featureTree.properties.constraints.world'))
               const isIntersectionConstraint = c.reference_type === 'intersection' || c.reference_snap_mode === 'intersection'
               const typeLabel = isIntersectionConstraint
-                ? 'intersect'
+                ? t('featureTree.properties.constraints.type.intersect')
                 : c.reference_type === 'segment'
-                  ? 'perp'
+                  ? t('featureTree.properties.constraints.type.perp')
                   : c.reference_type === 'point_on_segment'
-                    ? 'line'
+                    ? t('featureTree.properties.constraints.type.line')
                     : c.reference_type === 'midpoint'
-                      ? 'midpt'
+                      ? t('featureTree.properties.constraints.type.midpt')
                       : c.reference_index === -1
-                        ? 'center'
-                        : 'point'
+                        ? t('featureTree.properties.constraints.type.center')
+                        : t('featureTree.properties.constraints.type.point')
               const tooltipText = c.is_invalid
-                ? (c.error_message ?? 'Invalid')
+                ? (c.error_message ?? t('featureTree.properties.constraints.tooltip.invalid'))
                 : isIntersectionConstraint
-                  ? 'Distance to intersection'
+                  ? t('featureTree.properties.constraints.tooltip.distanceIntersection')
                   : c.reference_type === 'segment'
-                    ? 'Perpendicular distance to segment'
+                    ? t('featureTree.properties.constraints.tooltip.perpendicularSegment')
                     : c.reference_type === 'point_on_segment'
-                      ? `Distance to point on segment (${Math.round((c.reference_t ?? 0) * 100)}%)`
+                      ? t('featureTree.properties.constraints.tooltip.pointOnSegment', { percent: Math.round((c.reference_t ?? 0) * 100) })
                       : c.reference_type === 'midpoint'
-                        ? 'Distance to segment midpoint'
+                        ? t('featureTree.properties.constraints.tooltip.segmentMidpoint')
                         : c.reference_index === -1
-                          ? 'Distance to feature center'
-                          : 'Distance to vertex'
+                          ? t('featureTree.properties.constraints.tooltip.featureCenter')
+                          : t('featureTree.properties.constraints.tooltip.distanceVertex')
               return (
                 <div key={c.id} className={`properties-constraint-row${c.is_invalid ? ' properties-constraint-row--invalid' : ''}`}>
                   <span className="properties-constraint-type" title={tooltipText}>{typeLabel}</span>
@@ -1543,8 +1639,8 @@ export function PropertiesPanel() {
                     type="button"
                     className="tree-action-btn properties-constraint-delete"
                     onClick={() => { deleteConstraint(selectedFeature.id, c.id); closeExpanded() }}
-                    title="Delete constraint"
-                    aria-label="Delete constraint"
+                    title={t('featureTree.properties.constraints.delete')}
+                    aria-label={t('featureTree.properties.constraints.delete')}
                   >
                     ×
                   </button>

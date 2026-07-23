@@ -37,6 +37,16 @@
   }
 }
 
+[data-shell-mode="tablet"] .appearance-control__trigger,
+[data-shell-mode="tablet-compact"] .appearance-control__trigger,
+[data-shell-mode="tablet"] .language-control__trigger,
+[data-shell-mode="tablet-compact"] .language-control__trigger {
+  width: var(--touch-target, 44px);
+  height: var(--touch-target, 44px);
+  min-width: var(--touch-target, 44px);
+  min-height: var(--touch-target, 44px);
+}
+
 /* ── Tablet layout: right panel becomes a slide-in drawer ─── */
 
 @media (pointer: coarse), (max-width: 960px) {
@@ -52,7 +62,7 @@
     flex-direction: column;
     background: var(--bg-elev-1);
     border-left: 1px solid var(--line);
-    box-shadow: -8px 0 32px rgba(0, 0, 0, 0.45);
+    box-shadow: -8px 0 32px var(--shadow-strong);
     transform: translateX(100%);
     transition: transform 0.22s ease;
     /* Override the grid-area assignment from the narrow desktop breakpoint */
@@ -70,7 +80,7 @@
     position: fixed;
     inset: 0;
     z-index: 49;
-    background: rgba(0, 0, 0, 0.45);
+    background: var(--shadow-strong);
   }
 
   /* The main body no longer needs to reserve a column for the right panel */
@@ -282,7 +292,7 @@
   flex-direction: column;
   background: var(--bg-elev-1);
   border-left: 1px solid var(--line);
-  box-shadow: -8px 0 32px rgba(0, 0, 0, 0.45);
+  box-shadow: -8px 0 32px var(--shadow-strong);
   transform: translateX(100%);
   transition: transform 0.22s ease;
   pointer-events: none;
@@ -378,8 +388,8 @@
   font-size: 10px;
   padding: 2px 6px;
   border-radius: 4px;
-  background: rgba(255, 165, 0, 0.2);
-  color: orange;
+  background: color-mix(in srgb, var(--warning-text) 20%, transparent);
+  color: var(--warning-text);
   font-family: monospace;
   margin-left: auto;
 }
@@ -400,7 +410,7 @@
   gap: 6px;
   padding: 6px;
   border-radius: 10px;
-  background: rgba(16, 24, 33, 0.88);
+  background: var(--surface-raised);
   border: 1px solid var(--line);
   backdrop-filter: blur(8px);
   pointer-events: auto;
@@ -428,25 +438,32 @@
 }
 
 .tablet-cmd-btn:active {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--surface-sheen-strong);
 }
 
 .tablet-cmd-btn--active {
-  background: rgba(220, 165, 106, 0.18);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
   border-color: var(--accent);
   color: var(--accent-strong);
 }
 
 .tablet-cmd-btn--confirm {
-  background: rgba(60, 180, 60, 0.15);
-  border-color: rgba(60, 180, 60, 0.4);
-  color: #7ddf7d;
+  background: color-mix(in oklab, var(--add) 18%, var(--surface-raised));
+  border-color: color-mix(in oklab, var(--add) 72%, var(--line-strong));
+  color: var(--add);
+  font-weight: 650;
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--add) 12%, transparent);
+}
+
+.tablet-cmd-btn--confirm:hover {
+  background: color-mix(in oklab, var(--add) 24%, var(--surface-raised));
+  border-color: var(--add);
 }
 
 .tablet-cmd-btn--cancel {
-  background: rgba(220, 60, 60, 0.12);
-  border-color: rgba(220, 60, 60, 0.35);
-  color: #df8080;
+  background: color-mix(in srgb, var(--danger-text) 12%, transparent);
+  border-color: color-mix(in srgb, var(--danger-text) 35%, transparent);
+  color: var(--danger-text);
 }
 
 .tablet-cmd-btn:disabled {
@@ -500,7 +517,7 @@
 }
 
 .top-command-bar__name:hover {
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--surface-hover);
 }
 
 .top-command-bar__save-state {
@@ -538,7 +555,7 @@
 }
 
 .top-cmd-group--tabs {
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--surface-sheen);
   border-radius: 8px;
   padding: 2px;
 }
@@ -557,7 +574,7 @@
 }
 
 .top-cmd-btn:hover {
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--surface-hover);
   color: var(--text);
 }
 
@@ -567,7 +584,7 @@
 }
 
 .top-cmd-btn--active {
-  background: rgba(220, 165, 106, 0.25);
+  background: color-mix(in srgb, var(--accent) 25%, transparent);
   color: var(--accent-strong);
   box-shadow: inset 0 0 0 1.5px var(--accent);
 }
@@ -588,6 +605,40 @@
 .top-cmd-btn .icon-sprite {
   width: 20px;
   height: 20px;
+}
+
+/* On the narrowest tablet widths, compact the command bar instead of
+   dropping buttons — a touch-only tablet has no Cmd/Ctrl+P or desktop menu,
+   so every command (incl. Print Design) must stay reachable. Buttons keep
+   their touch-target size (`.app-shell button` min-width); the tightened
+   gaps make the bar fit at 1024px, and the center section becomes
+   swipe-scrollable ("safe center" keeps the left edge reachable) as a
+   no-overlap safety net when 44px coarse-pointer targets overflow it. */
+@media (max-width: 1080px) {
+  .top-command-bar {
+    gap: 6px;
+  }
+
+  .top-command-bar__center {
+    gap: 6px;
+    justify-content: flex-start;
+    justify-content: safe center;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .top-command-bar__center::-webkit-scrollbar {
+    display: none;
+  }
+
+  .top-cmd-btn--operations {
+    width: auto;
+    padding: 0 8px;
+  }
+
+  .top-command-bar__name {
+    max-width: 90px;
+  }
 }
 
 .top-cmd-tab {
@@ -611,9 +662,9 @@
 }
 
 .top-cmd-tab--active {
-  background: rgba(255, 255, 255, 0.14);
+  background: var(--surface-sheen-strong);
   color: var(--text);
-  box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, 0.25);
+  box-shadow: inset 0 0 0 1.5px var(--surface-sheen-strong);
 }
 
 /* ── Tool Rail (tablet) ────────────────────────────────── */
@@ -640,7 +691,7 @@
   align-items: center;
   gap: 2px;
   padding-bottom: 4px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid var(--surface-hover);
   width: 100%;
 }
 
@@ -670,12 +721,12 @@
 }
 
 .tool-rail__btn:hover {
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--surface-hover);
   color: var(--text);
 }
 
 .tool-rail__btn--active {
-  background: rgba(220, 165, 106, 0.28);
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
   color: var(--accent-strong);
   box-shadow: inset 0 0 0 1.5px var(--accent);
 }
@@ -722,7 +773,7 @@
   gap: 2px;
   padding: 2px;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--surface-sheen);
 }
 
 .tool-rail__target-btn {
@@ -739,15 +790,27 @@
 }
 
 .tool-rail__target-btn--active {
-  background: rgba(255, 255, 255, 0.14);
+  background: var(--surface-sheen-strong);
   color: var(--text);
-  box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, 0.3);
+  box-shadow: inset 0 0 0 1.5px var(--surface-sheen-strong);
+}
+
+.tool-rail__target-btn--line.tool-rail__target-btn--active {
+  background: color-mix(in srgb, var(--role-line) 20%, transparent);
+  color: var(--role-line-text);
+  box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--role-line) 40%, transparent);
 }
 
 .tool-rail__target-btn--region.tool-rail__target-btn--active {
-  background: rgba(100, 180, 255, 0.2);
-  color: #7ec4ff;
-  box-shadow: inset 0 0 0 1.5px rgba(100, 180, 255, 0.4);
+  background: color-mix(in srgb, var(--role-region) 20%, transparent);
+  color: var(--role-region-text);
+  box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--role-region) 40%, transparent);
+}
+
+.tool-rail__target-btn--construction.tool-rail__target-btn--active {
+  background: color-mix(in srgb, var(--role-construction) 20%, transparent);
+  color: var(--role-construction-text);
+  box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--role-construction) 40%, transparent);
 }
 
 .tool-rail__target-btn .icon-sprite {
@@ -767,7 +830,7 @@
   border-radius: 8px;
   background: var(--bg-elev-2);
   border: 1px solid var(--line);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 8px 24px var(--shadow-strong);
   z-index: 100;
 }
 
@@ -794,12 +857,12 @@
 }
 
 .tool-rail__popover button:hover {
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--surface-hover);
   color: var(--text);
 }
 
 .tool-rail__popover button.tool-rail__popover-btn--active {
-  background: rgba(220, 165, 106, 0.22);
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
   color: var(--accent-strong);
   box-shadow: inset 0 0 0 1.5px var(--accent);
 }
@@ -827,7 +890,7 @@
   padding: 0 3px;
   border-radius: 7px;
   background: var(--accent);
-  color: #1a1a1a;
+  color: var(--on-accent);
   font-size: 9px;
   font-weight: 700;
   line-height: 14px;
@@ -844,7 +907,7 @@
   border-radius: 10px;
   background: var(--bg-elev-2);
   border: 1px solid var(--line);
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 8px 28px var(--shadow-strong);
   z-index: 100;
   min-width: 180px;
 }
@@ -872,9 +935,9 @@
 }
 
 .snap-popover-enable-btn--active {
-  background: rgba(60, 180, 60, 0.12);
-  border-color: rgba(60, 180, 60, 0.4);
-  color: #7ddf7d;
+  background: color-mix(in oklab, var(--add) 14%, var(--surface-raised));
+  border-color: color-mix(in oklab, var(--add) 62%, var(--line-strong));
+  color: var(--add);
 }
 
 .snap-popover-grid {
@@ -900,13 +963,13 @@
 }
 
 .snap-popover-item:hover {
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--surface-hover);
   color: var(--text);
 }
 
 .snap-popover-item--active,
 .snap-popover-item--active:hover {
-  background: rgba(220, 165, 106, 0.18);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
   color: var(--accent-strong);
 }
 
@@ -941,7 +1004,7 @@
   flex-direction: column;
   background: var(--bg-elev-1);
   border-right: 1px solid var(--line);
-  box-shadow: 8px 0 32px rgba(0, 0, 0, 0.45);
+  box-shadow: 8px 0 32px var(--shadow-strong);
   transform: translateX(-100%);
   transition: transform 0.22s ease;
   pointer-events: none;
@@ -1068,8 +1131,40 @@
   font-size: 11px;
 }
 
-.app-statusbar--tablet-expanded {
+[data-shell-mode="tablet"] .app-statusbar--tablet-expanded,
+[data-shell-mode="tablet-compact"] .app-statusbar--tablet-expanded {
+  position: relative;
+  z-index: 6;
+  height: max-content;
+  min-height: var(--touch-target, 44px);
+  max-height: none;
+  align-content: flex-start;
   flex-wrap: wrap;
+  overflow: visible;
+  white-space: normal;
+}
+
+[data-shell-mode="tablet"] .app-statusbar--tablet-expanded .statusbar-visibility,
+[data-shell-mode="tablet-compact"] .app-statusbar--tablet-expanded .statusbar-visibility {
+  flex: 1 1 100%;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+[data-shell-mode="tablet"] .app-statusbar--tablet-expanded .statusbar-toggle,
+[data-shell-mode="tablet-compact"] .app-statusbar--tablet-expanded .statusbar-toggle {
+  height: var(--touch-target, 44px);
+  min-height: var(--touch-target, 44px);
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+[data-shell-mode="tablet"] .app-statusbar--tablet-expanded .statusbar-units,
+[data-shell-mode="tablet-compact"] .app-statusbar--tablet-expanded .statusbar-units {
+  height: var(--touch-target, 44px);
+  min-height: var(--touch-target, 44px);
+  padding: 0 10px;
+  font-size: 12px;
 }
 
 .app-statusbar--tablet-compact .statusbar-expand-btn,
@@ -1082,14 +1177,14 @@
   border: none;
   border-radius: 4px;
   background: transparent;
-  color: var(--text-dim);
+  color: var(--status-text);
   cursor: pointer;
   font-size: 10px;
   flex-shrink: 0;
 }
 
 .statusbar-expand-btn:active {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--surface-sheen-strong);
 }
 
 .statusbar-visibility--hidden {
@@ -1115,7 +1210,7 @@
   height: 22px;
   padding: 0 6px;
   border-radius: 11px;
-  background: rgba(220, 165, 106, 0.2);
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
   color: var(--accent-strong);
   font-size: 11px;
   font-weight: 700;
@@ -1168,7 +1263,7 @@
   .dialog {
     max-width: min(560px, 92vw);
     max-height: 88vh;
-    overflow-y: auto;
+    overflow: hidden;
   }
 
   /* Machine editor needs room for its two-column layout (form + JSON/help). */
@@ -1237,7 +1332,7 @@
     position: fixed;
     inset: 0;
     z-index: 99999;
-    background: #0b1219;
+    background: var(--surface-subtle);
     color: var(--text-dim);
     font-size: 18px;
     text-align: center;

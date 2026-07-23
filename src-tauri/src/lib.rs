@@ -1,4 +1,5 @@
 use std::sync::atomic::{AtomicBool, Ordering};
+use tauri_plugin_window_state::{AppHandleExt, StateFlags};
 
 #[derive(Default)]
 struct ExitCoordinator {
@@ -32,6 +33,7 @@ fn set_update_channel(channel: String, items: tauri::State<ChannelMenuItems>) {
 fn request_app_exit(app: tauri::AppHandle, exit_coordinator: tauri::State<ExitCoordinator>) {
   exit_coordinator.exit_request_pending.store(false, Ordering::SeqCst);
   exit_coordinator.exit_confirmed.store(true, Ordering::SeqCst);
+  let _ = app.save_window_state(StateFlags::all());
   app.exit(0);
 }
 
@@ -64,6 +66,7 @@ pub fn run() {
       let save_i       = MenuItem::with_id(app, "save",        "Save",             true, Some("CmdOrCtrl+S"))?;
       let save_as_i    = MenuItem::with_id(app, "save_as",     "Save As\u{2026}",  true, Some("CmdOrCtrl+Shift+S"))?;
       let export_i     = MenuItem::with_id(app, "export_gcode","Export G-code\u{2026}", true, Some("CmdOrCtrl+E"))?;
+      let print_i      = MenuItem::with_id(app, "print_design","Print Design\u{2026}", true, Some("CmdOrCtrl+P"))?;
       let undo_i       = MenuItem::with_id(app, "undo",        "Undo",             true, Some("CmdOrCtrl+Z"))?;
       let redo_i       = MenuItem::with_id(app, "redo",        "Redo",             true, Some("CmdOrCtrl+Shift+Z"))?;
       let copy_i       = MenuItem::with_id(app, "copy",        "Copy",             true, Some("CmdOrCtrl+C"))?;
@@ -118,6 +121,8 @@ pub fn run() {
         &save_as_i,
         &PredefinedMenuItem::separator(app)?,
         &export_i,
+        &PredefinedMenuItem::separator(app)?,
+        &print_i,
       ])?;
 
       let edit_menu = Submenu::with_id_and_items(app, "edit", "Edit", true, &[
@@ -156,6 +161,7 @@ pub fn run() {
     .plugin(tauri_plugin_dialog::init())
     .plugin(tauri_plugin_fs::init())
     .plugin(tauri_plugin_opener::init())
+    .plugin(tauri_plugin_window_state::Builder::default().build())
     .build(tauri::generate_context!())
     .expect("error while building tauri application");
 

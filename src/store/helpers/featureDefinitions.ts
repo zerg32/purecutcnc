@@ -15,8 +15,8 @@
  */
 
 /**
- * Feature Definition Helpers — definition mutation, instance re-bake,
- * definition clone, and Make Unique logic for the feature references
+ * Feature Definition Helpers — definition/instance creation, operation
+ * propagation, definition clone, and Make Unique logic for feature references
  * definition/instance split.
  *
  * Reuses resolution helpers from {@link resolveFeatures.ts} rather than
@@ -25,37 +25,29 @@
 
 import type {
   FeatureDefinition,
+  FeatureInstance,
   FeatureKind,
   FeatureOperation,
   LocalDimension,
   Matrix2D,
   Point,
   Project,
+  RegionMaskMode,
   SketchFeature,
   SketchProfile,
 } from '../../types/project'
-import { IDENTITY_MATRIX, inferFeatureKind } from '../../types/project'
+import { IDENTITY_MATRIX } from '../../types/project'
 import { nextUniqueGeneratedId } from './ids'
-import { resolveProfile } from './resolveFeatures'
 
 // ============================================================================
 // Definition ID resolution
 // ============================================================================
 
 /**
- * Determine the definition ID for a feature row.
- *
- * - Explicit `definitionId` takes precedence.
- * - Transitional rows without an explicit `definitionId` fall back to
- *   `feature.id` (the slice 01 migration creates one definition per legacy
- *   feature under the feature ID).
+ * Determine the definition ID for an authoritative feature instance.
  */
-export function getDefinitionId(feature: SketchFeature): string {
-  const withRefs = feature as SketchFeature & {
-    definitionId?: string
-    transform?: Matrix2D
-  }
-  return withRefs.definitionId ?? feature.id
+export function getDefinitionId(feature: Pick<FeatureInstance, 'definitionId'>): string {
+  return feature.definitionId
 }
 
 // ============================================================================
@@ -63,9 +55,7 @@ export function getDefinitionId(feature: SketchFeature): string {
 // ============================================================================
 
 /**
- * Return the IDs of every feature row in `project.features` that references
- * `definitionId` (either via explicit `definitionId` or transitional fallback
- * to `feature.id`).
+ * Return the IDs of every feature instance that references `definitionId`.
  */
 export function getInstanceIdsForDefinition(
   project: Project,
@@ -80,6 +70,54 @@ export function getInstanceIdsForDefinition(
   return ids
 }
 
+/**
+ * For a bulk operation edit, write the requested operation to every definition
+ * referenced by `changedIds`. Linked sibling instances share that definition,
+ * so only their folder placement must be reconciled to the new tree section.
+ */
+export function propagateOperationToLinkedInstances(
+  features: FeatureInstance[],
+  definitions: Record<string, FeatureDefinition>,
+  changedIds: ReadonlySet<string>,
+  operation: FeatureOperation,
+  reconcileFolderId: (folderId: string | null, operation: FeatureOperation) => string | null,
+): { features: FeatureInstance[]; definitions: Record<string, FeatureDefinition> } {
+  const changedDefinitionIds = new Set<string>()
+  for (const feature of features) {
+    if (!changedIds.has(feature.id)) continue
+    if (definitions[feature.definitionId] !== undefined) {
+      changedDefinitionIds.add(feature.definitionId)
+    }
+  }
+  if (changedDefinitionIds.size === 0) {
+    return { features, definitions }
+  }
+
+  let nextDefinitions = definitions
+  for (const defId of changedDefinitionIds) {
+    nextDefinitions = {
+      ...nextDefinitions,
+      [defId]: {
+        ...nextDefinitions[defId],
+        operation,
+        regionMaskMode: operation === 'region' ? (nextDefinitions[defId].regionMaskMode ?? 'include') : undefined,
+      },
+    }
+  }
+
+  const nextFeatures = features.map((feature) => {
+    if (!changedDefinitionIds.has(feature.definitionId)) return feature
+    const folderId = reconcileFolderId(feature.folderId, operation)
+    if (folderId === feature.folderId) return feature
+    return {
+      ...feature,
+      folderId,
+    }
+  })
+
+  return { features: nextFeatures, definitions: nextDefinitions }
+}
+
 // ============================================================================
 // Definition creation (snapshot + live-feature minting)
 // ============================================================================
@@ -88,6 +126,17 @@ export interface CreateSnapshotDefinitionParams {
   profile: SketchProfile
   kind: FeatureKind
   operation: FeatureOperation
+  regionMaskMode?: RegionMaskMode
+}
+
+function definitionRegionMaskMode(
+  operation: FeatureOperation,
+  mode?: RegionMaskMode,
+): RegionMaskMode | undefined {
+  if (operation !== 'region') {
+    return undefined
+  }
+  return mode === 'exclude' ? 'exclude' : 'include'
 }
 
 /**
@@ -112,6 +161,7 @@ export function createSnapshotDefinition(
     text: null,
     stl: null,
     operation: params.operation,
+    regionMaskMode: definitionRegionMaskMode(params.operation, params.regionMaskMode),
   }
   return { definitionId, definition }
 }
@@ -131,6 +181,18 @@ export function createDefinitionForFeature(
   feature: SketchFeature,
 ): { definitionId: string; definition: FeatureDefinition } {
   const definitionId = nextUniqueGeneratedId(project, 'f-')
+  return createDefinitionForFeatureWithId(feature, definitionId)
+}
+
+/**
+ * Build a feature definition with an ID reserved by a caller-owned bulk
+ * allocator. This keeps definition cloning policy centralized without doing
+ * a full project ID scan for every feature in a large import.
+ */
+export function createDefinitionForFeatureWithId(
+  feature: SketchFeature,
+  definitionId: string,
+): { definitionId: string; definition: FeatureDefinition } {
   const definition: FeatureDefinition = {
     id: definitionId,
     kind: feature.kind,
@@ -139,8 +201,32 @@ export function createDefinitionForFeature(
     text: feature.text ? { ...feature.text } : null,
     stl: feature.stl ? { ...feature.stl } : null,
     operation: feature.operation,
+    regionMaskMode: definitionRegionMaskMode(feature.operation, feature.regionMaskMode),
   }
   return { definitionId, definition }
+}
+
+/**
+ * Create the lightweight project row for a geometry-bearing feature draft.
+ * Shape data remains exclusively in the matching definition.
+ */
+export function createFeatureInstance(
+  feature: SketchFeature,
+  definitionId: string,
+  transform: Matrix2D = IDENTITY_MATRIX,
+): FeatureInstance {
+  return {
+    id: feature.id,
+    name: feature.name,
+    definitionId,
+    transform: { ...transform },
+    constraints: feature.sketch.constraints.map((constraint) => ({ ...constraint })),
+    z_top: feature.z_top,
+    z_bottom: feature.z_bottom,
+    folderId: feature.folderId,
+    visible: feature.visible,
+    locked: feature.locked,
+  }
 }
 
 // ============================================================================
@@ -149,14 +235,15 @@ export function createDefinitionForFeature(
 
 /**
  * Given a list of feature rows after removing consumed instances, remove
- * any definitions that have zero remaining instances.
+ * definitions with no remaining tree instance or feature-based stock source.
  *
  * Returns the updated definitions map and a set of removed definition IDs
  * (useful for undo/redo sanity checks).
  */
 export function gcOrphanedDefinitions(
-  features: SketchFeature[],
+  features: FeatureInstance[],
   definitions: Record<string, FeatureDefinition>,
+  stockSource: FeatureInstance | null | undefined = null,
 ): { definitions: Record<string, FeatureDefinition>; removedIds: Set<string> } {
   const referenced = new Set<string>()
   for (const feature of features) {
@@ -164,6 +251,9 @@ export function gcOrphanedDefinitions(
     if (defId && definitions[defId]) {
       referenced.add(defId)
     }
+  }
+  if (stockSource && definitions[stockSource.definitionId]) {
+    referenced.add(stockSource.definitionId)
   }
 
   const nextDefinitions = { ...definitions }
@@ -176,55 +266,6 @@ export function gcOrphanedDefinitions(
   }
 
   return { definitions: nextDefinitions, removedIds }
-}
-
-// ============================================================================
-// Re-bake
-// ============================================================================
-
-/**
- * Re-bake the compatibility `sketch.profile` (and `kind` / `origin` /
- * `orientationAngle`) of every feature row that references `definitionId`.
- *
- * Each instance's profile is recomputed via
- * {@link resolveProfile}(definition, instance.transform) so linked instances
- * and un-migrated direct readers all stay correct after a definition edit.
- */
-export function rebakeAllInstances(
-  project: Project,
-  definitionId: string,
-): SketchFeature[] {
-  const definition = project.featureDefinitions[definitionId]
-  if (!definition) return project.features
-
-  return project.features.map((feature) => {
-    if (getDefinitionId(feature) !== definitionId) return feature
-
-    const withRefs = feature as SketchFeature & {
-      definitionId?: string
-      transform?: Matrix2D
-    }
-    const transform: Matrix2D = withRefs.transform ?? IDENTITY_MATRIX
-
-    const profile = resolveProfile(definition, transform)
-
-    // Rebuild the compatibility sketch from the resolved profile.
-    const sketch = {
-      ...feature.sketch,
-      profile,
-      origin: { x: 0, y: 0 },
-      orientationAngle: 0,
-    }
-
-    return {
-      ...feature,
-      kind:
-        feature.kind === 'text' || feature.kind === 'stl'
-          ? feature.kind
-          : inferFeatureKind(profile),
-      sketch,
-    }
-  })
 }
 
 // ============================================================================
@@ -269,7 +310,7 @@ export interface MakeUniqueResult {
   /** The cloned definition. */
   clonedDefinition: FeatureDefinition
   /** Features array with the instance repointed to the cloned definition. */
-  features: SketchFeature[]
+  features: FeatureInstance[]
 }
 
 /**
@@ -278,8 +319,6 @@ export interface MakeUniqueResult {
  *
  * - Clones the definition under a fresh ID.
  * - Sets the instance's explicit `definitionId` to the clone.
- * - Re-bakes the instance's compatibility profile.
- *
  * Other instances of the original definition are unaffected.
  */
 export function makeUnique(
@@ -296,27 +335,10 @@ export function makeUnique(
   const newId = generateDefinitionCloneId(project)
   const clonedDef = cloneDefinition(definition, newId)
 
-  const withRefs = feature as SketchFeature & {
-    definitionId?: string
-    transform?: Matrix2D
-  }
-  const transform = withRefs.transform ?? IDENTITY_MATRIX
-  const profile = resolveProfile(clonedDef, transform)
-
-  const updatedFeature = {
+  const updatedFeature: FeatureInstance = {
     ...feature,
     definitionId: newId,
-    kind:
-      feature.kind === 'text' || feature.kind === 'stl'
-        ? feature.kind
-        : inferFeatureKind(profile),
-    sketch: {
-      ...feature.sketch,
-      profile,
-      origin: { x: 0, y: 0 },
-      orientationAngle: 0,
-    },
-  } as SketchFeature & { definitionId?: string; transform?: Matrix2D }
+  }
 
   const features = project.features.map((f) =>
     f.id === instanceId ? updatedFeature : f,

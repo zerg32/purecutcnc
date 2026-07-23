@@ -15,6 +15,7 @@
  */
 
 import ClipperLib from 'clipper-lib'
+import type { ToolpathWarning } from './warningCodes'
 import type { CutDirection, Operation, Point, Project } from '../../types/project'
 import type {
   ClipperPath,
@@ -37,8 +38,13 @@ import {
   toClipperPath,
 } from './geometry'
 import { isFeatureFirst, mergePocketToolpathResults, perFeatureOperations } from './multiFeature'
+import { cornerSmoothingRadius, roundContourCorners } from './offsetSmoothing'
 import { resolvePocketRegions } from './resolver'
 import { buildRegionMask, clipToolpathResultToRegionMask, splitFeatureTargets } from './regions'
+import { resolveFeatureInstance } from '../../store/helpers/resolveFeatures'
+
+const MAX_ROUND_JOIN_ARC_TOLERANCE = DEFAULT_CLIPPER_SCALE * 0.01
+const ROUND_JOIN_ARC_TOLERANCE_RATIO = 0.01
 
 interface PolyTreeNode {
   IsHole(): boolean
@@ -80,6 +86,10 @@ function offsetPaths(
   }
 
   const offset = new ClipperLib.ClipperOffset()
+  offset.ArcTolerance = Math.max(
+    1,
+    Math.min(MAX_ROUND_JOIN_ARC_TOLERANCE, Math.abs(delta) * ROUND_JOIN_ARC_TOLERANCE_RATIO),
+  )
   offset.AddPaths(paths, joinType, ClipperLib.EndType.etClosedPolygon)
   const solution = new ClipperLib.Paths()
   offset.Execute(solution, delta)
@@ -584,18 +594,19 @@ export function updateBounds(bounds: ToolpathBounds | null, point: ToolpathPoint
 export function buildInsetRegions(
   region: ResolvedPocketRegion,
   delta: number,
-  joinType: number = ClipperLib.JoinType.jtMiter,
+  outerJoinType: number = ClipperLib.JoinType.jtMiter,
+  islandJoinType: number = outerJoinType,
 ): ResolvedPocketRegion[] {
   const scale = DEFAULT_CLIPPER_SCALE
   const outerPath = toClipperPath(normalizeWinding(region.outer, false), scale)
   const islandPaths = region.islands.map((island) => toClipperPath(normalizeWinding(island, false), scale))
 
-  const insetOuterPaths = offsetPaths([outerPath], -delta * scale, joinType)
+  const insetOuterPaths = offsetPaths([outerPath], -delta * scale, outerJoinType)
   if (insetOuterPaths.length === 0) {
     return []
   }
 
-  const expandedIslandPaths = offsetPaths(islandPaths, delta * scale, joinType)
+  const expandedIslandPaths = offsetPaths(islandPaths, delta * scale, islandJoinType)
   const clipped = executeDifference(insetOuterPaths, expandedIslandPaths)
   return polyTreeToRegions(clipped, region.targetFeatureIds, region.islandFeatureIds, scale)
     .filter((nextRegion) => nextRegion.outer.length >= 3)
@@ -617,6 +628,107 @@ export function buildContourLoops(regions: ResolvedPocketRegion[]): Point[][] {
   }
 
   return contours
+}
+
+function buildExpandedIslandContours(
+  regions: ResolvedPocketRegion[],
+  delta: number,
+  joinType: number,
+): Point[][] {
+  const scale = DEFAULT_CLIPPER_SCALE
+  return regions.flatMap((region) => {
+    const islandPaths = region.islands.map((island) => toClipperPath(normalizeWinding(island, false), scale))
+    return offsetPaths(islandPaths, delta * scale, joinType)
+      .map((path) => fromClipperPath(path, scale))
+      .filter((island) => island.length >= 3)
+  })
+}
+
+function withoutDuplicateClosingPoint(points: Point[]): Point[] {
+  return points.length > 1 && pointEpsilonEqual(points[0], points[points.length - 1])
+    ? points.slice(0, -1)
+    : points
+}
+
+function isAcuteCorner(points: Point[], index: number): boolean {
+  const count = points.length
+  if (count < 3) return false
+  const current = points[index]
+  const previous = points[(index + count - 1) % count]
+  const next = points[(index + 1) % count]
+  const previousVector = { x: previous.x - current.x, y: previous.y - current.y }
+  const nextVector = { x: next.x - current.x, y: next.y - current.y }
+  const previousLength = Math.hypot(previousVector.x, previousVector.y)
+  const nextLength = Math.hypot(nextVector.x, nextVector.y)
+  if (previousLength <= 1e-9 || nextLength <= 1e-9) return false
+  const cosine = (
+    previousVector.x * nextVector.x + previousVector.y * nextVector.y
+  ) / (previousLength * nextLength)
+  return cosine > 1e-6
+}
+
+function circularPointRun(points: Point[], start: number, end: number): Point[] {
+  const run: Point[] = []
+  for (let index = start; ; index = (index + 1) % points.length) {
+    run.push(points[index])
+    if (index === end) break
+  }
+  return run
+}
+
+function extractRoundedCornerSegment(contour: Point[], corner: Point, delta: number): Point[] {
+  if (contour.length < 2) return []
+  const threshold = delta + Math.max(delta * 0.04, 2 / DEFAULT_CLIPPER_SCALE)
+  const withinThreshold = (index: number) =>
+    Math.sqrt(distanceSquared(contour[(index + contour.length) % contour.length], corner)) <= threshold
+  let nearestIndex = 0
+  let nearestDistance = Number.POSITIVE_INFINITY
+  for (let index = 0; index < contour.length; index += 1) {
+    const distance = distanceSquared(contour[index], corner)
+    if (distance < nearestDistance) {
+      nearestIndex = index
+      nearestDistance = distance
+    }
+  }
+  if (Math.sqrt(nearestDistance) > threshold) return []
+
+  let start = nearestIndex
+  for (let scanned = 0; scanned < contour.length - 1 && withinThreshold(start - 1); scanned += 1) {
+    start = (start + contour.length - 1) % contour.length
+  }
+  let end = nearestIndex
+  for (let scanned = 0; scanned < contour.length - 1 && withinThreshold(end + 1); scanned += 1) {
+    end = (end + 1) % contour.length
+  }
+
+  const segment = circularPointRun(contour, start, end)
+  return segment.length >= 2 ? segment : []
+}
+
+function buildAcuteIslandCornerCleanupSegments(regions: ResolvedPocketRegion[], delta: number): Point[][] {
+  const scale = DEFAULT_CLIPPER_SCALE
+  const segments: Point[][] = []
+  for (const region of regions) {
+    for (const island of region.islands) {
+      const sourcePoints = withoutDuplicateClosingPoint(island)
+      const acuteCorners = sourcePoints.filter((_, index) => isAcuteCorner(sourcePoints, index))
+      if (acuteCorners.length === 0) continue
+
+      const islandPath = toClipperPath(normalizeWinding(sourcePoints, false), scale)
+      const offsetContours = offsetPaths([islandPath], delta * scale, ClipperLib.JoinType.jtRound)
+        .map((path) => fromClipperPath(path, scale))
+        .filter((contour) => contour.length >= 3)
+      for (const corner of acuteCorners) {
+        const candidates = offsetContours
+          .map((contour) => extractRoundedCornerSegment(contour, corner, delta))
+          .filter((segment) => segment.length >= 2)
+        if (candidates.length > 0) {
+          segments.push(candidates.sort((left, right) => right.length - left.length)[0])
+        }
+      }
+    }
+  }
+  return segments
 }
 
 export function buildOuterContours(regions: ResolvedPocketRegion[]): Point[][] {
@@ -1058,11 +1170,15 @@ interface OffsetRegionNode {
  * several step levels build the tree once and traverse it per level instead
  * of redoing the Clipper offsets at every level.
  */
-function buildOffsetRegionTree(region: ResolvedPocketRegion, stepoverDistance: number): OffsetRegionNode {
-  const childRegions = buildInsetRegions(region, stepoverDistance)
+function buildOffsetRegionTree(
+  region: ResolvedPocketRegion,
+  stepoverDistance: number,
+  islandJoinType: number = ClipperLib.JoinType.jtMiter,
+): OffsetRegionNode {
+  const childRegions = buildInsetRegions(region, stepoverDistance, ClipperLib.JoinType.jtMiter, islandJoinType)
   return {
     region,
-    children: childRegions.map((child) => buildOffsetRegionTree(child, stepoverDistance)),
+    children: childRegions.map((child) => buildOffsetRegionTree(child, stepoverDistance, islandJoinType)),
   }
 }
 
@@ -1086,6 +1202,8 @@ function cutOffsetRegionNode(
   safeLinkCheck: SafeLinkCheck | undefined,
   traversalMode: OffsetTraversalMode,
   loops: 'all' | 'outer' = 'all',
+  smoothRadius?: number,
+  depth = 0,
 ): ToolpathPoint | null {
   const cutCurrentRegion = (fromPosition: ToolpathPoint | null): ToolpathPoint | null => {
     const childAnchors = traversalMode === 'outer-first'
@@ -1094,12 +1212,28 @@ function cutOffsetRegionNode(
         .filter((contour) => contour.length > 0)
         .map((contour) => contour[0])
       : []
-    // 'outer' cuts only the region's outer boundary loop — used by the finish
-    // floor pass, where island walls are the wall pass's job, matching the
-    // outer-contours-only coverage of buildPocketFloorContours.
-    const contours = loops === 'outer'
-      ? (node.region.outer.length >= 3 ? [node.region.outer] : [])
-      : buildContourLoops([node.region])
+    // Outer (wall-side) and island (bump-side) rings are smoothed differently
+    // because the tool relates to each corner oppositely:
+    //
+    //  - Outer ring: the tool is inside a corner it can't fully reach. Sharp is
+    //    the tightest path; rounding pulls back and leaves stock. So the root
+    //    ring (depth 0, wall-adjacent) is kept sharp and only interior rings
+    //    (depth > 0) are filleted — their rounded-corner crescents are swept by
+    //    the straight edge of the ring just outside them, so nothing is left,
+    //    and at depth no corner column can stack into a chip.
+    //  - Island rings: the tool goes around convex material it can reach. Here
+    //    the tight, smooth path is a rounded OFFSET (jtRound, applied when the
+    //    region was built) — filleting the emitted polyline would instead pull
+    //    the tool into the island and gouge it. So island loops are emitted
+    //    as-is, already rounded (or mitered when the option is off).
+    const outerContour = node.region.outer.length >= 3 ? node.region.outer : null
+    const smoothedOuter = outerContour
+      ? [smoothRadius && depth > 0 ? roundContourCorners(outerContour, smoothRadius) : outerContour]
+      : []
+    const islandContours = loops === 'outer'
+      ? []
+      : node.region.islands.filter((island) => island.length >= 3)
+    const contours = [...smoothedOuter, ...islandContours]
     const preparedContours = contours.map((contour) => rotateContourToBestEntry(
       contour,
       fromPosition ? { x: fromPosition.x, y: fromPosition.y } : null,
@@ -1141,6 +1275,8 @@ function cutOffsetRegionNode(
       safeLinkCheck,
       traversalMode,
       loops,
+      smoothRadius,
+      depth + 1,
     )
   }
 
@@ -1162,10 +1298,12 @@ export function cutOffsetRegionRecursive(
   direction: CutDirection = 'conventional',
   safeLinkCheck?: SafeLinkCheck,
   traversalMode: OffsetTraversalMode = 'outer-first',
+  smoothRadius?: number,
+  islandJoinType: number = ClipperLib.JoinType.jtMiter,
 ): ToolpathPoint | null {
   return cutOffsetRegionNode(
     moves,
-    buildOffsetRegionTree(region, stepoverDistance),
+    buildOffsetRegionTree(region, stepoverDistance, islandJoinType),
     z,
     safeZ,
     maxLinkDistance,
@@ -1173,6 +1311,8 @@ export function cutOffsetRegionRecursive(
     direction,
     safeLinkCheck,
     traversalMode,
+    'all',
+    smoothRadius,
   )
 }
 
@@ -1202,15 +1342,15 @@ function generateRoughBandMoves(
   stepoverDistance: number,
   maxLinkDistance: number,
   direction: CutDirection = 'conventional',
-): { moves: ToolpathMove[]; stepLevels: number[]; warnings: string[] } {
+): { moves: ToolpathMove[]; stepLevels: number[]; warnings: ToolpathWarning[] } {
   const moves: ToolpathMove[] = []
-  const warnings: string[] = []
+  const warnings: ToolpathWarning[] = []
   const effectiveBottom = resolveBandBottomZ(band, operation)
   if (effectiveBottom === null) {
     return {
       moves,
       stepLevels: [],
-      warnings: [`Band ${band.topZ} -> ${band.bottomZ} leaves no roughing depth after axial stock-to-leave`],
+      warnings: [{ code: 'surfaceBandNoRoughDepth', params: { topZ: band.topZ, bottomZ: band.bottomZ } }],
     }
   }
 
@@ -1232,7 +1372,7 @@ function generateRoughBandMoves(
       return {
         moves,
         stepLevels,
-        warnings: [`No machinable parallel floor region for band ${band.topZ} -> ${band.bottomZ}`],
+        warnings: [{ code: 'pocketNoFloorRegion', params: { topZ: band.topZ, bottomZ: band.bottomZ } }],
       }
     }
 
@@ -1242,7 +1382,7 @@ function generateRoughBandMoves(
       return {
         moves,
         stepLevels,
-        warnings: [`No machinable parallel floor segments for band ${band.topZ} -> ${band.bottomZ}`],
+        warnings: [{ code: 'pocketNoFloorSegments', params: { topZ: band.topZ, bottomZ: band.bottomZ } }],
       }
     }
 
@@ -1280,14 +1420,22 @@ function generateRoughBandMoves(
   }
 
   // The offset ring tree is identical at every step level — build it once
-  // and traverse it per level.
+  // and traverse it per level. When rounding is on, islands are offset with
+  // round joins (extends #245's island rounding to rough clearing): the tool
+  // wraps convex island corners smoothly at a true rounded offset, never
+  // gouging the island. Outer/wall rings stay mitered and are filleted at
+  // emit time (interior rings only) by cutOffsetRegionNode.
+  const islandJoinType = operation.roundOutsideCorners
+    ? ClipperLib.JoinType.jtRound
+    : ClipperLib.JoinType.jtMiter
   const regionTrees = band.regions
-    .flatMap((region) => buildInsetRegions(region, initialInset))
-    .map((region) => buildOffsetRegionTree(region, effectiveStepover))
+    .flatMap((region) => buildInsetRegions(region, initialInset, ClipperLib.JoinType.jtMiter, islandJoinType))
+    .map((region) => buildOffsetRegionTree(region, effectiveStepover, islandJoinType))
+  const smoothRadius = cornerSmoothingRadius(operation.roundOutsideCorners, toolRadius, effectiveStepover)
 
   for (const z of stepLevels) {
     if (regionTrees.length === 0) {
-      warnings.push(`No machinable offset contours for band ${band.topZ} -> ${band.bottomZ}`)
+      warnings.push({ code: 'surfaceNoOffsetContours', params: { topZ: band.topZ, bottomZ: band.bottomZ } })
       currentPosition = retractToSafe(moves, currentPosition, safeZ)
       continue
     }
@@ -1309,6 +1457,8 @@ function generateRoughBandMoves(
         direction,
         undefined,
         'inner-first',
+        'all',
+        smoothRadius,
       )
     }
 
@@ -1331,15 +1481,15 @@ function generateFinishBandMoves(
   stepoverDistance: number,
   maxLinkDistance: number,
   direction: CutDirection = 'conventional',
-): { moves: ToolpathMove[]; stepLevels: number[]; warnings: string[] } {
+): { moves: ToolpathMove[]; stepLevels: number[]; warnings: ToolpathWarning[] } {
   const moves: ToolpathMove[] = []
-  const warnings: string[] = []
+  const warnings: ToolpathWarning[] = []
   const effectiveBottom = resolveBandBottomZ(band, operation)
   if (effectiveBottom === null) {
     return {
       moves,
       stepLevels: [],
-      warnings: [`Band ${band.topZ} -> ${band.bottomZ} leaves no finish depth after axial stock-to-leave`],
+      warnings: [{ code: 'surfaceBandNoFinishDepth', params: { topZ: band.topZ, bottomZ: band.bottomZ } }],
     }
   }
 
@@ -1347,16 +1497,39 @@ function generateFinishBandMoves(
     return {
       moves,
       stepLevels: [],
-      warnings: ['Finish operation has both Finish Walls and Finish Floor disabled'],
+      warnings: [{ code: 'surfaceFinishBothDisabled' }],
     }
   }
 
   const radialLeave = Math.max(0, operation.stockToLeaveRadial)
   const finishDelta = toolRadius + radialLeave
-  const finishRegions = band.regions.flatMap((region) => buildInsetRegions(region, finishDelta))
+  const shouldRoundPocketWalls = operation.kind === 'pocket' && operation.finishWalls && operation.roundOutsideCorners
+  const needsMiterFinishRegions = operation.finishFloor || operation.finishWalls
+  const finishRegions = needsMiterFinishRegions
+    ? band.regions.flatMap((region) => buildInsetRegions(region, finishDelta))
+    : []
+  let wallContours: Point[][] = []
+  let wallOuterContours: Point[][] = []
+  let wallFinalContours: Point[][] = []
+  let wallCleanupSegments: Point[][] = []
+  if (operation.finishWalls) {
+    if (shouldRoundPocketWalls) {
+      const roundedWallRegions = band.regions.flatMap((region) => buildInsetRegions(
+        region,
+        finishDelta,
+        ClipperLib.JoinType.jtMiter,
+        ClipperLib.JoinType.jtRound,
+      ))
+      const islandCleanupDelta = finishDelta + stepoverDistance
+      wallOuterContours = buildOuterContours(roundedWallRegions)
+      wallFinalContours = buildExpandedIslandContours(band.regions, finishDelta, ClipperLib.JoinType.jtRound)
+      wallCleanupSegments = buildAcuteIslandCornerCleanupSegments(band.regions, islandCleanupDelta)
+    } else {
+      wallContours = buildContourLoops(finishRegions)
+    }
+  }
   const slotScale = resolveSlotFeedScale(operation)
   const isParallelPocket = operation.kind === 'pocket' && operation.pocketPattern === 'parallel'
-  const wallContours = operation.finishWalls ? buildContourLoops(finishRegions) : []
   // Offset floors are cut through the same inner-first ring traversal as the
   // rough pass (each disjoint floor area starts at its innermost loop and
   // works outward). The tree roots replicate buildPocketFloorContours'
@@ -1364,6 +1537,7 @@ function generateFinishBandMoves(
   // so the floor pass doesn't double as a wall-finish contour.
   const minFloorStepover = 1 / DEFAULT_CLIPPER_SCALE
   const floorStepover = Math.max(stepoverDistance, minFloorStepover)
+  const floorSmoothRadius = cornerSmoothingRadius(operation.roundOutsideCorners, toolRadius, floorStepover)
   const floorTrees = operation.finishFloor && !isParallelPocket
     ? finishRegions
       .flatMap((region) => buildInsetRegions(region, 0))
@@ -1373,11 +1547,18 @@ function generateFinishBandMoves(
   const floorSegments = operation.finishFloor && isParallelPocket
     ? buildPocketParallelSegments(finishRegions, stepoverDistance, operation.pocketAngle)
     : []
-  if (wallContours.length === 0 && floorTrees.length === 0 && floorSegments.length === 0) {
+  if (
+    wallContours.length === 0
+    && wallOuterContours.length === 0
+    && wallFinalContours.length === 0
+    && wallCleanupSegments.length === 0
+    && floorTrees.length === 0
+    && floorSegments.length === 0
+  ) {
     return {
       moves,
       stepLevels: [],
-      warnings: [`No finish contours available for band ${band.topZ} -> ${band.bottomZ}`],
+      warnings: [{ code: 'surfaceNoFinishContours', params: { topZ: band.topZ, bottomZ: band.bottomZ } }],
     }
   }
 
@@ -1409,6 +1590,7 @@ function generateFinishBandMoves(
         undefined,
         'inner-first',
         'outer',
+        floorSmoothRadius,
       )
     }
 
@@ -1436,7 +1618,41 @@ function generateFinishBandMoves(
   }
 
   for (const z of wallStepLevels) {
-    currentPosition = cutClosedContours(moves, wallContours, z, safeZ, maxLinkDistance, currentPosition, false, direction)
+    if (shouldRoundPocketWalls) {
+      currentPosition = cutClosedContours(
+        moves,
+        wallOuterContours,
+        z,
+        safeZ,
+        maxLinkDistance,
+        currentPosition,
+        false,
+        direction,
+      )
+      const orderedCleanupSegments = orderOpenSegmentsGreedy(
+        wallCleanupSegments,
+        currentPosition ? { x: currentPosition.x, y: currentPosition.y } : null,
+      )
+      for (const segment of orderedCleanupSegments) {
+        const entryPoint = contourStartPoint(segment, z)
+        currentPosition = transitionToCutEntry(moves, currentPosition, entryPoint, safeZ, maxLinkDistance)
+        const cutMoves = toOpenCutMoves(segment, z)
+        moves.push(...cutMoves)
+        currentPosition = cutMoves.at(-1)?.to ?? currentPosition
+      }
+      currentPosition = cutClosedContours(
+        moves,
+        wallFinalContours,
+        z,
+        safeZ,
+        maxLinkDistance,
+        currentPosition,
+        false,
+        direction,
+      )
+    } else {
+      currentPosition = cutClosedContours(moves, wallContours, z, safeZ, maxLinkDistance, currentPosition, false, direction)
+    }
 
     currentPosition = retractToSafe(moves, currentPosition, safeZ)
   }
@@ -1471,7 +1687,7 @@ function generatePocketToolpathSingle(project: Project, operation: Operation): P
     return {
       operationId: operation.id,
       moves: [],
-      warnings: [...resolved.warnings, 'No tool assigned to this operation'],
+      warnings: [...resolved.warnings, { code: 'noToolAssigned' }],
       bounds: null,
       stepLevels: [],
     }
@@ -1482,7 +1698,7 @@ function generatePocketToolpathSingle(project: Project, operation: Operation): P
     return {
       operationId: operation.id,
       moves: [],
-      warnings: [...resolved.warnings, 'Tool diameter must be greater than zero'],
+      warnings: [...resolved.warnings, { code: 'toolDiameterPositive' }],
       bounds: null,
       stepLevels: [],
     }
@@ -1492,7 +1708,7 @@ function generatePocketToolpathSingle(project: Project, operation: Operation): P
     return {
       operationId: operation.id,
       moves: [],
-      warnings: [...resolved.warnings, 'Operation stepdown must be greater than zero'],
+      warnings: [...resolved.warnings, { code: 'stepdownPositive' }],
       bounds: null,
       stepLevels: [],
     }
@@ -1502,7 +1718,7 @@ function generatePocketToolpathSingle(project: Project, operation: Operation): P
     return {
       operationId: operation.id,
       moves: [],
-      warnings: [...resolved.warnings, 'Operation stepover ratio must be between 0 and 1'],
+      warnings: [...resolved.warnings, { code: 'operationStepoverRatioRange' }],
       bounds: null,
       stepLevels: [],
     }
@@ -1523,7 +1739,7 @@ function generatePocketToolpathSingle(project: Project, operation: Operation): P
 
   const formatZ = (value: number) => Number(value.toFixed(6)).toString()
   const formatFeatureSpan = (featureId: string) => {
-    const feature = project.features.find((entry) => entry.id === featureId)
+    const feature = resolveFeatureInstance(project, featureId)
     if (!feature) {
       return `${featureId} [missing]`
     }
@@ -1533,7 +1749,7 @@ function generatePocketToolpathSingle(project: Project, operation: Operation): P
   }
 
   const formatIslandSpan = (id: string) => {
-    const feature = project.features.find((entry) => entry.id === id)
+    const feature = resolveFeatureInstance(project, id)
     if (feature) {
       const span = resolveFeatureZSpan(project, feature)
       return `${feature.name} (${feature.id}) [${formatZ(span.max)} -> ${formatZ(span.min)}]`
@@ -1553,7 +1769,7 @@ function generatePocketToolpathSingle(project: Project, operation: Operation): P
       .join(', ')
 
     if (resolved.bands.length > 0) {
-      warnings.push(`Debug: resolved pocket bands = ${resolvedBandSummary}`)
+      warnings.push({ code: 'debug', params: { text: `Debug: resolved pocket bands = ${resolvedBandSummary}` } })
     }
   }
 
@@ -1584,21 +1800,15 @@ function generatePocketToolpathSingle(project: Project, operation: Operation): P
     stepLevels.forEach((level) => allStepLevels.add(level))
     warnings.push(...bandWarnings)
     if (operation.debugToolpath) {
-      warnings.push(
-        `Debug: band ${formatZ(band.topZ)} -> ${formatZ(band.bottomZ)} cut levels = ${
+      warnings.push({ code: 'debug', params: { text: `Debug: band ${formatZ(band.topZ)} -> ${formatZ(band.bottomZ)} cut levels = ${
           stepLevels.length > 0 ? stepLevels.map((level) => formatZ(level)).join(', ') : 'none'
-        }`,
-      )
-      warnings.push(
-        `Debug: band ${formatZ(band.topZ)} -> ${formatZ(band.bottomZ)} targets = ${
+        }` } })
+      warnings.push({ code: 'debug', params: { text: `Debug: band ${formatZ(band.topZ)} -> ${formatZ(band.bottomZ)} targets = ${
           band.targetFeatureIds.length > 0 ? band.targetFeatureIds.map((id) => formatFeatureSpan(id)).join('; ') : 'none'
-        }`,
-      )
-      warnings.push(
-        `Debug: band ${formatZ(band.topZ)} -> ${formatZ(band.bottomZ)} islands = ${
+        }` } })
+      warnings.push({ code: 'debug', params: { text: `Debug: band ${formatZ(band.topZ)} -> ${formatZ(band.bottomZ)} islands = ${
           band.islandFeatureIds.length > 0 ? band.islandFeatureIds.map((id) => formatIslandSpan(id)).join('; ') : 'none'
-        }`,
-      )
+        }` } })
     }
   }
 

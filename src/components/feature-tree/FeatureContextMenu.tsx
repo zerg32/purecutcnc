@@ -19,6 +19,7 @@ import type { QuickOperation } from '../cam/operationValidity'
 import type { FeatureTreeActions } from '../../app/useFeatureTreeActions'
 import type { MenuPosition, QuickOpsSubmenuPosition, FolderSubmenuPosition, MenuFolderEntry } from '../../app/useTreeContextMenu'
 import type { Clamp, SketchFeature, Tab } from '../../types/project'
+import { useI18n } from '../../i18n/i18nContext'
 
 interface FeatureContextMenuProps {
   menuRef: RefObject<HTMLDivElement | null>
@@ -35,6 +36,7 @@ interface FeatureContextMenuProps {
   menuFeatureFolders: MenuFolderEntry[]
   addToFolderSubmenu: FolderSubmenuPosition | null
   menuSelectionInGroupedFolder: boolean
+  menuSelectionSectionsMixed: boolean
   menuSelectionIsGroup: boolean
   tabletShell: boolean
   primaryId: string | null
@@ -61,6 +63,7 @@ export function FeatureContextMenu({
   menuFeatureFolders,
   addToFolderSubmenu,
   menuSelectionInGroupedFolder,
+  menuSelectionSectionsMixed,
   menuSelectionIsGroup,
   tabletShell,
   primaryId,
@@ -71,6 +74,8 @@ export function FeatureContextMenu({
   onOpenAddToFolderSubmenu,
   onCloseAddToFolderSubmenu,
 }: FeatureContextMenuProps) {
+  const { t } = useI18n()
+
   if (!position || !primaryId || (!menuFeature && !menuTab && !menuClamp)) {
     return null
   }
@@ -91,14 +96,14 @@ export function FeatureContextMenu({
                 type="button"
                 onClick={() => actions.makeUnique(menuFeature.id)}
               >
-                Make Unique
+                {t('featureTree.contextMenu.makeUnique')}
               </button>
               <button
                 className="feature-context-menu__item"
                 type="button"
                 onClick={() => actions.selectLinkedInstances(menuFeature.id)}
               >
-                Select Linked Instances
+                {t('featureTree.contextMenu.selectLinked')}
               </button>
               <div className="feature-context-menu__separator" />
             </>
@@ -125,7 +130,7 @@ export function FeatureContextMenu({
                     }
                   }}
                 >
-                  <span>Create operation</span>
+                  <span>{t('featureTree.contextMenu.createOperation')}</span>
                   <span className="feature-context-menu__submenu-caret" aria-hidden="true">›</span>
                 </button>
                 {quickOpsSubmenu ? (
@@ -155,7 +160,7 @@ export function FeatureContextMenu({
             type="button"
             onClick={() => actions.editSketch(menuFeature.id)}
           >
-            Edit Sketch
+            {t('featureTree.contextMenu.editSketch')}
           </button>
           <button
             className="feature-context-menu__item"
@@ -163,20 +168,20 @@ export function FeatureContextMenu({
             onClick={() => actions.constraint(menuFeature.id)}
             disabled={menuHasMultipleSelection || menuHasLockedSelection}
           >
-            Add Constraint
+            {t('featureTree.contextMenu.addConstraint')}
           </button>
           <div className="feature-context-menu__separator" />
           <button className="feature-context-menu__item" type="button" onClick={() => actions.copyFeature(menuFeature.id)}>
-            {menuSelectionIsGroup ? 'Copy Group' : menuHasMultipleSelection ? 'Copy Selected' : 'Copy'}
+            {menuSelectionIsGroup ? t('featureTree.contextMenu.copyGroup') : menuHasMultipleSelection ? t('featureTree.contextMenu.copySelected') : t('featureTree.contextMenu.copy')}
           </button>
           <button
             className="feature-context-menu__item"
             type="button"
             onClick={() => actions.moveFeature(menuFeature.id)}
             disabled={menuHasLockedSelection}
-            title={menuHasLockedSelection ? 'Locked features cannot be moved' : undefined}
+            title={menuHasLockedSelection ? t('featureTree.contextMenu.lockedTooltip') : undefined}
           >
-            {menuSelectionIsGroup ? 'Move Group' : menuHasMultipleSelection ? 'Move Selected' : 'Move'}
+            {menuSelectionIsGroup ? t('featureTree.contextMenu.moveGroup') : menuHasMultipleSelection ? t('featureTree.contextMenu.moveSelected') : t('featureTree.contextMenu.move')}
           </button>
           <button
             className="feature-context-menu__item"
@@ -184,7 +189,7 @@ export function FeatureContextMenu({
             onClick={() => actions.resizeFeature(menuFeature.id)}
             disabled={menuHasLockedSelection}
           >
-            Resize
+            {t('featureTree.contextMenu.resize')}
           </button>
           <button
             className="feature-context-menu__item"
@@ -192,7 +197,7 @@ export function FeatureContextMenu({
             onClick={() => actions.rotateFeature(menuFeature.id)}
             disabled={menuHasLockedSelection}
           >
-            Rotate
+            {t('featureTree.contextMenu.rotate')}
           </button>
           <button
             className="feature-context-menu__item"
@@ -200,7 +205,7 @@ export function FeatureContextMenu({
             onClick={() => actions.mirrorFeature(menuFeature.id)}
             disabled={menuHasLockedSelection}
           >
-            Mirror
+            {t('featureTree.contextMenu.mirror')}
           </button>
           <div className="feature-context-menu__separator" />
           <button
@@ -209,22 +214,27 @@ export function FeatureContextMenu({
             onClick={() => actions.offsetFeatures()}
             disabled={menuHasLockedSelection}
           >
-            Offset
+            {t('featureTree.contextMenu.offset')}
           </button>
           <div className="feature-context-menu__separator" />
           {!menuSelectionInGroupedFolder ? (
             <>
               <div
                 className="feature-context-menu__submenu-host"
-                onMouseEnter={tabletShell ? undefined : (event) => onOpenAddToFolderSubmenu(event.currentTarget)}
-                onMouseLeave={tabletShell ? undefined : onCloseAddToFolderSubmenu}
+                onMouseEnter={tabletShell || menuSelectionSectionsMixed ? undefined : (event) => onOpenAddToFolderSubmenu(event.currentTarget)}
+                onMouseLeave={tabletShell || menuSelectionSectionsMixed ? undefined : onCloseAddToFolderSubmenu}
               >
                 <button
                   className="feature-context-menu__item feature-context-menu__item--submenu"
                   type="button"
                   aria-haspopup="menu"
                   aria-expanded={addToFolderSubmenu !== null}
+                  disabled={menuSelectionSectionsMixed}
+                  title={menuSelectionSectionsMixed ? t('featureTree.contextMenu.addToFolderMixedTooltip') : undefined}
                   onClick={(event) => {
+                    if (menuSelectionSectionsMixed) {
+                      return
+                    }
                     if (tabletShell && addToFolderSubmenu) {
                       onCloseAddToFolderSubmenu()
                     } else {
@@ -232,7 +242,7 @@ export function FeatureContextMenu({
                     }
                   }}
                 >
-                  <span>Add to folder</span>
+                  <span>{t('featureTree.contextMenu.addToFolder')}</span>
                   <span className="feature-context-menu__submenu-caret" aria-hidden="true">›</span>
                 </button>
                 {addToFolderSubmenu ? (
@@ -257,7 +267,7 @@ export function FeatureContextMenu({
                       type="button"
                       onClick={() => actions.createNewFolderAndAssign([...ids])}
                     >
-                      Create new…
+                      {t('featureTree.contextMenu.createNewFolder')}
                     </button>
                   </div>
                 ) : null}
@@ -269,10 +279,16 @@ export function FeatureContextMenu({
             className="feature-context-menu__item"
             type="button"
             onClick={() => actions.groupFeatures()}
-            disabled={!menuHasMultipleSelection}
-            title={!menuHasMultipleSelection ? 'Select two or more features to group' : undefined}
+            disabled={!menuHasMultipleSelection || menuSelectionSectionsMixed}
+            title={
+              !menuHasMultipleSelection
+                ? t('featureTree.contextMenu.groupDisabledTooltip')
+                : menuSelectionSectionsMixed
+                  ? t('featureTree.contextMenu.sectionsMixedTooltip')
+                  : undefined
+            }
           >
-            Group
+            {t('featureTree.contextMenu.group')}
           </button>
           <div className="feature-context-menu__separator" />
           <button
@@ -280,9 +296,9 @@ export function FeatureContextMenu({
             type="button"
             onClick={() => actions.joinFeatures()}
             disabled={!menuHasMultipleSelection || menuHasLockedSelection}
-            title={!menuHasMultipleSelection ? 'Select two or more features to join' : undefined}
+            title={!menuHasMultipleSelection ? t('featureTree.contextMenu.joinDisabledTooltip') : undefined}
           >
-            Join
+            {t('featureTree.contextMenu.join')}
           </button>
           <button
             className="feature-context-menu__item"
@@ -290,7 +306,7 @@ export function FeatureContextMenu({
             onClick={() => actions.cutFeatures()}
             disabled={menuHasLockedSelection}
           >
-            Cut
+            {t('featureTree.contextMenu.cut')}
           </button>
           <div className="feature-context-menu__separator" />
           <button
@@ -298,9 +314,9 @@ export function FeatureContextMenu({
             type="button"
             onClick={() => actions.useAsStock(primaryId)}
             disabled={!menuCanUseAsStock}
-            title={!menuCanUseAsStock ? 'Feature must be an add operation with a closed profile' : undefined}
+            title={!menuCanUseAsStock ? t('featureTree.contextMenu.useAsStockDisabledTooltip') : undefined}
           >
-            Use as Stock
+            {t('featureTree.contextMenu.useAsStock')}
           </button>
           <div className="feature-context-menu__separator" />
           <button
@@ -308,45 +324,45 @@ export function FeatureContextMenu({
             type="button"
             onClick={() => actions.deleteFeatures([...ids])}
           >
-            {menuSelectionIsGroup ? 'Delete Group' : menuHasMultipleSelection ? 'Delete Selected' : 'Delete'}
+            {menuSelectionIsGroup ? t('featureTree.contextMenu.deleteGroup') : menuHasMultipleSelection ? t('featureTree.contextMenu.deleteSelected') : t('featureTree.contextMenu.delete')}
           </button>
         </>
       ) : menuTab ? (
         <>
           <button className="feature-context-menu__item" type="button" onClick={() => actions.editTab(menuTab.id)}>
-            Edit Sketch
+            {t('featureTree.contextMenu.editSketch')}
           </button>
           <button className="feature-context-menu__item" type="button" onClick={() => actions.copyTab(menuTab.id)}>
-            Copy
+            {t('featureTree.contextMenu.copy')}
           </button>
           <button className="feature-context-menu__item" type="button" onClick={() => actions.moveTab(menuTab.id)}>
-            Move
+            {t('featureTree.contextMenu.move')}
           </button>
           <button
             className="feature-context-menu__item feature-context-menu__item--danger"
             type="button"
             onClick={() => actions.deleteTab(menuTab.id)}
           >
-            Delete
+            {t('featureTree.contextMenu.delete')}
           </button>
         </>
       ) : menuClamp ? (
         <>
           <button className="feature-context-menu__item" type="button" onClick={() => actions.editClamp(menuClamp.id)}>
-            Edit Sketch
+            {t('featureTree.contextMenu.editSketch')}
           </button>
           <button className="feature-context-menu__item" type="button" onClick={() => actions.copyClamp(menuClamp.id)}>
-            Copy
+            {t('featureTree.contextMenu.copy')}
           </button>
           <button className="feature-context-menu__item" type="button" onClick={() => actions.moveClamp(menuClamp.id)}>
-            Move
+            {t('featureTree.contextMenu.move')}
           </button>
           <button
             className="feature-context-menu__item feature-context-menu__item--danger"
             type="button"
             onClick={() => actions.deleteClamp(menuClamp.id)}
           >
-            Delete
+            {t('featureTree.contextMenu.delete')}
           </button>
         </>
       ) : null}

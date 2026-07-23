@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+import { isConstruction } from '../../store/helpers/featureRoles'
+import { resolvedFeatureMap } from '../../store/helpers/resolveFeatures'
 import type { Operation, Project } from '../../types/project'
 import type { PocketToolpathResult, ToolpathBounds, ToolpathPoint, ToolpathResult } from './types'
 
@@ -31,12 +33,23 @@ interface IndexedToolpathPart<T extends ToolpathResult> {
 export function perFeatureOperations(operation: Operation, project?: Project): Operation[] {
   if (operation.target.source !== 'features') return [operation]
   if (operation.target.featureIds.length <= 1) return [operation]
-  const regionFeatureIds = project
+  const featuresById = project ? resolvedFeatureMap(project) : null
+  const regionFeatureIds = featuresById
     ? operation.target.featureIds.filter((featureId) => (
-      project.features.find((feature) => feature.id === featureId)?.operation === 'region'
+      featuresById.get(featureId)?.operation === 'region'
     ))
     : []
-  const machiningFeatureIds = operation.target.featureIds.filter((featureId) => !regionFeatureIds.includes(featureId))
+  // Construction geometry is neither a machining target nor a region mask —
+  // drop it from the per-feature split entirely (issue #199).
+  const constructionFeatureIds = featuresById
+    ? operation.target.featureIds.filter((featureId) => {
+      const feature = featuresById.get(featureId)
+      return feature !== undefined && isConstruction(feature)
+    })
+    : []
+  const machiningFeatureIds = operation.target.featureIds.filter(
+    (featureId) => !regionFeatureIds.includes(featureId) && !constructionFeatureIds.includes(featureId),
+  )
   if (machiningFeatureIds.length <= 1) return [operation]
   return machiningFeatureIds.map((featureId) => ({
     ...operation,
@@ -44,10 +57,25 @@ export function perFeatureOperations(operation: Operation, project?: Project): O
   }))
 }
 
-export function isFeatureFirst(operation: Operation): boolean {
+export function isFeatureFirst(operation: Operation, project?: Project): boolean {
   if ((operation.machiningOrder ?? 'level_first') !== 'feature_first') return false
   if (operation.target.source !== 'features') return false
-  return operation.target.featureIds.length > 1
+  if (operation.target.featureIds.length <= 1) return false
+  // V-carve operations that target a closed line must be processed together
+  // — line-line even-odd fill cannot survive when targets are split across
+  // separate per-feature sub-operations (issue #340). This applies only when
+  // a line target is actually present: other v-carve targets (e.g. multiple
+  // disjoint subtracts) still split per feature as usual.
+  if (operation.kind === 'v_carve' || operation.kind === 'v_carve_medial') {
+    // Without a project we cannot inspect the targets — be safe, don't split.
+    if (!project) return false
+    const featuresById = resolvedFeatureMap(project)
+    const hasLineTarget = operation.target.featureIds.some(
+      (id) => featuresById.get(id)?.operation === 'line',
+    )
+    if (hasLineTarget) return false
+  }
+  return true
 }
 
 function mergeBounds(a: ToolpathBounds | null, b: ToolpathBounds | null): ToolpathBounds | null {

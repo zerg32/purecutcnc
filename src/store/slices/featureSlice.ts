@@ -18,9 +18,8 @@ import type { StateCreator } from 'zustand'
 import type {
   FeatureDefinition,
   FeatureFolder,
-  FeatureOperation,
+  FeatureInstance,
   FeatureTreeEntry,
-  Matrix2D,
   Project,
   SketchFeature,
 } from '../../types/project'
@@ -31,7 +30,7 @@ import {
   normalizeFeatureZRange,
   projectsEqual,
   syncFeatureTreeProject,
-  syncStockFromSourceFeature,
+  syncFeatureBasedStock,
 } from '../helpers/normalize'
 import {
   getStockBounds,
@@ -46,9 +45,10 @@ import {
   IDENTITY_MATRIX,
 } from '../../types/project'
 import { roundedRectProfile, chamferedRectProfile } from '../helpers/cannedRectProfiles'
-import { translateProfile } from '../../components/canvas/previewPrimitives'
 import { uniqueName } from '../../import'
 import { buildShapeFeature } from '../helpers/buildShapeFeature'
+import { createAddGearFeatureAction } from '../helpers/gearFeature'
+import { commonSectionOfIds, isMachinable, isSolid, sectionForOperation } from '../helpers/featureRoles'
 import {
   normalizeDerivedFeatureNameStem,
   insertDerivedFeaturesAfterSources,
@@ -58,8 +58,8 @@ import {
   previewOffsetFeatures,
   type DerivedFeatureGroup,
 } from '../helpers/derivedFeatures'
-import { createDefinitionForFeature, gcOrphanedDefinitions, getDefinitionId, getInstanceIdsForDefinition } from '../helpers/featureDefinitions'
-import { resolveFeatureInstances } from '../helpers/resolveFeatures'
+import { createDefinitionForFeature, createFeatureInstance, gcOrphanedDefinitions } from '../helpers/featureDefinitions'
+import { resolveFeatureInstance, resolveFeatureInstances, resolvedFeatureMap, resolvedProjectFeatures } from '../helpers/resolveFeatures'
 import { expandTextFeature } from '../helpers/textExpansion'
 import {
   buildSegmentAnnotations,
@@ -67,15 +67,11 @@ import {
   clipperContourToProfilePreserving,
 } from '../../engine/toolpaths/arcReconstruction'
 import { unionClipperPaths, flattenFeatureToClipperPath } from '../helpers/clipping'
-import { transformProfile } from '../helpers/transform'
-import { moveDelta, multiplyMatrix } from '../helpers/instanceTransforms'
 import { isImportedModelFeature, normalizeImportedModelStorage, pruneUnusedModelAssets } from '../helpers/modelAssets'
-import { folderIdForOperation } from '../helpers/operationDefaults'
-import {
-  propagateConstraintsOnTranslate,
-  validateConstraintsOnFeature,
-  type FeatureOffset,
-} from '../../sketch/constraintSolver'
+import { resolveFolderAssignments } from '../helpers/operationDefaults'
+import type { FeatureOffset } from '../../sketch/constraintSolver'
+import { applyFeaturePatch, applyTranslatedFeatureOffsets } from '../helpers/featureMutations'
+import type { ReferencedSketchFeature } from '../helpers/copyFeatures'
 
 export type FeatureSlice = Pick<
   ProjectStore,
@@ -100,6 +96,7 @@ export type FeatureSlice = Pick<
   | 'addSplineFeature'
   | 'addSlotFeature'
   | 'addNgonFeature'
+  | 'addGearFeature'
   | 'addRoundRectFeature'
   | 'addChamferRectFeature'
   | 'alignFeatures'
@@ -109,6 +106,21 @@ export type FeatureSlice = Pick<
   | 'offsetSelectedFeatures'
   | 'expandTextFeature'
 >
+
+function referencedFeatureDraft(feature: SketchFeature): ReferencedSketchFeature | null {
+  const raw = feature as unknown as Record<string, unknown>
+  const hasDefinitionId = 'definitionId' in raw
+  const hasTransform = 'transform' in raw
+  if (!hasDefinitionId && !hasTransform) return null
+  const transform = raw.transform as Record<string, unknown> | null
+  if (typeof raw.definitionId !== 'string'
+    || !transform
+    || typeof transform !== 'object'
+    || !['a', 'b', 'c', 'd', 'e', 'f'].every((key) => Number.isFinite(transform[key]))) {
+    throw new Error(`Feature draft ${feature.id} has an invalid definition reference`)
+  }
+  return feature as ReferencedSketchFeature
+}
 
 export function createFeatureSlice(
   set: Parameters<StateCreator<ProjectStore>>[0],
@@ -124,7 +136,7 @@ export function createFeatureSlice(
       const existingSectionFolders = state.project.featureFolders.filter((folder) => (folder.section ?? 'features') === section)
       const folder: FeatureFolder = {
         id: nextId,
-        name: `${section === 'regions' ? 'Region Folder' : 'Folder'} ${existingSectionFolders.length + 1}`,
+        name: `${section === 'regions' ? 'Region Folder' : section === 'construction' ? 'Construction Folder' : 'Folder'} ${existingSectionFolders.length + 1}`,
         collapsed: false,
         section,
       }
@@ -236,14 +248,18 @@ export function createFeatureSlice(
         if (movableIds.length === 0) {
           return {}
         }
+        // A feature may only live in a folder of its own tree section — a
+        // section-mismatched assignment falls back to that section's root.
+        const resolvedFolderIds = resolveFolderAssignments(s.project, movableIds, folderId)
+        const rootAssignedIds = movableIds.filter((id) => (resolvedFolderIds.get(id) ?? null) === null)
         const nextProject = syncFeatureTreeProject({
           ...s.project,
           features: s.project.features.map((feature) => (
-            movableIds.includes(feature.id) ? { ...feature, folderId } : feature
+            movableIds.includes(feature.id) ? { ...feature, folderId: resolvedFolderIds.get(feature.id) ?? null } : feature
           )),
           featureTree: [
             ...s.project.featureTree.filter((entry) => !(entry.type === 'feature' && movableIds.includes(entry.featureId))),
-            ...(folderId === null ? movableIds.map((featureId) => ({ type: 'feature', featureId } as FeatureTreeEntry)) : []),
+            ...rootAssignedIds.map((featureId) => ({ type: 'feature', featureId } as FeatureTreeEntry)),
           ],
           meta: { ...s.project.meta, modified: new Date().toISOString() },
         })
@@ -265,6 +281,15 @@ export function createFeatureSlice(
         }
         if (folderId !== null && !s.project.featureFolders.some((folder) => folder.id === folderId)) {
           return {}
+        }
+        // Features can only live in folders of their own tree section
+        // (features / regions / construction) — reject cross-section moves.
+        if (folderId !== null) {
+          const targetFolder = s.project.featureFolders.find((folder) => folder.id === folderId)
+          const resolvedSource = resolveFeatureInstance(s.project, sourceFeature.id)
+          if (!resolvedSource || (targetFolder?.section ?? 'features') !== sectionForOperation(resolvedSource.operation)) {
+            return {}
+          }
         }
 
         // P2-1: features in a grouped folder cannot be moved to a different folder or root.
@@ -362,15 +387,22 @@ export function createFeatureSlice(
       if (selectedIds.length < 2) {
         return ''
       }
+      // Groups are single-section: machining features, regions, and
+      // construction geometry each only group with their own kind (issue
+      // #199). A mixed-section selection is a no-op.
+      const section = commonSectionOfIds(state.project, selectedIds)
+      if (section === null) {
+        return ''
+      }
       const nextId = nextUniqueGeneratedId(state.project, 'fd')
       const existingSectionFolders = state.project.featureFolders.filter(
-        (folder) => (folder.section ?? 'features') === 'features',
+        (folder) => (folder.section ?? 'features') === section,
       )
       const folder: FeatureFolder = {
         id: nextId,
         name: `Group ${existingSectionFolders.length + 1}`,
         collapsed: false,
-        section: 'features',
+        section,
         grouped: true,
       }
 
@@ -413,10 +445,13 @@ export function createFeatureSlice(
 
     setAllFeaturesVisible: (visible) =>
       set((s) => {
+        const resolved = resolvedFeatureMap(s.project)
         const nextProject = {
           ...s.project,
           features: s.project.features.map((feature) => (
-            feature.operation === 'region' ? feature : { ...feature, visible }
+            resolved.get(feature.id) && isMachinable(resolved.get(feature.id)!)
+              ? { ...feature, visible }
+              : feature
           )),
           meta: { ...s.project.meta, modified: new Date().toISOString() },
         }
@@ -442,9 +477,9 @@ export function createFeatureSlice(
         const safeId = s.project.features.some((existing) => existing.id === featureForInsert.id)
           ? nextUniqueGeneratedId(s.project, 'f')
           : featureForInsert.id
-        const isFirstMachiningFeature = featureForInsert.operation !== 'region'
-          && !s.project.features.some((existing) => existing.operation !== 'region')
-        const preserveImportedModelOperation = isFirstMachiningFeature && isImportedModelFeature(featureForInsert)
+        const isFirstSolidFeature = isSolid(featureForInsert)
+          && !resolvedProjectFeatures(s.project).some(isSolid)
+        const preserveImportedModelOperation = isFirstSolidFeature && isImportedModelFeature(featureForInsert)
         const selectedNode = s.selection.selectedNode
         let effectiveFolderId: string | null = featureForInsert.folderId ?? null
         let insertAfterFeatureId: string | null = null
@@ -459,17 +494,14 @@ export function createFeatureSlice(
           ? s.project.featureFolders.find((folder) => folder.id === effectiveFolderId) ?? null
           : null
         const effectiveFolderSection = effectiveFolder?.section ?? 'features'
-        if (featureForInsert.operation === 'region' && effectiveFolderSection !== 'regions') {
+        if (effectiveFolderSection !== sectionForOperation(featureForInsert.operation)) {
           effectiveFolderId = null
         }
-        if (featureForInsert.operation !== 'region' && effectiveFolderSection === 'regions') {
-          effectiveFolderId = null
-        }
-        const safeFeatureBase: SketchFeature = isFirstMachiningFeature && !preserveImportedModelOperation
+        const safeFeatureBase: SketchFeature = isFirstSolidFeature && !preserveImportedModelOperation
           ? normalizeFeatureZRange({ ...featureForInsert, id: safeId, folderId: effectiveFolderId, operation: 'add' })
           : normalizeFeatureZRange({ ...featureForInsert, id: safeId, folderId: effectiveFolderId })
         const nextModelAssets = { ...s.project.modelAssets }
-        let safeFeature: SketchFeature = {
+        const safeFeature: SketchFeature = {
           ...safeFeatureBase,
           stl: normalizeImportedModelStorage(safeFeatureBase.id, safeFeatureBase.stl, nextModelAssets),
         }
@@ -477,42 +509,47 @@ export function createFeatureSlice(
         // Mint a FeatureDefinition for features that don't already have one
         // (idempotent — snapshot results and migrated features already carry
         // an explicit definitionId and are left untouched).
-        const featureHasExplicitDefId =
-          (featureForInsert as SketchFeature & { definitionId?: string }).definitionId !== undefined
+        const referenceFields = referencedFeatureDraft(featureForInsert)
+        const featureHasExplicitDefId = referenceFields !== null
         let nextDefinitions = { ...s.project.featureDefinitions }
+        let definitionId: string
 
         if (!featureHasExplicitDefId) {
           const minted = createDefinitionForFeature(s.project, safeFeature)
-          safeFeature = {
-            ...safeFeature,
-            definitionId: minted.definitionId,
-            transform: IDENTITY_MATRIX,
-          } as SketchFeature & { definitionId?: string; transform?: Matrix2D }
+          definitionId = minted.definitionId
           nextDefinitions = { ...nextDefinitions, [minted.definitionId]: minted.definition }
-        } else if (clonedDefinition) {
-          nextDefinitions = { ...nextDefinitions, [clonedDefinition.id]: clonedDefinition }
+        } else {
+          definitionId = referenceFields.definitionId
+          if (clonedDefinition) {
+            nextDefinitions = { ...nextDefinitions, [clonedDefinition.id]: clonedDefinition }
+          }
         }
+        const safeInstance = createFeatureInstance(
+          safeFeature,
+          definitionId,
+          referenceFields?.transform ?? IDENTITY_MATRIX,
+        )
 
-        let nextFeatures: SketchFeature[]
+        let nextFeatures: FeatureInstance[]
         let nextTree: FeatureTreeEntry[]
         if (insertAfterFeatureId !== null) {
           const idx = s.project.features.findIndex((f) => f.id === insertAfterFeatureId)
           nextFeatures = idx >= 0
-            ? [...s.project.features.slice(0, idx + 1), safeFeature, ...s.project.features.slice(idx + 1)]
-            : [...s.project.features, safeFeature]
+            ? [...s.project.features.slice(0, idx + 1), safeInstance, ...s.project.features.slice(idx + 1)]
+            : [...s.project.features, safeInstance]
           if (effectiveFolderId === null) {
             const treeIdx = s.project.featureTree.findIndex(
               (e) => e.type === 'feature' && e.featureId === insertAfterFeatureId
             )
             nextTree = treeIdx >= 0
-              ? [...s.project.featureTree.slice(0, treeIdx + 1), { type: 'feature', featureId: safeFeature.id }, ...s.project.featureTree.slice(treeIdx + 1)]
-              : [...s.project.featureTree, { type: 'feature', featureId: safeFeature.id }]
+              ? [...s.project.featureTree.slice(0, treeIdx + 1), { type: 'feature', featureId: safeInstance.id }, ...s.project.featureTree.slice(treeIdx + 1)]
+              : [...s.project.featureTree, { type: 'feature', featureId: safeInstance.id }]
           } else {
-            nextTree = [...s.project.featureTree, { type: 'feature', featureId: safeFeature.id }]
+            nextTree = [...s.project.featureTree, { type: 'feature', featureId: safeInstance.id }]
           }
         } else {
-          nextFeatures = [...s.project.features, safeFeature]
-          nextTree = [...s.project.featureTree, { type: 'feature', featureId: safeFeature.id }]
+          nextFeatures = [...s.project.features, safeInstance]
+          nextTree = [...s.project.featureTree, { type: 'feature', featureId: safeInstance.id }]
         }
         const nextProject = syncFeatureTreeProject({
           ...s.project,
@@ -526,9 +563,9 @@ export function createFeatureSlice(
           project: nextProject,
           selection: {
             ...s.selection,
-            selectedFeatureId: safeFeature.id,
-            selectedFeatureIds: [safeFeature.id],
-            selectedNode: { type: 'feature' as const, featureId: safeFeature.id },
+            selectedFeatureId: safeInstance.id,
+            selectedFeatureIds: [safeInstance.id],
+            selectedNode: { type: 'feature' as const, featureId: safeInstance.id },
             mode: 'feature' as const,
             activeControl: null,
           },
@@ -550,118 +587,18 @@ export function createFeatureSlice(
 
     updateFeature: (id, patch) =>
       set((s) => {
-        const features = s.project.features
-        const isFirst = features.length > 0 && features[0].id === id
-        const existingFeature = features.find((feature) => feature.id === id) ?? null
-        const nextOperation = patch.operation ?? existingFeature?.operation
-        const nextKind = patch.kind ?? existingFeature?.kind
-        const nextIsImportedModel = nextKind === 'stl' && nextOperation === 'model'
-        const zSafePatch = nextOperation === 'region'
-          ? Object.fromEntries(Object.entries(patch).filter(([key]) => key !== 'z_top' && key !== 'z_bottom')) as Partial<SketchFeature>
-          : patch
-        const safePatch: Partial<SketchFeature> =
-          isFirst && !nextIsImportedModel && zSafePatch.operation !== undefined && zSafePatch.operation !== 'add'
-            ? { ...zSafePatch, operation: 'add' }
-            : zSafePatch
-        const safeOperation = safePatch.operation ?? existingFeature?.operation
-
-        // P1b: when operation changes on a linked instance, propagate to the
-        // definition and all siblings so the raw rows agree with the
-        // definition-owned operation (resolveFeatures.ts:436).
-        const defId = (existingFeature as SketchFeature & { definitionId?: string })?.definitionId
-        const opExplicitlyChanged =
-          safePatch.operation !== undefined && safePatch.operation !== existingFeature?.operation
-        const shouldPropagateOp = opExplicitlyChanged && defId !== undefined
-
-        // P1b-text: when a text feature's `text` changes, propagate it to the
-        // shared definition and every linked instance. Text geometry is
-        // rendered from the raw per-instance `feature.text`, so without this a
-        // linked copy edited in isolation would diverge from its siblings
-        // (issue #228). The frame profile is left unchanged. `getDefinitionId`
-        // also covers migrated text features that resolve via the feature-id
-        // fallback rather than an explicit `definitionId`.
-        const textDefId = existingFeature ? getDefinitionId(existingFeature) : undefined
-        const shouldPropagateText =
-          safePatch.text !== undefined &&
-          existingFeature?.kind === 'text' &&
-          textDefId !== undefined &&
-          s.project.featureDefinitions[textDefId] !== undefined
-
-        let nextDefinitions: Record<string, FeatureDefinition> = s.project.featureDefinitions
-        if (shouldPropagateOp) {
-          nextDefinitions = {
-            ...nextDefinitions,
-            [defId!]: {
-              ...nextDefinitions[defId!],
-              operation: safeOperation as FeatureOperation,
-            },
-          }
+        if (!s.project.features.some((feature) => feature.id === id)) {
+          return {}
         }
-        if (shouldPropagateText) {
-          nextDefinitions = {
-            ...nextDefinitions,
-            [textDefId!]: {
-              ...nextDefinitions[textDefId!],
-              text: safePatch.text ? { ...safePatch.text } : null,
-            },
-          }
-        }
-
-        const linkedSiblingIds: Set<string> | null = shouldPropagateOp
-          ? new Set(getInstanceIdsForDefinition(s.project, defId!))
-          : null
-        const textSiblingIds: Set<string> | null = shouldPropagateText
-          ? new Set(getInstanceIdsForDefinition(s.project, textDefId!))
-          : null
-
+        const updated = applyFeaturePatch(s.project, new Set([id]), patch)
         let nextProject: Project = {
           ...s.project,
-          featureDefinitions: nextDefinitions,
-          features: features.map((f, fi) => {
-            const isEdited = f.id === id
-
-            if (isEdited) {
-              return normalizeFeatureZRange({
-                ...f,
-                ...safePatch,
-                folderId: folderIdForOperation(s.project, safePatch.folderId ?? f.folderId, safeOperation),
-              })
-            }
-
-            const isOpSibling =
-              shouldPropagateOp && linkedSiblingIds !== null && linkedSiblingIds.has(f.id)
-            const isTextSibling =
-              shouldPropagateText && textSiblingIds !== null && textSiblingIds.has(f.id)
-
-            if (!isOpSibling && !isTextSibling) {
-              return f
-            }
-
-            let sibling = f
-            if (isOpSibling) {
-              // Apply the same operation to the sibling, with its own isFirst
-              // guard (first feature in the tree can't be subtract).
-              const siblingIsFirst = fi === 0
-              const op = safeOperation as FeatureOperation
-              const siblingOp =
-                siblingIsFirst && op !== 'add' ? ('add' as const) : op
-              sibling = normalizeFeatureZRange({
-                ...sibling,
-                operation: siblingOp,
-                folderId: folderIdForOperation(s.project, sibling.folderId, siblingOp),
-              })
-            }
-            if (isTextSibling) {
-              sibling = {
-                ...sibling,
-                text: safePatch.text ? { ...safePatch.text } : null,
-              }
-            }
-            return sibling
-          }),
+          features: updated.features,
+          featureDefinitions: updated.featureDefinitions,
           meta: { ...s.project.meta, modified: new Date().toISOString() },
         }
-        nextProject = syncStockFromSourceFeature(nextProject, id)
+        nextProject = syncFeatureTreeProject(nextProject)
+        nextProject = syncFeatureBasedStock(nextProject)
         if (projectsEqual(nextProject, s.project)) {
           return {}
         }
@@ -684,35 +621,15 @@ export function createFeatureSlice(
           return {}
         }
 
-        const selectedIds = new Set(ids)
-        const features = s.project.features
-        const nextProject = {
+        const updated = applyFeaturePatch(s.project, new Set(ids), patch)
+        let nextProject: Project = {
           ...s.project,
-          features: features.map((feature, index) => {
-            if (!selectedIds.has(feature.id)) {
-              return feature
-            }
-
-            const nextOperation = patch.operation ?? feature.operation
-            const nextKind = patch.kind ?? feature.kind
-            const nextIsImportedModel = nextKind === 'stl' && nextOperation === 'model'
-            const zSafePatch = nextOperation === 'region'
-              ? Object.fromEntries(Object.entries(patch).filter(([key]) => key !== 'z_top' && key !== 'z_bottom')) as Partial<SketchFeature>
-              : patch
-            const safePatch: Partial<SketchFeature> =
-              index === 0 && !nextIsImportedModel && zSafePatch.operation !== undefined && zSafePatch.operation !== 'add'
-                ? { ...zSafePatch, operation: 'add' }
-                : zSafePatch
-            const safeOperation = safePatch.operation ?? feature.operation
-
-            return normalizeFeatureZRange({
-              ...feature,
-              ...safePatch,
-              folderId: folderIdForOperation(s.project, safePatch.folderId ?? feature.folderId, safeOperation),
-            })
-          }),
+          features: updated.features,
+          featureDefinitions: updated.featureDefinitions,
           meta: { ...s.project.meta, modified: new Date().toISOString() },
         }
+        nextProject = syncFeatureTreeProject(nextProject)
+        nextProject = syncFeatureBasedStock(nextProject)
         if (projectsEqual(nextProject, s.project)) {
           return {}
         }
@@ -738,7 +655,7 @@ export function createFeatureSlice(
         const featuresWithInvalidatedConstraints = s.project.features
           .filter((feature) => !idsToDelete.has(feature.id))
           .map((feature) => {
-            const updatedConstraints = feature.sketch.constraints.map((c) => {
+            const updatedConstraints = feature.constraints.map((c) => {
               if (c.type !== 'fixed_distance') return c
               const refId = c.reference_feature_id ?? c.segment_ids[0]
               if (refId && idsToDelete.has(refId)) {
@@ -746,8 +663,8 @@ export function createFeatureSlice(
               }
               return c
             })
-            if (updatedConstraints.some((c, i) => c !== feature.sketch.constraints[i])) {
-              return { ...feature, sketch: { ...feature.sketch, constraints: updatedConstraints } }
+            if (updatedConstraints.some((c, i) => c !== feature.constraints[i])) {
+              return { ...feature, constraints: updatedConstraints }
             }
             return feature
           })
@@ -761,7 +678,7 @@ export function createFeatureSlice(
             ...stock,
             profile: rectProfile(stockBounds.minX, stockBounds.minY, width, height),
             sourceFeatureId: null as string | null | undefined,
-            sourceFeature: null as SketchFeature | null | undefined,
+            sourceFeature: null,
           }
         }
 
@@ -772,6 +689,7 @@ export function createFeatureSlice(
           featureDefinitions: gcOrphanedDefinitions(
             featuresWithInvalidatedConstraints,
             s.project.featureDefinitions,
+            stock.sourceFeature,
           ).definitions,
           featureTree: s.project.featureTree.filter((entry) => !(entry.type === 'feature' && idsToDelete.has(entry.featureId))),
           meta: { ...s.project.meta, modified: new Date().toISOString() },
@@ -807,7 +725,6 @@ export function createFeatureSlice(
     mergeSelectedFeatures: (keepOriginals = false) => {
       const state = get()
       const selectedFeatures = resolveFeatureInstances(state.project, state.selection.selectedFeatureIds)
-        .map((feature) => feature as unknown as SketchFeature)
         .filter((feature) => feature.sketch.profile.closed)
 
       if (selectedFeatures.length < 2) {
@@ -826,9 +743,8 @@ export function createFeatureSlice(
           if (!profile) {
             return null
           }
-          const nextProject = { ...state.project, features: [...state.project.features] }
           return createDerivedFeature(
-            nextProject,
+            state.project,
             baseFeature,
             profile,
             baseFeature.operation,
@@ -840,6 +756,9 @@ export function createFeatureSlice(
         .filter((result): result is NonNullable<typeof result> => result !== null)
       const createdFeatures = createdResults.map((result) => result.feature)
       const newDefinitions = createdResults.map((result) => result.definition)
+      const createdInstances = createdResults.map((result) =>
+        createFeatureInstance(result.feature, result.definition.id),
+      )
 
       if (createdFeatures.length === 0) {
         return []
@@ -847,7 +766,9 @@ export function createFeatureSlice(
 
       set((s) => {
         const idsToReplace = new Set(keepOriginals ? [] : selectedFeatures.map((feature) => feature.id))
-        const createdGroups: DerivedFeatureGroup[] = [{ sourceId: anchorFeature.id, features: createdFeatures }]
+        const createdGroups: Array<DerivedFeatureGroup<FeatureInstance>> = [
+          { sourceId: anchorFeature.id, features: createdInstances },
+        ]
         const nextFeatures = insertDerivedFeaturesAfterSources(s.project.features, createdGroups, idsToReplace)
         const nextFeatureTree = insertDerivedFeatureTreeEntries(s.project.featureTree, s.project.features, createdGroups, idsToReplace)
         const nextDefinitions = { ...s.project.featureDefinitions }
@@ -856,7 +777,7 @@ export function createFeatureSlice(
         }
         const finalDefinitions = keepOriginals
           ? nextDefinitions
-          : gcOrphanedDefinitions(nextFeatures, nextDefinitions).definitions
+          : gcOrphanedDefinitions(nextFeatures, nextDefinitions, s.project.stock.sourceFeature).definitions
         const nextProject = syncFeatureTreeProject({
           ...s.project,
           features: nextFeatures,
@@ -890,7 +811,6 @@ export function createFeatureSlice(
     cutSelectedFeatures: (keepOriginals = false) => {
       const state = get()
       const selectedFeatures = resolveFeatureInstances(state.project, state.selection.selectedFeatureIds)
-        .map((feature) => feature as unknown as SketchFeature)
 
       if (selectedFeatures.length < 2) {
         return []
@@ -905,6 +825,18 @@ export function createFeatureSlice(
       const cutResult = cutFeaturesByCutterGrouped(state.project, [cutter], targets, createDerivedFeature)
       const createdGroups = cutResult.groups
       const createdFeatures = createdGroups.flatMap((group) => group.features)
+      let definitionIndex = 0
+      const createdInstanceGroups: Array<DerivedFeatureGroup<FeatureInstance>> = createdGroups.map((group) => ({
+        sourceId: group.sourceId,
+        features: group.features.map((feature) => {
+          const definition = cutResult.definitions[definitionIndex]
+          definitionIndex += 1
+          if (!definition) {
+            throw new Error(`Missing derived definition for feature ${feature.id}`)
+          }
+          return createFeatureInstance(feature, definition.id)
+        }),
+      }))
 
       if (createdFeatures.length === 0) {
         return []
@@ -912,15 +844,15 @@ export function createFeatureSlice(
 
       set((s) => {
         const idsToReplace = new Set(keepOriginals ? [] : targets.map((feature) => feature.id))
-        const nextFeatures = insertDerivedFeaturesAfterSources(s.project.features, createdGroups, idsToReplace)
-        const nextFeatureTree = insertDerivedFeatureTreeEntries(s.project.featureTree, s.project.features, createdGroups, idsToReplace)
+        const nextFeatures = insertDerivedFeaturesAfterSources(s.project.features, createdInstanceGroups, idsToReplace)
+        const nextFeatureTree = insertDerivedFeatureTreeEntries(s.project.featureTree, s.project.features, createdInstanceGroups, idsToReplace)
         const nextDefinitions = { ...s.project.featureDefinitions }
         for (const definition of cutResult.definitions) {
           nextDefinitions[definition.id] = definition
         }
         const finalDefinitions = keepOriginals
           ? nextDefinitions
-          : gcOrphanedDefinitions(nextFeatures, nextDefinitions).definitions
+          : gcOrphanedDefinitions(nextFeatures, nextDefinitions, s.project.stock.sourceFeature).definitions
         const nextProject = syncFeatureTreeProject({
           ...s.project,
           features: nextFeatures,
@@ -955,6 +887,13 @@ export function createFeatureSlice(
       const state = get()
       const offsetResult = previewOffsetFeatures(state.project, state.selection.selectedFeatureIds, distance)
       const createdFeatures = offsetResult.features
+      const createdInstances = createdFeatures.map((feature, index) => {
+        const definition = offsetResult.definitions[index]
+        if (!definition) {
+          throw new Error(`Missing offset definition for feature ${feature.id}`)
+        }
+        return createFeatureInstance(feature, definition.id)
+      })
 
       if (createdFeatures.length === 0) {
         return []
@@ -967,7 +906,7 @@ export function createFeatureSlice(
         }
         const nextProject = syncFeatureTreeProject({
           ...s.project,
-          features: [...s.project.features, ...createdFeatures],
+          features: [...s.project.features, ...createdInstances],
           featureDefinitions: nextDefinitions,
           meta: { ...s.project.meta, modified: new Date().toISOString() },
         })
@@ -1000,18 +939,16 @@ export function createFeatureSlice(
       set((s) => {
         const map = new Map(s.project.features.map((f) => [f.id, f]))
         const reordered = ids.map((id) => map.get(id)!).filter(Boolean)
-        const firstMachiningIndex = reordered.findIndex((feature) => feature.operation !== 'region')
-        if (
-          firstMachiningIndex !== -1
-          && reordered[firstMachiningIndex].operation !== 'add'
-          && !isImportedModelFeature(reordered[firstMachiningIndex])
-        ) {
-          reordered[firstMachiningIndex] = { ...reordered[firstMachiningIndex], operation: 'add' }
-        }
+        const reorderedProject = { ...s.project, features: reordered }
+        const firstSolid = resolvedProjectFeatures(reorderedProject).find(isSolid)
+        const normalized = firstSolid && firstSolid.operation !== 'add' && !isImportedModelFeature(firstSolid)
+          ? applyFeaturePatch(reorderedProject, new Set([firstSolid.id]), { operation: 'add' })
+          : { features: reordered, featureDefinitions: s.project.featureDefinitions }
         return {
           project: syncFeatureTreeProject({
             ...s.project,
-            features: reordered,
+            features: normalized.features,
+            featureDefinitions: normalized.featureDefinitions,
             meta: { ...s.project.meta, modified: new Date().toISOString() },
           }),
           history: {
@@ -1028,7 +965,8 @@ export function createFeatureSlice(
       set((s) => {
         const idSet = new Set(ids)
         const movedOffsets = new Map<string, FeatureOffset>()
-        const eligibleFeatures = s.project.features.filter((feature) => idSet.has(feature.id) && !feature.locked)
+        const eligibleFeatures = resolvedProjectFeatures(s.project)
+          .filter((feature) => idSet.has(feature.id) && !feature.locked)
         if (eligibleFeatures.length < 2) {
           return {}
         }
@@ -1050,11 +988,7 @@ export function createFeatureSlice(
         const refCenterX = (refMinX + refMaxX) / 2
         const refCenterY = (refMinY + refMaxY) / 2
 
-        const nextFeatures = s.project.features.map((feature) => {
-          const bounds = featureBounds.get(feature.id)
-          if (!bounds) {
-            return feature
-          }
+        for (const [featureId, bounds] of featureBounds) {
           let dx = 0
           let dy = 0
           switch (alignment) {
@@ -1077,30 +1011,15 @@ export function createFeatureSlice(
               dy = refCenterY - (bounds.minY + bounds.maxY) / 2
               break
           }
-          if (dx === 0 && dy === 0) {
-            return feature
+          if (dx !== 0 || dy !== 0) {
+            movedOffsets.set(featureId, { dx, dy })
           }
-          movedOffsets.set(feature.id, { dx, dy })
-          const currentTransform = (feature as SketchFeature & { transform?: Matrix2D }).transform ?? IDENTITY_MATRIX
-          return {
-            ...feature,
-            sketch: {
-              ...feature.sketch,
-              profile: translateProfile(feature.sketch.profile, dx, dy),
-            },
-            transform: multiplyMatrix(moveDelta(dx, dy), currentTransform),
-          } as SketchFeature & { transform: Matrix2D }
-        })
+        }
 
-        const cleaned = propagateConstraintsOnTranslate(nextFeatures, movedOffsets, { transformProfile })
-        const cleanedByIdAlign = new Map(cleaned.map((f) => [f.id, f]))
-        const validatedAlign = cleaned.map((f) => {
-          if (f.sketch.constraints.every((c) => c.type !== 'fixed_distance')) return f
-          return validateConstraintsOnFeature(f, cleanedByIdAlign)
-        })
+        const nextFeatures = applyTranslatedFeatureOffsets(s.project, movedOffsets)
         const nextProject = {
           ...s.project,
-          features: validatedAlign,
+          features: nextFeatures,
           meta: { ...s.project.meta, modified: new Date().toISOString() },
         }
         if (projectsEqual(nextProject, s.project)) {
@@ -1120,7 +1039,8 @@ export function createFeatureSlice(
       set((s) => {
         const idSet = new Set(ids)
         const movedOffsetsDist = new Map<string, FeatureOffset>()
-        const eligibleFeatures = s.project.features.filter((feature) => idSet.has(feature.id) && !feature.locked)
+        const eligibleFeatures = resolvedProjectFeatures(s.project)
+          .filter((feature) => idSet.has(feature.id) && !feature.locked)
         if (eligibleFeatures.length < 3) {
           return {}
         }
@@ -1175,34 +1095,15 @@ export function createFeatureSlice(
           return {}
         }
 
-        const nextFeatures = s.project.features.map((feature) => {
-          const delta = offsets.get(feature.id)
-          if (delta === undefined) {
-            return feature
-          }
+        for (const [featureId, delta] of offsets) {
           const dx = axis === 'x' ? delta : 0
           const dy = axis === 'y' ? delta : 0
-          movedOffsetsDist.set(feature.id, { dx, dy })
-          const currentTransform = (feature as SketchFeature & { transform?: Matrix2D }).transform ?? IDENTITY_MATRIX
-          return {
-            ...feature,
-            sketch: {
-              ...feature.sketch,
-              profile: translateProfile(feature.sketch.profile, dx, dy),
-            },
-            transform: multiplyMatrix(moveDelta(dx, dy), currentTransform),
-          } as SketchFeature & { transform: Matrix2D }
-        })
-
-        const cleanedDist = propagateConstraintsOnTranslate(nextFeatures, movedOffsetsDist, { transformProfile })
-        const cleanedDistById = new Map(cleanedDist.map((f) => [f.id, f]))
-        const validatedDist = cleanedDist.map((f) => {
-          if (f.sketch.constraints.every((c) => c.type !== 'fixed_distance')) return f
-          return validateConstraintsOnFeature(f, cleanedDistById)
-        })
+          movedOffsetsDist.set(featureId, { dx, dy })
+        }
+        const nextFeatures = applyTranslatedFeatureOffsets(s.project, movedOffsetsDist)
         const nextProject = {
           ...s.project,
-          features: validatedDist,
+          features: nextFeatures,
           meta: { ...s.project.meta, modified: new Date().toISOString() },
         }
         if (projectsEqual(nextProject, s.project)) {
@@ -1217,8 +1118,6 @@ export function createFeatureSlice(
           },
         }
       }),
-
-    // ── Convenience constructors ── delegate to buildShapeFeature ─
 
     addRectFeature: (name, x, y, w, h, depth) => {
       get().addFeature(buildShapeFeature(get().project, get().creationTarget, 'rect', rectProfile(x, y, w, h), name, depth))
@@ -1244,9 +1143,10 @@ export function createFeatureSlice(
       get().addFeature(buildShapeFeature(get().project, get().creationTarget, 'composite', slotProfile(p1, p2, width), name, depth))
     },
 
-    addNgonFeature: (name, cx, cy, sides, circumradius, firstVertexAngle, depth) => {
-      get().addFeature(buildShapeFeature(get().project, get().creationTarget, 'polygon', ngonProfile(cx, cy, sides, circumradius, firstVertexAngle), name, depth))
-    },
+    addNgonFeature: (name, cx, cy, sides, circumradius, firstVertexAngle, depth) =>
+      get().addFeature(buildShapeFeature(get().project, get().creationTarget, 'polygon', ngonProfile(cx, cy, sides, circumradius, firstVertexAngle), name, depth)),
+
+    addGearFeature: createAddGearFeatureAction(set, get),
 
     addRoundRectFeature: (name, x, y, w, h, corner, depth) => {
       get().addFeature(buildShapeFeature(get().project, get().creationTarget, 'composite', roundedRectProfile({ x, y }, { x: x + w, y: y + h }, corner), name, depth))
@@ -1258,7 +1158,7 @@ export function createFeatureSlice(
 
     expandTextFeature: (textFeatureId) => {
       const state = get()
-      const textFeature = state.project.features.find((f) => f.id === textFeatureId)
+      const textFeature = resolveFeatureInstance(state.project, textFeatureId)
 
       if (!textFeature || !textFeature.text) {
         return

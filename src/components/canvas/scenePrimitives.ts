@@ -15,14 +15,17 @@
  */
 
 import type { SketchControlRef } from '../../store/types'
-import { getStockBounds, profileVertices, rectProfile } from '../../types/project'
-import type { BackdropImage, Clamp, GridSettings, Point, SketchProfile, Stock, Tab } from '../../types/project'
+import { getProfileBounds, getStockBounds, profileVertices, rectProfile } from '../../types/project'
+import type { BackdropImage, Bounds2D, Clamp, GridSettings, Point, SketchProfile, Stock, Tab } from '../../types/project'
+import type { ResolvedSketchFeature } from '../../store/helpers/resolveFeatures'
 import type { Units } from '../../utils/units'
 import { formatLength } from '../../utils/units'
 import { hexToRgba } from './previewPrimitives'
 import { arcControlPoint, anchorPointForIndex, traceProfilePath } from './profilePrimitives'
 import { worldToCanvas } from './viewTransform'
 import type { ViewTransform } from './viewTransform'
+import type { CanvasThemePalette } from '../../theme/palette'
+import { canvasColors } from './canvasPalette'
 
 const NODE_RADIUS = 5
 const HANDLE_RADIUS = 4
@@ -46,6 +49,7 @@ export function drawSketchControls(
   profile: SketchProfile,
   vt: ViewTransform,
   activeControl: SketchControlRef | null,
+  palette: CanvasThemePalette,
 ): void {
   const vertices = profileVertices(profile)
 
@@ -57,7 +61,7 @@ export function drawSketchControls(
       ctx.beginPath()
       ctx.moveTo(start.cx, start.cy)
       ctx.lineTo(end.cx, end.cy)
-      ctx.strokeStyle = '#f7d394'
+      ctx.strokeStyle = palette.activeStrong
       ctx.lineWidth = 5
       ctx.lineCap = 'round'
       ctx.stroke()
@@ -65,7 +69,7 @@ export function drawSketchControls(
       ctx.beginPath()
       ctx.moveTo(start.cx, start.cy)
       ctx.lineTo(end.cx, end.cy)
-      ctx.strokeStyle = '#f2b95c'
+      ctx.strokeStyle = palette.active
       ctx.lineWidth = 3
       ctx.lineCap = 'round'
       ctx.stroke()
@@ -87,7 +91,7 @@ export function drawSketchControls(
       ctx.beginPath()
       ctx.moveTo(anchor.cx, anchor.cy)
       ctx.lineTo(handle.cx, handle.cy)
-      ctx.strokeStyle = 'rgba(125, 159, 189, 0.55)'
+      ctx.strokeStyle = canvasColors().handleGuide
       ctx.lineWidth = 1
       ctx.stroke()
     }
@@ -97,7 +101,7 @@ export function drawSketchControls(
       ctx.beginPath()
       ctx.moveTo(anchor.cx, anchor.cy)
       ctx.lineTo(handle.cx, handle.cy)
-      ctx.strokeStyle = 'rgba(125, 159, 189, 0.55)'
+      ctx.strokeStyle = canvasColors().handleGuide
       ctx.lineWidth = 1
       ctx.stroke()
     }
@@ -116,7 +120,7 @@ export function drawSketchControls(
     ctx.beginPath()
     ctx.arc(center.cx, center.cy, radius, startAngle, endAngle, seg.clockwise)
     ctx.setLineDash([5, 5])
-    ctx.strokeStyle = 'rgba(210, 221, 230, 0.3)'
+    ctx.strokeStyle = palette.mutedGeometry
     ctx.lineWidth = 1
     ctx.stroke()
     ctx.setLineDash([])
@@ -129,7 +133,7 @@ export function drawSketchControls(
     ctx.lineTo(center.cx + crossSize, center.cy)
     ctx.moveTo(center.cx, center.cy - crossSize)
     ctx.lineTo(center.cx, center.cy + crossSize)
-    ctx.strokeStyle = active ? '#f2b95c' : '#d2dde6'
+    ctx.strokeStyle = active ? palette.active : palette.mutedGeometry
     ctx.lineWidth = active ? 2 : 1.2
     ctx.stroke()
   }
@@ -141,9 +145,9 @@ export function drawSketchControls(
 
     ctx.beginPath()
     ctx.arc(cx, cy, active ? NODE_RADIUS + 2 : NODE_RADIUS, 0, Math.PI * 2)
-    ctx.fillStyle = active ? '#f2b95c' : '#d2dde6'
+    ctx.fillStyle = active ? palette.active : palette.mutedGeometry
     ctx.fill()
-    ctx.strokeStyle = active ? '#f7d394' : '#3f708f'
+    ctx.strokeStyle = active ? palette.activeStrong : canvasColors().nodeStroke
     ctx.lineWidth = 2
     ctx.stroke()
   }
@@ -158,9 +162,9 @@ export function drawSketchControls(
     const control = worldToCanvas(arcControlPoint(start, segment), vt)
     const active = activeControl?.kind === 'arc_handle' && activeControl.index === index
     drawDiamond(ctx, control.cx, control.cy, active ? HANDLE_RADIUS + 1.5 : HANDLE_RADIUS)
-    ctx.fillStyle = active ? '#f2b95c' : '#9bc0dd'
+    ctx.fillStyle = active ? palette.active : canvasColors().handleFill
     ctx.fill()
-    ctx.strokeStyle = active ? '#f7d394' : '#6f8fa9'
+    ctx.strokeStyle = active ? palette.activeStrong : canvasColors().handleStroke
     ctx.lineWidth = 1.5
     ctx.stroke()
   }
@@ -178,9 +182,9 @@ export function drawSketchControls(
       const point = worldToCanvas(outgoingSegment.control1, vt)
       const active = activeControl?.kind === 'out_handle' && activeControl.index === index
       drawDiamond(ctx, point.cx, point.cy, active ? HANDLE_RADIUS + 1.5 : HANDLE_RADIUS)
-      ctx.fillStyle = active ? '#f2b95c' : '#9bc0dd'
+      ctx.fillStyle = active ? palette.active : canvasColors().handleFill
       ctx.fill()
-      ctx.strokeStyle = active ? '#f7d394' : '#6f8fa9'
+      ctx.strokeStyle = active ? palette.activeStrong : canvasColors().handleStroke
       ctx.lineWidth = 1.5
       ctx.stroke()
     }
@@ -189,9 +193,9 @@ export function drawSketchControls(
       const point = worldToCanvas(incomingSegment.control2, vt)
       const active = activeControl?.kind === 'in_handle' && activeControl.index === index
       drawDiamond(ctx, point.cx, point.cy, active ? HANDLE_RADIUS + 1.5 : HANDLE_RADIUS)
-      ctx.fillStyle = active ? '#f2b95c' : '#9bc0dd'
+      ctx.fillStyle = active ? palette.active : canvasColors().handleFill
       ctx.fill()
-      ctx.strokeStyle = active ? '#f7d394' : '#6f8fa9'
+      ctx.strokeStyle = active ? palette.activeStrong : canvasColors().handleStroke
       ctx.lineWidth = 1.5
       ctx.stroke()
     }
@@ -207,11 +211,39 @@ export function drawSketchEditPreviewPoint(
   ctx.beginPath()
   ctx.arc(cx, cy, NODE_RADIUS + 2, 0, Math.PI * 2)
   const destructive = preview.mode === 'delete_point' || preview.mode === 'delete_segment'
-  ctx.fillStyle = destructive ? '#d66c6c' : preview.mode === 'disconnect' ? '#d9945e' : '#5daeea'
+  ctx.fillStyle = destructive ? canvasColors().editDeleteFill : preview.mode === 'disconnect' ? canvasColors().editDisconnectFill : canvasColors().editAddFill
   ctx.fill()
-  ctx.strokeStyle = destructive ? '#efb0b0' : preview.mode === 'disconnect' ? '#f1c59d' : '#a9d2f5'
+  ctx.strokeStyle = destructive ? canvasColors().editDeleteStroke : preview.mode === 'disconnect' ? canvasColors().editDisconnectStroke : canvasColors().editAddStroke
   ctx.lineWidth = 2
   ctx.stroke()
+}
+
+/**
+ * Compute the union bounding box of all resolved feature world-space profiles.
+ * Returns `null` when there are no features whose bounds should affect the grid.
+ * Skips invisible features.
+ */
+export function getFeaturesWorldBounds(
+  features: ResolvedSketchFeature[],
+): Bounds2D | null {
+  let bounds: Bounds2D | null = null
+
+  for (const feature of features) {
+    if (!feature.visible) continue
+
+    const profileBounds = getProfileBounds(feature.sketch.profile)
+
+    if (!bounds) {
+      bounds = { ...profileBounds }
+    } else {
+      if (profileBounds.minX < bounds.minX) bounds.minX = profileBounds.minX
+      if (profileBounds.maxX > bounds.maxX) bounds.maxX = profileBounds.maxX
+      if (profileBounds.minY < bounds.minY) bounds.minY = profileBounds.minY
+      if (profileBounds.maxY > bounds.maxY) bounds.maxY = profileBounds.maxY
+    }
+  }
+
+  return bounds
 }
 
 export function drawGrid(
@@ -221,13 +253,27 @@ export function drawGrid(
   canvasH: number,
   stock: Stock,
   grid: GridSettings,
+  palette: CanvasThemePalette,
+  featureWorldBounds?: Bounds2D | null,
 ): void {
   if (!grid.visible) return
 
   const bounds = getStockBounds(stock)
   const centerX = bounds.minX + (bounds.maxX - bounds.minX) / 2
   const centerY = bounds.minY + (bounds.maxY - bounds.minY) / 2
-  const halfExtent = Math.max(grid.extent / 2, 10)
+  const defaultHalfExtent = Math.max(grid.extent / 2, 10)
+  let halfExtent = defaultHalfExtent
+
+  // Dynamically extend the grid to cover feature geometry on all sides.
+  if (featureWorldBounds) {
+    const toLeft = Math.abs(featureWorldBounds.minX - centerX)
+    const toRight = Math.abs(featureWorldBounds.maxX - centerX)
+    const toTop = Math.abs(featureWorldBounds.minY - centerY)
+    const toBottom = Math.abs(featureWorldBounds.maxY - centerY)
+    const neededReach = Math.max(toLeft, toRight, toTop, toBottom)
+    const padding = grid.majorSpacing
+    halfExtent = Math.max(defaultHalfExtent, neededReach + padding)
+  }
   const minX = centerX - halfExtent
   const maxX = centerX + halfExtent
   const minY = centerY - halfExtent
@@ -248,7 +294,7 @@ export function drawGrid(
     ctx.beginPath()
     ctx.moveTo(p0.cx, 0)
     ctx.lineTo(p1.cx, canvasH)
-    ctx.strokeStyle = isMajor ? 'rgba(104, 132, 154, 0.34)' : 'rgba(88, 112, 130, 0.18)'
+    ctx.strokeStyle = isMajor ? palette.gridMajor : palette.gridMinor
     ctx.lineWidth = isMajor ? 1.2 : 1
     ctx.stroke()
   }
@@ -261,14 +307,14 @@ export function drawGrid(
     ctx.beginPath()
     ctx.moveTo(0, p0.cy)
     ctx.lineTo(canvasW, p1.cy)
-    ctx.strokeStyle = isMajor ? 'rgba(104, 132, 154, 0.34)' : 'rgba(88, 112, 130, 0.18)'
+    ctx.strokeStyle = isMajor ? palette.gridMajor : palette.gridMinor
     ctx.lineWidth = isMajor ? 1.2 : 1
     ctx.stroke()
   }
 }
 
 const STOCK_LABEL_MIN_WIDTH_PX = 200
-const STOCK_EXCEEDED_STROKE = 'rgba(240, 160, 40, 0.9)'
+function stockExceededStroke(): string { return canvasColors().stockExceeded }
 
 /** A hit-testable rectangle for a stock dimension label. */
 export interface StockLabelRect {
@@ -284,14 +330,15 @@ function drawStockDimensionLabel(
   text: string,
   cx: number,
   cy: number,
+  palette: CanvasThemePalette,
 ): void {
   ctx.font = '11px sans-serif'
   const metrics = ctx.measureText(text)
   const halfW = metrics.width / 2 + 4
   const halfH = 9
-  ctx.fillStyle = 'rgba(18, 26, 36, 0.85)'
+  ctx.fillStyle = palette.labelBackground
   ctx.fillRect(cx - halfW, cy - halfH, halfW * 2, halfH * 2)
-  ctx.fillStyle = 'rgba(200, 220, 240, 0.95)'
+  ctx.fillStyle = palette.labelText
   ctx.textAlign = 'center'
   ctx.textBaseline = 'middle'
   ctx.fillText(text, cx, cy)
@@ -303,10 +350,11 @@ export function drawStockOutline(
   vt: ViewTransform,
   units: Units,
   exceeded: boolean,
+  palette: CanvasThemePalette,
   stockLabelRects?: StockLabelRect[],
 ): void {
   traceProfilePath(ctx, stock.profile, vt)
-  ctx.strokeStyle = exceeded ? STOCK_EXCEEDED_STROKE : hexToRgba(stock.color, 0.7)
+  ctx.strokeStyle = exceeded ? stockExceededStroke() : hexToRgba(stock.color, 0.7)
   ctx.lineWidth = 2
   ctx.setLineDash([7, 4])
   ctx.stroke()
@@ -341,6 +389,7 @@ export function drawStockOutline(
     widthLabelText,
     widthCx,
     widthCy,
+    palette,
   )
   const heightCx = maxCx + 8 + ctx.measureText(heightLabelText).width / 2
   const heightCy = (minCy + maxCy) / 2
@@ -349,6 +398,7 @@ export function drawStockOutline(
     heightLabelText,
     heightCx,
     heightCy,
+    palette,
   )
   ctx.restore()
 
@@ -384,13 +434,14 @@ export function drawClampFootprint(
 ): void {
   const profile = rectProfile(clamp.x, clamp.y, clamp.w, clamp.h)
   traceProfilePath(ctx, profile, vt)
+  const p = canvasColors()
   ctx.fillStyle = colliding
-    ? (selected ? 'rgba(209, 118, 118, 0.28)' : 'rgba(184, 98, 98, 0.18)')
-    : (selected ? 'rgba(118, 144, 209, 0.24)' : 'rgba(86, 110, 168, 0.14)')
+    ? (selected ? p.clampCollidingSelectedFill : p.clampCollidingFill)
+    : (selected ? p.clampSelectedFill : p.clampFill)
   ctx.fill()
   ctx.strokeStyle = colliding
-    ? (selected ? '#ffb0b0' : 'rgba(235, 122, 122, 0.92)')
-    : (selected ? '#9db9ff' : 'rgba(122, 151, 224, 0.88)')
+    ? (selected ? p.clampCollidingSelectedStroke : p.clampCollidingStroke)
+    : (selected ? p.clampSelectedStroke : p.clampStroke)
   ctx.lineWidth = selected ? 2.2 : 1.6
   ctx.setLineDash([6, 4])
   ctx.stroke()
@@ -405,9 +456,10 @@ export function drawTabFootprint(
 ): void {
   const profile = rectProfile(tab.x, tab.y, tab.w, tab.h)
   traceProfilePath(ctx, profile, vt)
-  ctx.fillStyle = selected ? 'rgba(168, 208, 110, 0.24)' : 'rgba(128, 175, 82, 0.14)'
+  const p = canvasColors()
+  ctx.fillStyle = selected ? p.tabSelectedFill : p.tabFill
   ctx.fill()
-  ctx.strokeStyle = selected ? '#c7ef94' : 'rgba(156, 205, 103, 0.88)'
+  ctx.strokeStyle = selected ? p.tabSelectedStroke : p.tabStroke
   ctx.lineWidth = selected ? 2.2 : 1.6
   ctx.setLineDash([6, 4])
   ctx.stroke()
@@ -418,6 +470,7 @@ export function drawOriginMarker(
   ctx: CanvasRenderingContext2D,
   origin: { x: number; y: number; name: string },
   vt: ViewTransform,
+  palette: CanvasThemePalette,
 ): void {
   const anchor = worldToCanvas({ x: origin.x, y: origin.y }, vt)
   const axisLength = 20
@@ -428,7 +481,7 @@ export function drawOriginMarker(
   ctx.beginPath()
   ctx.moveTo(anchor.cx, anchor.cy)
   ctx.lineTo(anchor.cx + axisLength, anchor.cy)
-  ctx.strokeStyle = '#e35b5b'
+  ctx.strokeStyle = palette.originAxisX
   ctx.lineWidth = 2
   ctx.stroke()
 
@@ -437,13 +490,13 @@ export function drawOriginMarker(
   ctx.lineTo(anchor.cx + axisLength - 6, anchor.cy - 3)
   ctx.lineTo(anchor.cx + axisLength - 6, anchor.cy + 3)
   ctx.closePath()
-  ctx.fillStyle = '#e35b5b'
+  ctx.fillStyle = palette.originAxisX
   ctx.fill()
 
   ctx.beginPath()
   ctx.moveTo(anchor.cx, anchor.cy)
   ctx.lineTo(anchor.cx, anchor.cy - axisLength)
-  ctx.strokeStyle = '#63c07a'
+  ctx.strokeStyle = palette.originAxisY
   ctx.lineWidth = 2
   ctx.stroke()
 
@@ -452,24 +505,24 @@ export function drawOriginMarker(
   ctx.lineTo(anchor.cx - 3, anchor.cy - axisLength + 6)
   ctx.lineTo(anchor.cx + 3, anchor.cy - axisLength + 6)
   ctx.closePath()
-  ctx.fillStyle = '#63c07a'
+  ctx.fillStyle = palette.originAxisY
   ctx.fill()
 
   ctx.beginPath()
   ctx.arc(anchor.cx, anchor.cy, 4, 0, Math.PI * 2)
-  ctx.fillStyle = '#5b90e3'
+  ctx.fillStyle = palette.originCenter
   ctx.fill()
-  ctx.strokeStyle = 'rgba(230, 237, 245, 0.95)'
+  ctx.strokeStyle = palette.labelText
   ctx.lineWidth = 1.5
   ctx.stroke()
 
   ctx.font = '10px "IBM Plex Mono", "SFMono-Regular", Consolas, monospace'
-  ctx.fillStyle = '#e35b5b'
+  ctx.fillStyle = palette.originAxisX
   ctx.fillText('X', anchor.cx + axisLength + 4, anchor.cy + 3)
-  ctx.fillStyle = '#63c07a'
+  ctx.fillStyle = palette.originAxisY
   ctx.fillText('Y', anchor.cx - 3, anchor.cy - axisLength - 4)
 
-  ctx.fillStyle = 'rgba(230, 237, 245, 0.95)'
+  ctx.fillStyle = palette.labelText
   ctx.fillText(origin.name, anchor.cx + 10, anchor.cy - 8)
   ctx.restore()
 }
@@ -484,6 +537,7 @@ export function drawBackdropImage(
   image: HTMLImageElement,
   vt: ViewTransform,
   selected: boolean,
+  palette: CanvasThemePalette,
   label = 'Backdrop',
 ): void {
   const center = worldToCanvas(backdrop.center, vt)
@@ -504,18 +558,18 @@ export function drawBackdropImage(
     ctx.rotate(rotation)
     ctx.beginPath()
     ctx.rect(-width / 2, -height / 2, width, height)
-    ctx.strokeStyle = '#efbc7a'
+    ctx.strokeStyle = palette.active
     ctx.lineWidth = 2
     ctx.setLineDash([8, 5])
     ctx.stroke()
     ctx.setLineDash([])
-    ctx.fillStyle = 'rgba(239, 188, 122, 0.06)'
+    ctx.fillStyle = hexToRgba(palette.active, 0.06)
     ctx.fill()
     ctx.restore()
 
-    ctx.fillStyle = 'rgba(18, 22, 29, 0.8)'
+    ctx.fillStyle = palette.labelBackground
     ctx.fillRect(center.cx - 38, center.cy - 14, 76, 18)
-    ctx.fillStyle = '#d8e4f0'
+    ctx.fillStyle = palette.labelText
     ctx.font = '11px monospace'
     ctx.textAlign = 'center'
     ctx.fillText(label, center.cx, center.cy - 1)

@@ -14,35 +14,30 @@
  * limitations under the License.
  */
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, ChangeEvent } from 'react'
 import { useRestoreCanvasFocus } from '../../utils/useRestoreCanvasFocus'
 import {
-  importDxfString,
-  importSvgString,
   inspectCamjString,
   inspectDxfString,
   inspectSvgString,
   type CamjInspection,
+  type ImportGeometryMode,
   type ImportInspection,
   type ImportSourceType,
 } from '../../import'
-import {
-  clampImportedMeshSilhouetteZSteps,
-  extractImportedMeshProfileAndBounds,
-  renderImportedMeshTopViewToDataUrl,
-} from '../../import/stl'
 import { useProjectStore } from '../../store/projectStore'
 import {
-  clearImportedSourceCaches,
-  loadImportedTriangleMesh,
-  normalizeImportedMeshForStorage,
-  serializeImportedMesh,
-  splitMeshByConnectedComponents,
   type ImportedModelFormat,
   type ModelAxisOrientation,
 } from '../../engine/importedMesh'
 import type { Units } from '../../utils/units'
+import { useImportGeometryAnalysis } from './useImportGeometryAnalysis'
+import { ImportGeometryModeSection } from './ImportGeometryModeSection'
+import { importModelFile } from './importModelFile'
+import { dialogsEn } from '../../i18n/locales/en/dialogs'
+import type { MessageParams } from '../../i18n/catalog'
+import { useI18n } from '../../i18n/i18nContext'
 
 interface LoadedImportFile {
   fileName: string
@@ -58,29 +53,17 @@ interface ImportGeometryDialogProps {
   onImportComplete?: () => void
 }
 
-/**
- * Maximum number of disjoint bodies the model importer will split into
- * individual features. Above this cap, the file is imported as a single
- * feature with a warning. Manifold's `project()` is run once per body, so an
- * uncapped import could be unboundedly slow for pathological inputs.
- */
-const MAX_IMPORT_BODIES = 64
-
-function sourceTypeLabel(sourceType: ImportSourceType): string {
+function sourceTypeLabel(sourceType: ImportSourceType, td: (key: keyof typeof dialogsEn) => string): string {
   if (sourceType === 'svg') return 'SVG'
   if (sourceType === 'dxf') return 'DXF'
   if (sourceType === 'stl') return 'STL'
   if (sourceType === 'obj') return 'OBJ'
-  if (sourceType === 'camj') return 'PureCutCNC Project'
-  return 'Unknown'
+  if (sourceType === 'camj') return td('dialogs.importGeometry.formatLabel.camj')
+  return td('dialogs.importGeometry.formatLabel.unknown')
 }
 
 function isModelSourceType(sourceType: ImportSourceType): sourceType is ImportedModelFormat {
   return sourceType === 'stl' || sourceType === 'obj'
-}
-
-function unitsLabel(units: Units): string {
-  return units === 'inch' ? 'Inch' : 'Millimeter'
 }
 
 function defaultJoinTolerance(units: Units): string {
@@ -89,25 +72,6 @@ function defaultJoinTolerance(units: Units): string {
 
 function joinToleranceStep(units: Units): string {
   return units === 'inch' ? '0.001' : '0.01'
-}
-
-function defaultSilhouetteZStepSize(units: Units): number {
-  return units === 'inch' ? 0.02 : 0.5
-}
-
-function recommendedSilhouetteZSteps(modelHeight: number, units: Units): number {
-  if (!(modelHeight > 0)) return clampImportedMeshSilhouetteZSteps(96)
-  return clampImportedMeshSilhouetteZSteps(Math.ceil(modelHeight / defaultSilhouetteZStepSize(units)))
-}
-
-function parseSilhouetteZStepsInput(value: string): number | null {
-  const trimmed = value.trim()
-  if (!trimmed) return null
-  const parsed = Number(trimmed)
-  if (!Number.isInteger(parsed) || parsed < 8 || parsed > 512) {
-    throw new Error('Silhouette Z steps must be between 8 and 512.')
-  }
-  return parsed
 }
 
 function detectSourceType(fileName: string): ImportSourceType | null {
@@ -123,6 +87,12 @@ function detectSourceType(fileName: string): ImportSourceType | null {
 export function ImportGeometryDialog({ onClose, onImportComplete }: ImportGeometryDialogProps) {
   useRestoreCanvasFocus()
   const { project, importShapes, importCamjFolders } = useProjectStore()
+  const { t } = useI18n()
+
+  function td(key: keyof typeof dialogsEn, params?: MessageParams): string {
+    return t(key, params)
+  }
+
   const [loadedFile, setLoadedFile] = useState<LoadedImportFile | null>(null)
   const [sourceUnits, setSourceUnits] = useState<Units | ''>('')
   const [joinTolerance, setJoinTolerance] = useState(defaultJoinTolerance(project.meta.units))
@@ -131,10 +101,11 @@ export function ImportGeometryDialog({ onClose, onImportComplete }: ImportGeomet
   const [dialogError, setDialogError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [loadingProgress, setLoadingProgress] = useState<number | null>(null)
-  const [loadingStage, setLoadingStage] = useState<string>('Processing model')
+  const [loadingStage, setLoadingStage] = useState<string>(() => td('dialogs.importGeometry.processingModel'))
   const [axisSwap, setAxisSwap] = useState<'none' | 'yz' | 'xz' | 'xy'>('none')
   const [silhouetteZSteps, setSilhouetteZSteps] = useState('')
   const [importStock, setImportStock] = useState(false)
+  const [geometryMode, setGeometryMode] = useState<ImportGeometryMode>('auto')
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
@@ -145,6 +116,60 @@ export function ImportGeometryDialog({ onClose, onImportComplete }: ImportGeomet
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [onClose])
 
+  // ── analysis hook (SVG/DXF parse + classify) ──────────────────────────
+  const sourceType = loadedFile?.sourceType
+  const fileText = loadedFile?.text
+  const parsedJoinTolerance = Number.parseFloat(joinTolerance)
+  const effectiveSourceUnitScale =
+    loadedFile?.inspection.detectedUnits === sourceUnits
+      ? (loadedFile?.inspection.sourceUnitScale ?? 1)
+      : 1
+
+  const {
+    cachedShapes,
+    parseWarnings,
+    parseError,
+    classification,
+  } = useImportGeometryAnalysis({
+    sourceType,
+    fileText,
+    fileName: loadedFile?.fileName ?? '',
+    sourceUnits,
+    targetUnits: project.meta.units,
+    joinTolerance: Number.isFinite(parsedJoinTolerance) && parsedJoinTolerance >= 0
+      ? parsedJoinTolerance
+      : 0,
+    allowCrossLayerJoins,
+    selectedLayers,
+    geometryMode,
+    sourceUnitScale: effectiveSourceUnitScale,
+    hasDxfLayers: (loadedFile?.inspection.layers?.length ?? 0) > 0,
+  })
+
+  // ── combined warnings (deduplicated parse + classifier) ───────────────
+  const combinedWarnings = useMemo(() => {
+    const classWarnings = classification?.result.warnings ?? []
+    const seen = new Set<string>()
+    const out: string[] = []
+    for (const w of [...parseWarnings, ...classWarnings]) {
+      if (!seen.has(w)) {
+        seen.add(w)
+        out.push(w)
+      }
+    }
+    return out
+  }, [parseWarnings, classification])
+
+  // ── file loading ──────────────────────────────────────────────────────
+  function resetDialogState() {
+    setSourceUnits('')
+    setJoinTolerance(defaultJoinTolerance(project.meta.units))
+    setAllowCrossLayerJoins(false)
+    setSelectedLayers(new Set())
+    setSilhouetteZSteps('')
+    setImportStock(false)
+  }
+
   function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0]
     if (!file) return
@@ -152,12 +177,8 @@ export function ImportGeometryDialog({ onClose, onImportComplete }: ImportGeomet
     const nextSourceType = detectSourceType(file.name)
     if (!nextSourceType) {
       setLoadedFile(null)
-      setSourceUnits('')
-      setJoinTolerance(defaultJoinTolerance(project.meta.units))
-      setAllowCrossLayerJoins(false)
-      setSelectedLayers(new Set())
-      setSilhouetteZSteps('')
-      setDialogError('Unsupported import format. Use .svg, .dxf, .stl, .obj, or .camj.')
+      resetDialogState()
+      setDialogError(td('dialogs.importGeometry.error.unsupportedFormat'))
       return
     }
 
@@ -167,13 +188,20 @@ export function ImportGeometryDialog({ onClose, onImportComplete }: ImportGeomet
         if (isModelSourceType(nextSourceType)) {
           const modelBuffer = readerEvent.target?.result
           if (!(modelBuffer instanceof ArrayBuffer)) throw new Error('Failed to read model file.')
-          const label = sourceTypeLabel(nextSourceType)
+          const label = sourceTypeLabel(nextSourceType, td)
           setLoadedFile({
             fileName: file.name,
             text: '',
             modelBuffer,
             sourceType: nextSourceType,
-            inspection: { layers: [], warnings: [], sourceUnitScale: 1, detectedUnits: null, unitsReliable: false, summary: `${label} file - 3D mesh imported by top-down silhouette projection` }
+            inspection: {
+              layers: [],
+              warnings: [],
+              sourceUnitScale: 1,
+              detectedUnits: null,
+              unitsReliable: false,
+              summary: `${label} file - 3D mesh imported by top-down silhouette projection`,
+            },
           })
           setSourceUnits(project.meta.units)
           setSelectedLayers(new Set())
@@ -181,7 +209,7 @@ export function ImportGeometryDialog({ onClose, onImportComplete }: ImportGeomet
           const text = String(readerEvent.target?.result ?? '')
           const camjInspection = inspectCamjString(text)
           if (camjInspection.folderIds.length === 0) {
-            throw new Error('No folders with features found in the selected .camj file.')
+            throw new Error(td('dialogs.importGeometry.error.noCamjFolders'))
           }
           setLoadedFile({
             fileName: file.name,
@@ -193,7 +221,7 @@ export function ImportGeometryDialog({ onClose, onImportComplete }: ImportGeomet
               sourceUnitScale: 1,
               detectedUnits: camjInspection.sourceUnits,
               unitsReliable: true,
-              summary: `${sourceTypeLabel(nextSourceType)} - ${camjInspection.folderIds.length} importable folder${camjInspection.folderIds.length === 1 ? '' : 's'}`,
+              summary: `${sourceTypeLabel(nextSourceType, td)} - ${camjInspection.folderIds.length} importable folder${camjInspection.folderIds.length === 1 ? '' : 's'}`,
             },
             camj: camjInspection,
           })
@@ -213,13 +241,8 @@ export function ImportGeometryDialog({ onClose, onImportComplete }: ImportGeomet
         setDialogError(null)
       } catch (error) {
         setLoadedFile(null)
-        setSourceUnits('')
-        setJoinTolerance(defaultJoinTolerance(project.meta.units))
-        setAllowCrossLayerJoins(false)
-        setSelectedLayers(new Set())
-        setSilhouetteZSteps('')
-        setImportStock(false)
-        setDialogError(error instanceof Error ? error.message : 'Failed to inspect geometry file.')
+        resetDialogState()
+        setDialogError(error instanceof Error ? error.message : td('dialogs.importGeometry.error.inspectFailed'))
       }
     }
     if (isModelSourceType(nextSourceType)) {
@@ -229,6 +252,7 @@ export function ImportGeometryDialog({ onClose, onImportComplete }: ImportGeomet
     }
   }
 
+  // ── layer / folder selection ──────────────────────────────────────────
   function toggleLayer(layer: string) {
     setSelectedLayers((prev) => {
       const next = new Set(prev)
@@ -242,33 +266,29 @@ export function ImportGeometryDialog({ onClose, onImportComplete }: ImportGeomet
     setSelectedLayers(value ? new Set(loadedFile?.inspection.layers ?? []) : new Set())
   }
 
+  // ── import ────────────────────────────────────────────────────────────
   async function handleImport() {
     if (!loadedFile) {
-      setDialogError('Choose an SVG, DXF, STL, OBJ, or .camj file to import.')
+      setDialogError(td('dialogs.importGeometry.error.chooseFile'))
       return
     }
     if (!sourceUnits) {
-      setDialogError('Source units could not be detected. Choose the source units to continue.')
+      setDialogError(td('dialogs.importGeometry.error.sourceUnits'))
       return
     }
 
     setBusy(true)
     setLoadingProgress(0)
-    setLoadingStage('Preparing import')
+    setLoadingStage(td('dialogs.importGeometry.preparingImport'))
     setDialogError(null)
 
     try {
-      const keepDetectedScale = loadedFile.inspection.detectedUnits === sourceUnits
-      const sourceUnitScale = keepDetectedScale ? loadedFile.inspection.sourceUnitScale : 1
-      const parsedJoinTolerance = Number.parseFloat(joinTolerance)
-      if (loadedFile.sourceType === 'dxf' && (!Number.isFinite(parsedJoinTolerance) || parsedJoinTolerance < 0)) {
-        setDialogError('Join tolerance must be a non-negative number.')
+      const tolerance = Number.parseFloat(joinTolerance)
+      if (loadedFile.sourceType === 'dxf' && (!Number.isFinite(tolerance) || tolerance < 0)) {
+        setDialogError(td('dialogs.importGeometry.error.joinTolerance'))
         setBusy(false)
         return
       }
-
-      const hasDxfLayers = loadedFile.sourceType === 'dxf' && loadedFile.inspection.layers.length > 0
-      const layerFilter = hasDxfLayers ? [...selectedLayers] : null
 
       let createdIds: string[] = []
 
@@ -278,11 +298,11 @@ export function ImportGeometryDialog({ onClose, onImportComplete }: ImportGeomet
         const selectedFolderIds = [...selectedLayers]
         const wantsStock = importStock && camj.stockIsFeatureBased
         if (selectedFolderIds.length === 0 && !wantsStock) {
-          setDialogError('Select at least one folder to import, or check "Import stock from source".')
+          setDialogError(td('dialogs.importGeometry.error.selectFolder'))
           setBusy(false)
           return
         }
-        setLoadingStage('Merging folders')
+        setLoadingStage(td('dialogs.importGeometry.mergingFolders'))
         createdIds = importCamjFolders({
           fileName: loadedFile.fileName,
           sourceProject: camj.project,
@@ -290,183 +310,67 @@ export function ImportGeometryDialog({ onClose, onImportComplete }: ImportGeomet
           importStock: wantsStock,
         })
         if (createdIds.length === 0 && !wantsStock) {
-          setDialogError('No features were imported from the selected folders.')
+          setDialogError(td('dialogs.importGeometry.error.noFeaturesImported'))
           setBusy(false)
           return
         }
         setLoadingProgress(100)
       } else if (isModelSourceType(loadedFile.sourceType)) {
-        const modelFormat = loadedFile.sourceType
-        const modelLabel = sourceTypeLabel(loadedFile.sourceType)
-        const modelScale = sourceUnits === project.meta.units ? 1 : (sourceUnits === 'inch' ? 25.4 : 1/25.4)
-        const requestedSilhouetteZSteps = parseSilhouetteZStepsInput(silhouetteZSteps)
-
-        const fileData = loadedFile.modelBuffer
-        if (!fileData) throw new Error('Missing file data')
-
-        setLoadingStage('Parsing mesh')
-        setLoadingProgress(5)
-        let parsedMesh = loadImportedTriangleMesh(modelFormat, fileData, axisSwap)
-        if (!parsedMesh) throw new Error(`Failed to parse ${modelLabel} mesh`)
-        setLoadingProgress(10)
-
-        setLoadingStage('Normalizing mesh')
-        const importedMesh = normalizeImportedMeshForStorage(parsedMesh, modelScale)
-        parsedMesh = null
-        clearImportedSourceCaches()
-        const automaticSilhouetteZSteps = recommendedSilhouetteZSteps(
-          importedMesh.bounds.maxZ - importedMesh.bounds.minZ,
-          project.meta.units,
-        )
-        const resolvedSilhouetteZSteps = requestedSilhouetteZSteps ?? automaticSilhouetteZSteps
-
-        setLoadingStage('Detecting bodies')
-        setLoadingProgress(13)
-        const detectedBodies = splitMeshByConnectedComponents(importedMesh)
-        let bodiesToImport: typeof detectedBodies
-        let truncationWarning: string | null = null
-        if (detectedBodies.length <= 1) {
-          bodiesToImport = [importedMesh]
-        } else if (detectedBodies.length > MAX_IMPORT_BODIES) {
-          bodiesToImport = [importedMesh]
-          truncationWarning = (
-            `The imported ${modelLabel} contains ${detectedBodies.length} disjoint bodies, ` +
-            `which exceeds the per-import limit of ${MAX_IMPORT_BODIES}. ` +
-            `Imported as a single feature; the bodies will not be individually selectable. ` +
-            `Split the file into smaller pieces or boolean-union it before importing if you need per-body features.`
-          )
-        } else {
-          bodiesToImport = detectedBodies
-        }
-        const splitIntoBodies = bodiesToImport.length > 1
-
-        const baseName = loadedFile.fileName.replace(/\.(stl|obj)$/i, '')
-        const { addFeature, addFeatureFolder, updateFeatureFolder } = useProjectStore.getState()
-
-        let importFolderId: string | null = null
-        if (splitIntoBodies) {
-          importFolderId = addFeatureFolder('features')
-          updateFeatureFolder(importFolderId, { name: baseName })
-        }
-
-        const newFeatureIds: string[] = []
-        const projectionBudget = 70
-        const projectionStart = 15
-
-        for (let bodyIndex = 0; bodyIndex < bodiesToImport.length; bodyIndex += 1) {
-          const bodyMesh = bodiesToImport[bodyIndex]
-          const bodyLabel = splitIntoBodies
-            ? `Body ${bodyIndex + 1} / ${bodiesToImport.length}`
-            : modelLabel
-          const bodyStart = projectionStart + (bodyIndex / bodiesToImport.length) * projectionBudget
-          const bodyEnd = projectionStart + ((bodyIndex + 1) / bodiesToImport.length) * projectionBudget
-
-          setLoadingStage(`Projecting silhouette — ${bodyLabel} (${resolvedSilhouetteZSteps} Z steps)`)
-          setLoadingProgress(Math.round(bodyStart))
-          const modelInfo = await extractImportedMeshProfileAndBounds(bodyMesh, (p) => {
-            setLoadingProgress(Math.round(bodyStart + (bodyEnd - bodyStart) * (p / 100)))
-          }, { silhouetteZSteps: resolvedSilhouetteZSteps })
-          if (!modelInfo) {
-            throw new Error(`Failed to generate silhouette for ${bodyLabel.toLowerCase()} of ${modelLabel} import`)
-          }
-
-          let bodyTopViewDataUrl: string | undefined
-          try {
-            const url = renderImportedMeshTopViewToDataUrl(bodyMesh)
-            if (url) bodyTopViewDataUrl = url
-          } catch {
-            // top-view rendering is best-effort
-          }
-
-          const featureId = crypto.randomUUID()
-          const featureName = bodyIndex === 0 ? baseName : `${baseName} (${bodyIndex + 1})`
-          addFeature({
-            id: featureId,
-            name: featureName,
-            kind: 'stl',
-            folderId: importFolderId,
-            stl: {
-              format: modelFormat,
-              filePath: undefined,
-              mesh: serializeImportedMesh(bodyMesh, modelFormat),
-              scale: 1,
-              axisSwap: 'none',
-              silhouettePaths: modelInfo.silhouettePaths,
-              topViewDataUrl: bodyTopViewDataUrl,
-            },
-            sketch: {
-              profile: modelInfo.profile,
-              origin: { x: 0, y: 0 },
-              orientationAngle: 0,
-              dimensions: [],
-              constraints: [],
-            },
-            operation: 'model',
-            z_top: modelInfo.z_top,
-            z_bottom: modelInfo.z_bottom,
-            visible: true,
-            locked: false,
-          })
-          newFeatureIds.push(featureId)
-        }
-
-        setLoadingProgress(100)
-        createdIds = newFeatureIds
-
-        if (truncationWarning) {
-          window.alert(truncationWarning)
-        }
+        const modelBuffer = loadedFile.modelBuffer
+        if (!modelBuffer) throw new Error('Missing file data')
+        createdIds = await importModelFile({
+          modelFormat: loadedFile.sourceType,
+          modelBuffer,
+          fileName: loadedFile.fileName,
+          projectUnits: project.meta.units,
+          sourceUnits: sourceUnits as Units,
+          axisSwap,
+          silhouetteZSteps,
+          onProgress: (stage, pct) => { setLoadingStage(stage); setLoadingProgress(pct) },
+        })
       } else {
-        setLoadingStage('Importing geometry')
-        const result = loadedFile.sourceType === 'svg'
-          ? importSvgString(loadedFile.text, {
-              fileName: loadedFile.fileName,
-              targetUnits: project.meta.units,
-              sourceUnits,
-              sourceUnitScale,
-            })
-          : importDxfString(loadedFile.text, {
-              fileName: loadedFile.fileName,
-              targetUnits: project.meta.units,
-              sourceUnits,
-              sourceUnitScale,
-              joinTolerance: parsedJoinTolerance,
-              allowCrossLayerJoins,
-              layerFilter,
-            })
+        // SVG / DXF import — use pre-parsed shapes and classification
+        setLoadingStage(td('dialogs.importGeometry.importingGeometry'))
+        if (!cachedShapes || cachedShapes.length === 0) {
+          setDialogError(td('dialogs.importGeometry.error.noGeometryFound'))
+          setBusy(false)
+          return
+        }
 
         createdIds = importShapes({
           fileName: loadedFile.fileName,
           sourceType: loadedFile.sourceType,
-          shapes: result.shapes,
+          shapes: cachedShapes,
+          classified: classification?.classified,
         })
-        
-        if (result.warnings.length > 0) {
-          window.alert(
-            `Imported ${createdIds.length} feature${createdIds.length === 1 ? '' : 's'} with warnings:\n\n${result.warnings.join('\n')}`,
-          )
+
+        if (combinedWarnings.length > 0) {
+          const alertKey = createdIds.length === 1
+            ? 'dialogs.importGeometry.importedFeaturesWarnings.one' as const
+            : 'dialogs.importGeometry.importedFeaturesWarnings.other' as const
+          window.alert(td(alertKey, { count: createdIds.length, warnings: combinedWarnings.join('\n') }))
         }
 
         if (createdIds.length === 0) {
-          setDialogError(result.warnings[0] ?? 'No importable geometry found in the selected file.')
+          setDialogError(combinedWarnings[0] ?? td('dialogs.importGeometry.error.noGeometryFound'))
           setBusy(false)
           return
         }
       }
 
-
-
       onImportComplete?.()
       onClose()
     } catch (error) {
-      setDialogError(error instanceof Error ? error.message : 'Failed to import geometry file.')
+      setDialogError(error instanceof Error ? error.message : td('dialogs.importGeometry.error.importFailed'))
       setBusy(false)
       setLoadingProgress(null)
-      setLoadingStage('Processing model')
+      setLoadingStage(td('dialogs.importGeometry.processingModel'))
     }
   }
 
+  // ── derived display values ────────────────────────────────────────────
   const inspectionWarnings = loadedFile?.inspection.warnings ?? []
+  const isSvgDxf = sourceType === 'svg' || sourceType === 'dxf'
   const isCamj = loadedFile?.sourceType === 'camj'
   const showJoinTolerance = loadedFile?.sourceType === 'dxf'
   const dxfLayers = loadedFile?.sourceType === 'dxf' ? (loadedFile.inspection.layers ?? []) : []
@@ -490,8 +394,8 @@ export function ImportGeometryDialog({ onClose, onImportComplete }: ImportGeomet
         onClick={(event) => event.stopPropagation()}
       >
         <div className="dialog-header">
-          <h2 className="dialog-title">Import Geometry</h2>
-          <button className="dialog-close" onClick={onClose} aria-label="Close" type="button">
+          <h2 className="dialog-title">{td('dialogs.importGeometry.title')}</h2>
+          <button className="dialog-close" onClick={onClose} aria-label={td('dialogs.common.close')} type="button">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M18 6L6 18M6 6l12 12" />
             </svg>
@@ -504,55 +408,68 @@ export function ImportGeometryDialog({ onClose, onImportComplete }: ImportGeomet
 
             {/* File */}
             <div className="dialog-section-group">
-              <label className="dialog-section-title">Source File</label>
+              <label className="dialog-section-title">{td('dialogs.importGeometry.sourceFile')}</label>
               <button
                 className="btn-secondary import-dialog__file-button"
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
               >
-                {loadedFile ? 'Choose Different File' : 'Choose SVG, DXF, STL, OBJ, or .camj'}
+                {loadedFile ? td('dialogs.importGeometry.chooseDifferentFile') : td('dialogs.importGeometry.chooseFile')}
               </button>
               <input ref={fileInputRef} type="file" accept=".svg,.dxf,.stl,.obj,.camj" onChange={handleFileChange} style={{ display: 'none' }} />
               <div className="import-dialog__file-name">
-                {loadedFile ? loadedFile.fileName : 'No file selected.'}
+                {loadedFile ? loadedFile.fileName : td('dialogs.importGeometry.noFileSelected')}
               </div>
             </div>
 
             {/* File info + settings — only shown once a file is loaded */}
             {loadedFile ? (
               <div className="dialog-section-group">
-                <label className="dialog-section-title">Settings</label>
+                <label className="dialog-section-title">{td('dialogs.importGeometry.settings')}</label>
+
+                {/* Geometry mode — SVG/DXF only */}
+                {isSvgDxf ? (
+                  <ImportGeometryModeSection
+                    sourceType={sourceType}
+                    geometryMode={geometryMode}
+                    onGeometryModeChange={setGeometryMode}
+                    classification={classification}
+                    combinedWarnings={combinedWarnings}
+                    parseError={parseError}
+                    hasShapes={cachedShapes !== null && cachedShapes.length > 0}
+                  />
+                ) : null}
 
                 {/* Format */}
                 <div className="import-dialog__info-row">
-                  <span>Format</span>
-                  <strong>{sourceTypeLabel(loadedFile.sourceType)}</strong>
+                  <span>{td('dialogs.importGeometry.format')}</span>
+                  <strong>{sourceTypeLabel(loadedFile.sourceType, td)}</strong>
                 </div>
 
                 {/* Source Units */}
                 <div className="import-dialog__info-row">
-                  <span>Source Units</span>
+                  <span>{td('dialogs.importGeometry.sourceUnits')}</span>
                   {isCamj ? (
-                    <strong>{unitsLabel(sourceUnits as Units)}</strong>
+                    <strong>{sourceUnits === 'inch' ? td('dialogs.common.inch') : td('dialogs.common.millimeter')}</strong>
                   ) : (
                     <select
                       value={sourceUnits}
                       onChange={(event) => setSourceUnits(event.target.value as Units)}
                     >
-                      <option value="">Select units</option>
-                      <option value="mm">Millimeter</option>
-                      <option value="inch">Inch</option>
+                      <option value="">{td('dialogs.importGeometry.selectUnits')}</option>
+                      <option value="mm">{td('dialogs.common.millimeter')}</option>
+                      <option value="inch">{td('dialogs.common.inch')}</option>
                     </select>
                   )}
                 </div>
                 {!loadedFile.inspection.detectedUnits && !isModelSourceType(loadedFile.sourceType) && !isCamj ? (
                   <div className="import-dialog__field-note import-dialog__field-note--warn">
-                    Units not detected — choose the source units before importing.
+                    {td('dialogs.importGeometry.unitsNotDetected')}
                   </div>
                 ) : null}
                 {isCamj ? (
                   <div className="import-dialog__field-note">
-                    Backdrop, grid, machine definitions, and global constraints are not imported.
+                    {td('dialogs.importGeometry.camjImportNote')}
                   </div>
                 ) : null}
 
@@ -560,7 +477,7 @@ export function ImportGeometryDialog({ onClose, onImportComplete }: ImportGeomet
                 {isCamj && loadedFile.camj?.stockIsFeatureBased ? (
                   <>
                     <label className="import-dialog__toggle-row">
-                      <span className="import-dialog__toggle-label">Import stock from source</span>
+                      <span className="import-dialog__toggle-label">{td('dialogs.importGeometry.importStock')}</span>
                       <input
                         className="import-dialog__toggle-input"
                         type="checkbox"
@@ -570,7 +487,7 @@ export function ImportGeometryDialog({ onClose, onImportComplete }: ImportGeomet
                     </label>
                     {importStock ? (
                       <div className="import-dialog__field-note import-dialog__field-note--warn">
-                        Current stock and origin will be replaced.
+                        {td('dialogs.importGeometry.stockWillBeReplaced')}
                       </div>
                     ) : null}
                   </>
@@ -578,35 +495,35 @@ export function ImportGeometryDialog({ onClose, onImportComplete }: ImportGeomet
 
                 {/* Project Units */}
                 <div className="import-dialog__info-row">
-                  <span>Project Units</span>
-                  <strong>{unitsLabel(project.meta.units)}</strong>
+                  <span>{td('dialogs.importGeometry.projectUnits')}</span>
+                  <strong>{project.meta.units === 'inch' ? td('dialogs.common.inch') : td('dialogs.common.millimeter')}</strong>
                 </div>
 
                 {/* Axis orientation for imported 3D models */}
                 {isModelSourceType(loadedFile.sourceType) ? (
                   <div className="import-dialog__info-row">
-                    <span>Axis Orientation</span>
+                    <span>{td('dialogs.importGeometry.axisOrientation')}</span>
                     <select
                       value={axisSwap}
                       onChange={(event) => setAxisSwap(event.target.value as ModelAxisOrientation)}
                     >
-                      <option value="none">Original (Z-Up)</option>
-                      <option value="yz">Swap Y / Z (Y-Up)</option>
-                      <option value="xz">Swap X / Z</option>
-                      <option value="xy">Swap X / Y</option>
+                      <option value="none">{td('dialogs.importGeometry.axisOriginal')}</option>
+                      <option value="yz">{td('dialogs.importGeometry.axisSwapYZ')}</option>
+                      <option value="xz">{td('dialogs.importGeometry.axisSwapXZ')}</option>
+                      <option value="xy">{td('dialogs.importGeometry.axisSwapXY')}</option>
                     </select>
                   </div>
                 ) : null}
 
                 {isModelSourceType(loadedFile.sourceType) ? (
                   <div className="import-dialog__info-row">
-                    <span>Silhouette Z Steps</span>
+                    <span>{td('dialogs.importGeometry.silhouetteZSteps')}</span>
                     <input
                       type="number"
                       min="8"
                       max="512"
                       step="1"
-                      placeholder="Auto"
+                      placeholder={td('dialogs.importGeometry.silhouetteAuto')}
                       value={silhouetteZSteps}
                       onChange={(event) => setSilhouetteZSteps(event.target.value)}
                     />
@@ -617,7 +534,7 @@ export function ImportGeometryDialog({ onClose, onImportComplete }: ImportGeomet
                 {showJoinTolerance ? (
                   <>
                     <div className="import-dialog__info-row">
-                      <span>Join Tolerance ({project.meta.units === 'inch' ? 'in' : 'mm'})</span>
+                      <span>{td('dialogs.importGeometry.joinTolerance', { unit: project.meta.units === 'inch' ? 'in' : 'mm' })}</span>
                       <input
                         type="number"
                         min="0"
@@ -629,7 +546,7 @@ export function ImportGeometryDialog({ onClose, onImportComplete }: ImportGeomet
 
                     {/* Cross-Layer Join */}
                     <label className="import-dialog__toggle-row">
-                      <span className="import-dialog__toggle-label">Cross-Layer Join</span>
+                      <span className="import-dialog__toggle-label">{td('dialogs.importGeometry.crossLayerJoin')}</span>
                       <input
                         className="import-dialog__toggle-input"
                         type="checkbox"
@@ -640,7 +557,7 @@ export function ImportGeometryDialog({ onClose, onImportComplete }: ImportGeomet
                   </>
                 ) : null}
 
-                {/* Warnings */}
+                {/* Inspection warnings */}
                 {inspectionWarnings.length > 0 ? (
                   <div className="export-warning-list">
                     {inspectionWarnings.map((warning) => (
@@ -669,13 +586,13 @@ export function ImportGeometryDialog({ onClose, onImportComplete }: ImportGeomet
           {showLayers ? (
             <div className="import-dialog__layers-column">
               <div className="import-dialog__layers-header">
-                <label className="dialog-section-title">{showCamjFolders ? 'Folders' : 'Layers'}</label>
+                <label className="dialog-section-title">{showCamjFolders ? td('dialogs.importGeometry.folders') : td('dialogs.importGeometry.layers')}</label>
                 <button
                   className="import-dialog__layers-toggle"
                   type="button"
                   onClick={() => setAllLayersSelected(!allLayersSelected)}
                 >
-                  {allLayersSelected ? 'Deselect all' : 'Select all'}
+                  {allLayersSelected ? td('dialogs.importGeometry.deselectAll') : td('dialogs.importGeometry.selectAll')}
                 </button>
               </div>
               <div className="import-dialog__layer-list import-dialog__layer-list--fill">
@@ -709,7 +626,11 @@ export function ImportGeometryDialog({ onClose, onImportComplete }: ImportGeomet
               </div>
               {!someLayersSelected ? (
                 <div className="cam-field-message">
-                  Select at least one {showCamjFolders ? 'folder' : 'layer'} to import.
+                  {td('dialogs.importGeometry.selectAtLeastOne', {
+                    type: td(showCamjFolders
+                      ? 'dialogs.importGeometry.folderNoun'
+                      : 'dialogs.importGeometry.layerNoun'),
+                  })}
                 </div>
               ) : null}
             </div>
@@ -717,14 +638,14 @@ export function ImportGeometryDialog({ onClose, onImportComplete }: ImportGeomet
         </div>
 
         <div className="dialog-footer">
-          <button className="btn-secondary" onClick={onClose} type="button">Cancel</button>
+          <button className="btn-secondary" onClick={onClose} type="button">{td('dialogs.common.cancel')}</button>
           <button
             className="btn-primary"
             onClick={handleImport}
             type="button"
             disabled={!loadedFile || !sourceUnits || busy || (showLayers && !someLayersSelected && !(isCamj && importStock))}
           >
-            Import
+            {td('dialogs.importGeometry.import')}
           </button>
         </div>
       </div>

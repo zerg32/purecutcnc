@@ -20,7 +20,9 @@ import { validQuickOperationsForFeature, type QuickOperation } from '../componen
 import { useOutsideDismiss } from '../hooks/useOutsideDismiss'
 import { useProjectStore } from '../store/projectStore'
 import { getDefinitionId, getInstanceIdsForDefinition } from '../store/helpers/featureDefinitions'
+import { commonSectionOfIds } from '../store/helpers/featureRoles'
 import type { Clamp, Project, SketchFeature, Tab } from '../types/project'
+import { resolveFeatureInstance } from '../store/helpers/resolveFeatures'
 
 export interface TreeContextMenuState {
   entityType: 'feature' | 'tab' | 'clamp'
@@ -93,6 +95,7 @@ export function useTreeContextMenu({ project }: UseTreeContextMenuArgs): {
   setAddToFolderSubmenu: Dispatch<SetStateAction<FolderSubmenuPosition | null>>
   menuFeatureFolders: MenuFolderEntry[]
   menuSelectionInGroupedFolder: boolean
+  menuSelectionSectionsMixed: boolean
   menuSelectionIsGroup: boolean
   menuHasMultipleSelection: boolean
   menuCanUseAsStock: boolean
@@ -114,9 +117,9 @@ export function useTreeContextMenu({ project }: UseTreeContextMenuArgs): {
   const menuFeature = useMemo(
     () =>
       treeContextMenu?.entityType === 'feature'
-        ? project.features.find((feature) => feature.id === treeContextMenu.primaryId) ?? null
+        ? resolveFeatureInstance(project, treeContextMenu.primaryId)
         : null,
-    [treeContextMenu, project.features]
+    [treeContextMenu, project]
   )
 
   const menuClamp = useMemo(
@@ -215,14 +218,29 @@ export function useTreeContextMenu({ project }: UseTreeContextMenuArgs): {
     return getInstanceIdsForDefinition(project, defId).length > 1
   }, [treeContextMenu, menuFeature, project])
 
+  // Folders are single-section: only offer the folders of the selection's own
+  // section (features / regions / construction). A mixed-section selection
+  // gets no folder targets at all (issue #199).
+  const menuSelectionSection = useMemo(
+    () => (
+      treeContextMenu?.entityType === 'feature'
+        ? commonSectionOfIds(project, treeContextMenu.ids)
+        : null
+    ),
+    [treeContextMenu, project],
+  )
+
+  const menuSelectionSectionsMixed =
+    treeContextMenu?.entityType === 'feature' && menuSelectionSection === null
+
   const menuFeatureFolders = useMemo<MenuFolderEntry[]>(
     () =>
-      treeContextMenu?.entityType === 'feature'
+      treeContextMenu?.entityType === 'feature' && menuSelectionSection !== null
         ? project.featureFolders
-            .filter((folder) => (folder.section ?? 'features') === 'features')
+            .filter((folder) => (folder.section ?? 'features') === menuSelectionSection)
             .map((folder) => ({ id: folder.id, name: folder.name }))
         : [],
-    [treeContextMenu, project.featureFolders],
+    [treeContextMenu, menuSelectionSection, project.featureFolders],
   )
 
   const menuSelectionInGroupedFolder = useMemo(
@@ -308,6 +326,7 @@ export function useTreeContextMenu({ project }: UseTreeContextMenuArgs): {
     setAddToFolderSubmenu,
     menuFeatureFolders,
     menuSelectionInGroupedFolder,
+    menuSelectionSectionsMixed,
     menuSelectionIsGroup,
     menuHasMultipleSelection,
     menuCanUseAsStock,

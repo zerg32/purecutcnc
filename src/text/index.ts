@@ -15,6 +15,7 @@
  */
 
 import { parseFontJson } from './fontData'
+import { cleanOutlineContour } from './outlineContours'
 import helvetikerRegular from 'three/examples/fonts/helvetiker_regular.typeface.json'
 import helvetikerBold from 'three/examples/fonts/helvetiker_bold.typeface.json'
 import optimerRegular from 'three/examples/fonts/optimer_regular.typeface.json'
@@ -198,7 +199,7 @@ const GLYPHS: Record<string, GlyphDefinition> = {
 }
 
 function invertOperation(operation: FeatureOperation): FeatureOperation {
-  if (operation === 'region' || operation === 'model') return operation
+  if (operation === 'region' || operation === 'model' || operation === 'construction') return operation
   return operation === 'add' ? 'subtract' : 'add'
 }
 
@@ -267,16 +268,6 @@ function closedProfile(points: Point[]): SketchProfile | null {
     segments: [...unique.slice(1).map((point) => ({ type: 'line' as const, to: clonePoint(point) })), { type: 'line' as const, to: clonePoint(unique[0]) }],
     closed: true,
   }
-}
-
-function signedArea(points: Point[]): number {
-  let area = 0
-  for (let index = 0; index < points.length; index += 1) {
-    const current = points[index]
-    const next = points[(index + 1) % points.length]
-    area += current.x * next.y - next.x * current.y
-  }
-  return area * 0.5
 }
 
 function normalizeClosedPoints(points: Point[]): Point[] {
@@ -408,7 +399,14 @@ function outlineProfilesFromFont(text: string, size: number, fontId: TextFontId)
       glyphIndex: gIdx,
       glyphChar,
     }))
-    .filter(({ profile }) => Math.abs(signedArea(profileVertices(profile))) > size * size * 0.001)
+    .flatMap(({ profile, depth, glyphIndex: gIdx, glyphChar }) =>
+      cleanOutlineContour(profileVertices(profile), size).flatMap((points) => {
+        const cleanedProfile = closedProfile(points)
+        return cleanedProfile
+          ? [{ profile: cleanedProfile, depth, glyphIndex: gIdx, glyphChar }]
+          : []
+      }),
+    )
 }
 
 function normalizeText(text: string): string {

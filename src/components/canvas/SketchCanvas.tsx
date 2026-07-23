@@ -44,6 +44,8 @@ import type { OperationDimEdit } from './manualEntry'
 import { useDimensionEditWorkflow } from './useDimensionEditWorkflow'
 import { ConstraintEditPanel } from './ConstraintEditPanel'
 import { DrivingDimensionPanel } from './DrivingDimensionPanel'
+import { NgonParameterPanel, RectCornerParameterPanel } from './CreationParameterReferences'
+import { GearParameterPanel } from './GearParameterPanel'
 import { useDrivingDimensionWorkflow } from './useDrivingDimensionWorkflow'
 import { useConstraintWorkflow } from './useConstraintWorkflow'
 import { useFilletWorkflow } from './useFilletWorkflow'
@@ -59,6 +61,8 @@ import { useCanvasContextMenu } from './useCanvasContextMenu'
 import { drawDimensionAnchorDots, drawDimensions, drawPendingDimensionPreview, drawTapeMeasure } from './dimensionRendering'
 import {
   drawFeature,
+  drawFeatureInfo,
+  drawLineFeatureBatch,
   drawMoveGuide,
   drawPendingPathLoop,
   drawPendingPoint,
@@ -66,6 +70,7 @@ import {
   drawPendingSlotAxis,
   drawPendingSlotWidth,
   drawPendingNgon,
+  drawPendingGear,
   drawPendingRoundRect,
   drawPendingChamferRect,
   drawPreviewProfile,
@@ -87,6 +92,7 @@ import {
 } from './hitTest'
 import { drawStlTopViewImage } from './stlTopViewRenderer'
 import { triggerDimensionEdit as triggerDimensionEditFn } from './triggerDimensionEdit'
+import { CreationTargetBadge } from './CreationTargetBadge'
 import { DepthLegend } from './DepthLegend'
 import { resolveProfileSegments } from '../../store/helpers/resolveProfileSegments'
 import {
@@ -114,8 +120,10 @@ import {
   drawSketchEditPreviewPoint,
   drawStockOutline,
   drawTabFootprint,
+  getFeaturesWorldBounds,
   type StockLabelRect,
 } from './scenePrimitives'
+import { setCanvasPalette, canvasRgba, canvasColors } from './canvasPalette'
 import { generateTextShapes } from '../../text'
 import {
   getProfileBounds,
@@ -134,13 +142,19 @@ import { useStableEvent } from '../../hooks/useStableEvent'
 import { useRafScheduler } from '../../hooks/useRafScheduler'
 import { useShellMode, isTabletMode } from '../layout/useShellMode'
 import { CanvasWorkflowPanel } from './CanvasWorkflowPanel'
+import { OverlapFeaturePicker } from './OverlapFeaturePicker'
 import { useCanvasWorkflowPanel } from './useCanvasWorkflowPanel'
+import { useOverlapFeaturePicker } from './useOverlapFeaturePicker'
 import {
   buildPlacedClipboardFeatures,
   FEATURE_CLIPBOARD_PLACEMENT_EVENT,
   pasteClipboardFeatures,
   type FeatureClipboardPayload,
 } from '../../platform/featureClipboard'
+import { resolveFeatureInstance, resolveFeatureInstances, resolveFeatureRow, resolvedProjectFeatures } from '../../store/helpers/resolveFeatures'
+import { useTheme } from '../../theme/themeContext'
+import { useI18n } from '../../i18n/i18nContext'
+import type { MessageKey } from '../../i18n/locales/en'
 
 export type { SketchCanvasHandle }
 
@@ -164,6 +178,9 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
   },
   ref
 ) {
+  const { palette } = useTheme()
+  const { t, tPlural } = useI18n()
+  const canvasPalette = palette.canvas
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const isDraggingNodeRef = useRef(false)
@@ -285,6 +302,8 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
     placePendingAddAt,
     placePendingSlotAt,
     placePendingNgonAt,
+    setPendingGearRadiusAt,
+    completePendingGear,
     placePendingTextAt,
     placeOriginAt,
     addPendingPolygonPoint,
@@ -320,6 +339,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
     cancelPendingConstraint,
     updateConstraintValue,
     setPendingNgonSides,
+    setPendingGearParams,
     setPendingRectCorner,
     setRectStockDimension,
   } = useProjectStore()
@@ -472,23 +492,24 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
     canvasRef,
     clearTransientCanvasState,
   })
-  const dimensionTitle = pendingDimension
-    ? `${pendingDimension.type.charAt(0).toUpperCase()}${pendingDimension.type.slice(1)} dimension`
-    : ''
+  const dimensionTitleKey: MessageKey | null = pendingDimension
+    ? `canvas.dimension.title.${pendingDimension.type}` as MessageKey
+    : null
+  const dimensionTitle = dimensionTitleKey ? t(dimensionTitleKey) : ''
   const dimensionStep = (() => {
     if (!pendingDimension) return ''
-    const t = pendingDimension.type
+    const dimType = pendingDimension.type
     const n = dimensionPickedCount
-    if (t === 'radius' || t === 'diameter') {
-      return n === 0 ? 'Click the circle / arc center' : 'Click a point on the edge'
+    if (dimType === 'radius' || dimType === 'diameter') {
+      return n === 0 ? t('canvas.dimension.step.radiusCenter') : t('canvas.dimension.step.radiusEdge')
     }
-    if (t === 'angle') {
-      return n === 0 ? 'Click the vertex'
-        : n === 1 ? 'Click the first ray point'
-        : n === 2 ? 'Click the second ray point'
-        : 'Click to place'
+    if (dimType === 'angle') {
+      return n === 0 ? t('canvas.dimension.step.angleVertex')
+        : n === 1 ? t('canvas.dimension.step.angleFirstRay')
+        : n === 2 ? t('canvas.dimension.step.angleSecondRay')
+        : t('canvas.dimension.step.clickToPlace')
     }
-    return n === 0 ? 'Click the first point' : n === 1 ? 'Click the second point' : 'Click to set the offset'
+    return n === 0 ? t('canvas.dimension.step.firstPoint') : n === 1 ? t('canvas.dimension.step.secondPoint') : t('canvas.dimension.step.setOffset')
   })()
 
   const snap = useSnapPreview({
@@ -541,6 +562,8 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
     placePendingAddAt,
     placePendingSlotAt,
     placePendingNgonAt,
+    setPendingGearRadiusAt,
+    completePendingGear,
     cancelPendingAdd,
     addPendingPolygonPoint,
     addPendingCompositePoint,
@@ -553,7 +576,6 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
     canvasRef,
     clearTransientCanvasState,
   })
-
   const setPendingMovePreviewPointRef = useStableEvent((nextPoint: PendingPreviewPoint | null) => {
     pendingMovePreviewPointRef.current = nextPoint
     scheduleDraw()
@@ -743,7 +765,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
 
   useEffect(() => {
     const activeUrls = new Set(
-      project.features
+      resolvedProjectFeatures(project)
         .map((feature) => feature.kind === 'stl' ? feature.stl?.topViewDataUrl : null)
         .filter((url): url is string => !!url),
     )
@@ -769,7 +791,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
       cache.set(url, image)
       image.src = url
     }
-  }, [project.features])
+  }, [project])
 
   useEffect(() => {
     return () => {
@@ -784,7 +806,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
 
   useEffect(() => {
     scheduleDraw()
-  }, [scheduleDraw, project, selection, pendingAdd, pendingMove, pendingTransform, pendingOffset, pendingClipboardPlacement, viewState, backdropImage, stlImageRevision, toolpaths, selectedOperationId, collidingClampIds, snapSettings, copyCountDraft, dimEdit.dimensionEdit, toolpathVisibility, operationHighlightKind])
+  }, [scheduleDraw, project, selection, pendingAdd, pendingMove, pendingTransform, pendingOffset, pendingClipboardPlacement, viewState, backdropImage, stlImageRevision, toolpaths, selectedOperationId, collidingClampIds, snapSettings, copyCountDraft, dimEdit.dimensionEdit, toolpathVisibility, operationHighlightKind, canvasPalette])
 
   useEffect(() => {
     sketchEditPreviewRef.current = null
@@ -852,6 +874,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
     if (!ctx) return
 
     const project = projectRef.current
+    const features = resolvedProjectFeatures(project)
     const selection = selectionRef.current
     const pendingAdd = pendingAddRef.current
     const pendingMove = pendingMoveRef.current
@@ -861,7 +884,6 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
     const backdropImage = backdropImageRef.current
     const toolpaths = toolpathsRef.current
     const selectedOperationId = selectedOperationIdRef.current
-    const collidingClampIds = collidingClampIdsRef.current
     const copyCountDraft = copyCountDraftRef.current
     const operationHighlightKind = operationHighlightKindRef.current
     // A1.3: features the armed operation could act on (null = nothing armed).
@@ -869,16 +891,18 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
       ? new Set(compatibleFeatureIdsForOperation(project, operationHighlightKind))
       : null
 
-    const width = canvas.width
-    const height = canvas.height
+    const { width, height } = canvas
     const vt = computeViewTransform(project.stock, width, height, viewState)
-    const collidingClampIdSet = new Set(collidingClampIds)
+    const collidingClampIdSet = new Set(collidingClampIdsRef.current)
 
     ctx.clearRect(0, 0, width, height)
-    ctx.fillStyle = '#0f151d'
+    ctx.fillStyle = canvasPalette.background
     ctx.fillRect(0, 0, width, height)
+    // Canvas 2D can't read CSS vars, so publish this theme's full palette
+    // for the primitive helpers before anything is drawn this frame.
+    setCanvasPalette(canvasPalette)
 
-    drawGrid(ctx, vt, width, height, project.stock, project.grid)
+    drawGrid(ctx, vt, width, height, project.stock, project.grid, canvasPalette, getFeaturesWorldBounds(features))
 
     if (project.backdrop?.visible && backdropImage) {
       drawBackdropImage(
@@ -887,25 +911,27 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
         backdropImage,
         vt,
         selection.selectedNode?.type === 'backdrop',
+        canvasPalette,
         project.backdrop.name,
       )
     }
 
     stockLabelRectsRef.current = []
     if (project.stock.visible) {
-      const anyFeatureExceedsStock = project.features.some(
+      const anyFeatureExceedsStock = features.some(
         (feature) => feature.visible
           && feature.kind !== 'text'
           && profileExceedsStock(feature.sketch.profile, project.stock),
       )
-      drawStockOutline(ctx, project.stock, vt, project.meta.units, anyFeatureExceedsStock, stockLabelRectsRef.current)
+      drawStockOutline(ctx, project.stock, vt, project.meta.units, anyFeatureExceedsStock, canvasPalette, stockLabelRectsRef.current)
     }
 
     if (project.origin.visible) {
-      drawOriginMarker(ctx, project.origin, vt)
+      drawOriginMarker(ctx, project.origin, vt, canvasPalette)
     }
 
-    for (const feature of project.features) {
+    const batchedLineFeatures: SketchFeature[] = []
+    for (const feature of features) {
       if (!feature.visible) continue
 
       const selected = selection.selectedFeatureIds.includes(feature.id)
@@ -913,7 +939,17 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
       const editing = selection.mode === 'sketch_edit' && feature.id === selection.selectedFeatureId
       const groupSelected = selection.groupFolderId !== null && selected
 
-      drawFeature(ctx, feature, vt, project.meta.units, project.meta.showFeatureInfo, selected, hovered, editing, groupSelected)
+      const batchLine = feature.operation === 'line'
+        && !operationHighlightIds
+        && !selected
+        && !hovered
+        && !editing
+        && !groupSelected
+      if (batchLine) {
+        batchedLineFeatures.push(feature)
+      } else {
+        drawFeature(ctx, feature, vt, project.meta.units, project.meta.showFeatureInfo, selected, hovered, editing, groupSelected)
+      }
 
       // A1.3: when an operation is armed in the CAM menu, ring the features it
       // could act on and veil the rest, so "what would this operate on?" is visible.
@@ -922,12 +958,12 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
         ctx.save()
         if (operationHighlightIds.has(feature.id)) {
           ctx.lineWidth = 3
-          ctx.strokeStyle = 'rgba(123, 199, 246, 0.95)'
-          ctx.shadowColor = 'rgba(123, 199, 246, 0.85)'
+          ctx.strokeStyle = canvasRgba('constraintHighlight', 0.95)
+          ctx.shadowColor = canvasRgba('constraintHighlight', 0.85)
           ctx.shadowBlur = 8
           ctx.stroke()
         } else if (feature.sketch.profile.closed) {
-          ctx.fillStyle = 'rgba(8, 12, 18, 0.5)'
+          ctx.fillStyle = canvasPalette.veil
           ctx.fill()
         }
         ctx.restore()
@@ -935,8 +971,20 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
 
       const stlTopViewUrl = feature.kind === 'stl' ? feature.stl?.topViewDataUrl : null
       const stlTopViewImage = stlTopViewUrl ? stlImageCacheRef.current.get(stlTopViewUrl) : null
-      if (feature.kind === 'stl' && stlTopViewImage) {
-        drawStlTopViewImage(ctx, feature, stlTopViewImage, vt, selected, hovered, editing)
+      const stlDefinition = feature.kind === 'stl'
+        ? project.featureDefinitions[feature.definitionId]
+        : null
+      if (feature.kind === 'stl' && stlTopViewImage && stlDefinition) {
+        drawStlTopViewImage(
+          ctx,
+          feature,
+          stlDefinition.profile,
+          stlTopViewImage,
+          vt,
+          selected,
+          hovered,
+          editing,
+        )
       }
 
       if (editing) {
@@ -948,7 +996,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
           isDraggingNodeRef.current
             ? selection.activeControl
             : (dimEdit.dimensionEditControlRef.current ?? selection.activeControl ?? hoveredEditControl)
-        drawSketchControls(ctx, feature.sketch.profile, vt, editControl)
+        drawSketchControls(ctx, feature.sketch.profile, vt, editControl, canvasPalette)
         if (editControl && (isDraggingNodeRef.current || dimEdit.dimensionEditControlRef.current || hoveredEditControl)) {
           drawActiveEditMeasurements(ctx, feature.sketch.profile, vt, project.meta.units, editControl)
         }
@@ -959,19 +1007,25 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
         const badgeWorld = { x: b.minX, y: b.maxY }
         const badgeC = worldToCanvas(badgeWorld, vt)
         ctx.save()
-        ctx.fillStyle = 'rgba(91, 165, 216, 0.85)'
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.9)'
+        ctx.fillStyle = canvasRgba('constraint', 0.85)
+        ctx.strokeStyle = canvasColors().markerHalo
         ctx.lineWidth = 1
         ctx.beginPath()
         ctx.arc(badgeC.cx - 8, badgeC.cy - 8, 7, 0, Math.PI * 2)
         ctx.fill()
         ctx.stroke()
-        ctx.fillStyle = '#fff'
+        ctx.fillStyle = canvasColors().markerHalo
         ctx.font = 'bold 10px sans-serif'
         ctx.textAlign = 'center'
         ctx.textBaseline = 'middle'
         ctx.fillText(String(feature.sketch.constraints.length), badgeC.cx - 8, badgeC.cy - 8)
         ctx.restore()
+      }
+    }
+    drawLineFeatureBatch(ctx, batchedLineFeatures, vt)
+    if (project.meta.showFeatureInfo) {
+      for (const feature of batchedLineFeatures) {
+        drawFeatureInfo(ctx, feature, vt, project.meta.units)
       }
     }
 
@@ -990,8 +1044,8 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
       const anchorC = worldToCanvas(pendingConstraintDraw.anchor.point, vt)
       const constraintLineColor = lockModeGuideColor(lockModeRef.current)
       ctx.save()
-      ctx.fillStyle = 'rgba(247, 211, 148, 0.95)'
-      ctx.strokeStyle = 'rgba(0, 0, 0, 0.4)'
+      ctx.fillStyle = canvasRgba('activeStrong', 0.95)
+      ctx.strokeStyle = canvasColors().markerOutline
       ctx.beginPath()
       ctx.arc(anchorC.cx, anchorC.cy, 4, 0, Math.PI * 2)
       ctx.fill()
@@ -1006,7 +1060,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
         ctx.lineTo(anchorC.cx, anchorC.cy)
         ctx.stroke()
         ctx.setLineDash([])
-        ctx.fillStyle = 'rgba(247, 211, 148, 0.95)'
+        ctx.fillStyle = canvasRgba('activeStrong', 0.95)
         ctx.beginPath()
         ctx.arc(refC.cx, refC.cy, 4, 0, Math.PI * 2)
         ctx.fill()
@@ -1029,14 +1083,14 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
 
     // Reset label rects before rebuilding
     constraintLabelRectsRef.current = []
-    for (const feature of project.features) {
+    for (const feature of features) {
       if (!feature.visible) continue
       for (const c of feature.sketch.constraints) {
         if (c.type !== 'fixed_distance' || !c.anchor_point || !c.reference_point) continue
         const isInvalid = !!c.is_invalid
-        const lineColor = isInvalid ? 'rgba(220, 60, 60, 0.85)' : 'rgba(91, 165, 216, 0.8)'
-        const dotColor = isInvalid ? 'rgba(220, 60, 60, 0.9)' : 'rgba(91, 165, 216, 0.9)'
-        const labelColor = isInvalid ? 'rgba(255, 180, 180, 0.95)' : 'rgba(200, 220, 240, 0.95)'
+        const lineColor = isInvalid ? canvasRgba('constraintInvalid', 0.85) : canvasRgba('constraint', 0.8)
+        const dotColor = isInvalid ? canvasRgba('constraintInvalid', 0.9) : canvasRgba('constraint', 0.9)
+        const labelColor = isInvalid ? canvasPalette.invalidText : canvasPalette.labelText
         const aC = worldToCanvas(c.anchor_point, vt)
         const rC = worldToCanvas(c.reference_point, vt)
         ctx.save()
@@ -1067,7 +1121,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
           const padY = 2
           const halfW = metrics.width / 2 + padX
           const halfH = 7 + padY
-          ctx.fillStyle = isInvalid ? 'rgba(80, 20, 20, 0.9)' : 'rgba(18, 26, 36, 0.85)'
+          ctx.fillStyle = isInvalid ? canvasPalette.invalidBackdrop : canvasPalette.labelBackground
           ctx.fillRect(midX - halfW, midY - halfH, halfW * 2, halfH * 2)
           ctx.fillStyle = labelColor
           ctx.textAlign = 'center'
@@ -1092,7 +1146,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
       const selected = selection.selectedNode?.type === 'clamp' && selection.selectedNode.clampId === clamp.id
       drawClampFootprint(ctx, clamp, vt, selected, collidingClampIdSet.has(clamp.id))
       if (selection.mode === 'sketch_edit' && selection.selectedNode?.type === 'clamp' && selection.selectedNode.clampId === clamp.id) {
-        drawSketchControls(ctx, rectProfile(clamp.x, clamp.y, clamp.w, clamp.h), vt, selection.activeControl)
+        drawSketchControls(ctx, rectProfile(clamp.x, clamp.y, clamp.w, clamp.h), vt, selection.activeControl, canvasPalette)
       }
     }
 
@@ -1101,7 +1155,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
       const selected = selection.selectedNode?.type === 'tab' && selection.selectedNode.tabId === tab.id
       drawTabFootprint(ctx, tab, vt, selected)
       if (selection.mode === 'sketch_edit' && selection.selectedNode?.type === 'tab' && selection.selectedNode.tabId === tab.id) {
-        drawSketchControls(ctx, rectProfile(tab.x, tab.y, tab.w, tab.h), vt, selection.activeControl)
+        drawSketchControls(ctx, rectProfile(tab.x, tab.y, tab.w, tab.h), vt, selection.activeControl, canvasPalette)
       }
     }
 
@@ -1117,8 +1171,8 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
       const w = Math.abs(marqueeCurrentRef.current.cx - marqueeStartRef.current.cx)
       const h = Math.abs(marqueeCurrentRef.current.cy - marqueeStartRef.current.cy)
       ctx.save()
-      ctx.fillStyle = 'rgba(91, 165, 216, 0.16)'
-      ctx.strokeStyle = 'rgba(123, 199, 246, 0.9)'
+      ctx.fillStyle = canvasRgba('constraint', 0.16)
+      ctx.strokeStyle = canvasRgba('constraintHighlight', 0.9)
       ctx.lineWidth = 1.5
       ctx.setLineDash([6, 4])
       ctx.fillRect(x, y, w, h)
@@ -1132,8 +1186,8 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
       const w = Math.abs(zoomWindowCurrentRef.current.cx - zoomWindowStartRef.current.cx)
       const h = Math.abs(zoomWindowCurrentRef.current.cy - zoomWindowStartRef.current.cy)
       ctx.save()
-      ctx.fillStyle = 'rgba(242, 185, 92, 0.16)'
-      ctx.strokeStyle = 'rgba(247, 211, 148, 0.92)'
+      ctx.fillStyle = canvasRgba('active', 0.16)
+      ctx.strokeStyle = canvasRgba('activeStrong', 0.92)
       ctx.lineWidth = 1.5
       ctx.setLineDash([7, 4])
       ctx.fillRect(x, y, w, h)
@@ -1236,6 +1290,14 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
       } else if (currentPreviewPoint) {
         drawPendingPoint(ctx, currentPreviewPoint, vt, snap.isActiveSnapPoint(currentPreviewPoint))
       }
+    } else if (pendingAdd?.shape === 'gear') {
+      if (pendingAdd.anchor && currentPreviewPoint) {
+        drawPendingGear(ctx, pendingAdd.anchor, currentPreviewPoint, pendingAdd.params, vt, project.meta.units)
+        drawPendingPoint(ctx, pendingAdd.anchor, vt)
+        drawPendingPoint(ctx, currentPreviewPoint, vt, snap.isActiveSnapPoint(currentPreviewPoint))
+      } else if (currentPreviewPoint) {
+        drawPendingPoint(ctx, currentPreviewPoint, vt, snap.isActiveSnapPoint(currentPreviewPoint))
+      }
     } else if (pendingAdd?.shape === 'roundrect') {
       if (pendingAdd.anchor && currentPreviewPoint) {
         drawPendingRoundRect(ctx, pendingAdd.anchor, currentPreviewPoint, pendingAdd.corner, vt, project.meta.units)
@@ -1304,15 +1366,14 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
             backdropImage,
             vt,
             true,
+            canvasPalette,
             'Move preview',
           )
         } else if (currentMovePreviewPoint) {
           drawPendingPoint(ctx, currentMovePreviewPoint, vt, snap.isActiveSnapPoint(currentMovePreviewPoint))
         }
       } else if (pendingMove.entityType === 'feature') {
-        const features = pendingMove.entityIds
-          .map((featureId) => project.features.find((entry) => entry.id === featureId) ?? null)
-          .filter((feature): feature is SketchFeature => feature !== null)
+        const features = resolveFeatureInstances(project, pendingMove.entityIds)
         if (features.length === 0) {
           return
         }
@@ -1499,6 +1560,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
               backdropImage,
               vt,
               true,
+              canvasPalette,
               pendingTransform.mode === 'resize' ? 'Resize preview' : 'Rotate preview',
             )
           }
@@ -1509,9 +1571,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
         return
       }
 
-      const features = pendingTransform.entityIds
-        .map((featureId) => project.features.find((entry) => entry.id === featureId) ?? null)
-        .filter((feature): feature is SketchFeature => feature !== null)
+      const features = resolveFeatureInstances(project, pendingTransform.entityIds)
 
       if (features.length === 0) {
         return
@@ -1589,9 +1649,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
     }
 
     if (pendingOffset) {
-      const features = pendingOffset.entityIds
-        .map((featureId) => project.features.find((entry) => entry.id === featureId) ?? null)
-        .filter((feature): feature is SketchFeature => feature !== null)
+      const features = resolveFeatureInstances(project, pendingOffset.entityIds)
         .filter((feature) => feature.sketch.profile.closed)
       const rawOffsetPoint = currentOffsetRawPreviewPoint ?? livePointerWorldRef.current ?? snap.activeSnapRef.current?.rawPoint ?? null
       const snappedOffsetPoint = currentOffsetPreviewPoint ?? snap.activeSnapRef.current?.point ?? rawOffsetPoint
@@ -1638,8 +1696,9 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
         drawPendingPoint(ctx, pendingSketchExtensionRef.current.anchor, vt)
       }
       if (pendingExtendHitRef.current && pendingSketchEditRef.current?.subject) {
-        const subjFeature = project.features.find(
-          (f) => f.id === pendingSketchEditRef.current!.subject!.featureId,
+        const subjFeature = resolveFeatureInstance(
+          project,
+          pendingSketchEditRef.current.subject.featureId,
         )
         if (subjFeature && !subjFeature.sketch.profile.closed) {
           const subjProfile = subjFeature.sketch.profile
@@ -1660,7 +1719,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
             const growingPoint = growFromStart
               ? subjProfile.start
               : subjProfile.segments[segCount - 1].to
-            drawMoveGuide(ctx, growingPoint, pendingExtendHitRef.current, vt, 'rgba(239, 188, 122, 0.75)')
+            drawMoveGuide(ctx, growingPoint, pendingExtendHitRef.current, vt)
           }
         }
       }
@@ -1672,7 +1731,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
         ctx.beginPath()
         ctx.moveTo(from.cx, from.cy)
         ctx.lineTo(to.cx, to.cy)
-        ctx.strokeStyle = 'rgba(220, 80, 60, 0.85)'
+        ctx.strokeStyle = canvasRgba('constraintInvalid', 0.85)
         ctx.lineWidth = 2.5
         ctx.setLineDash([6, 4])
         ctx.stroke()
@@ -1813,6 +1872,19 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
       if (!canvas) return
       setViewState(computeFitViewState(projectRef.current, canvas.width, canvas.height))
     },
+    getVisibleWorldBounds: () => {
+      const canvas = canvasRef.current
+      if (!canvas || canvas.width === 0 || canvas.height === 0) return null
+      const vt = computeViewTransform(projectRef.current.stock, canvas.width, canvas.height, viewStateRef.current)
+      const a = canvasToWorld(0, 0, vt)
+      const b = canvasToWorld(canvas.width, canvas.height, vt)
+      return {
+        minX: Math.min(a.x, b.x),
+        maxX: Math.max(a.x, b.x),
+        minY: Math.min(a.y, b.y),
+        maxY: Math.max(a.y, b.y),
+      }
+    },
   }), [])
 
   useEffect(() => {
@@ -1904,8 +1976,10 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
     if (selection.mode !== 'sketch_edit') return null
     if (selection.selectedFeatureIds.length !== 1) return null
     if (!selection.selectedFeatureId) return null
-    return project.features.find((feature) => feature.id === selection.selectedFeatureId)
-      ?? (project.stock.sourceFeatureId === selection.selectedFeatureId && project.stock.sourceFeature ? project.stock.sourceFeature : null)
+    return resolveFeatureInstance(project, selection.selectedFeatureId)
+      ?? (project.stock.sourceFeatureId === selection.selectedFeatureId && project.stock.sourceFeature
+        ? resolveFeatureRow(project, project.stock.sourceFeature)
+        : null)
   }
 
   function openEndpointAnchor(feature: SketchFeature, endpoint: OpenProfileEndpoint): Point { return endpoint === 'start' ? feature.sketch.profile.start : anchorPointForIndex(feature.sketch.profile, feature.sketch.profile.segments.length) }
@@ -1924,8 +1998,9 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
     let best: OpenEndpointHit | null = null
     let bestDistance = OPEN_ENDPOINT_JOIN_HIT_RADIUS * OPEN_ENDPOINT_JOIN_HIT_RADIUS
 
-    for (let index = project.features.length - 1; index >= 0; index -= 1) {
-      const feature = project.features[index]
+    const features = resolvedProjectFeatures(project)
+    for (let index = features.length - 1; index >= 0; index -= 1) {
+      const feature = features[index]
       if (
         !feature
         || !feature.visible
@@ -2234,9 +2309,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
 
           // Extend preview: compute extension-line intersection for dashed preview
           if (sketchEditTool === 'extend' && hit) {
-            const subjFeature = project.features.find(
-              (f) => f.id === pending.subject!.featureId,
-            )
+            const subjFeature = resolveFeatureInstance(project, pending.subject.featureId)
             if (subjFeature && !subjFeature.sketch.profile.closed) {
               const subjProfile = subjFeature.sketch.profile
               const subjSegIndex = pending.subject!.segmentIndex
@@ -2259,9 +2332,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
                 const subjResolved = resolveProfileSegments(subjProfile)
                 const subjSeg = subjResolved[subjSegIndex]
                 if (subjSeg) {
-                  const tgtFeature = project.features.find(
-                    (f) => f.id === hit.featureId,
-                  )
+                  const tgtFeature = resolveFeatureInstance(project, hit.featureId)
                   if (tgtFeature) {
                     const tgtResolved = resolveProfileSegments(
                       tgtFeature.sketch.profile,
@@ -2348,9 +2419,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
 
           // Trim preview: compute span that would be removed
           if (sketchEditTool === 'trim' && hit && pending.subject) {
-            const trimSubjFeature = project.features.find(
-              (f) => f.id === pending.subject!.featureId,
-            )
+            const trimSubjFeature = resolveFeatureInstance(project, pending.subject.featureId)
             if (trimSubjFeature && !trimSubjFeature.sketch.profile.closed) {
               const trimProfile = trimSubjFeature.sketch.profile
               const trimSegIndex = pending.subject.segmentIndex
@@ -2360,9 +2429,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
               const trimSubjResolved = resolveProfileSegments(trimProfile)
               const trimSubjSeg = trimSubjResolved[trimSegIndex]
               if (trimSubjSeg) {
-                const trimTgtFeature = project.features.find(
-                  (f) => f.id === hit.featureId,
-                )
+                const trimTgtFeature = resolveFeatureInstance(project, hit.featureId)
                 if (trimTgtFeature) {
                   const trimTgtResolved = resolveProfileSegments(
                     trimTgtFeature.sketch.profile,
@@ -2478,6 +2545,14 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
     })
   }
 
+  const overlapFeaturePicker = useOverlapFeaturePicker({
+    containerRef,
+    canvasRef,
+    clearTransientCanvasState,
+    selectFeature,
+    hoverFeature,
+  })
+
   const keyboard = useCanvasKeyboard({
     projectRef,
     selectionRef,
@@ -2504,6 +2579,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
     originPreviewPointRef,
     hoveredEditControlRef,
     canvasRef,
+    overlapFeaturePickerOpen: overlapFeaturePicker.isOpen,
     dimEdit,
     constraint,
     move,
@@ -2526,6 +2602,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
     confirmCutCutters,
     cancelPendingShapeAction,
     cancelPendingSketchEdit,
+    cancelOverlapFeaturePicker: overlapFeaturePicker.cancel,
     completePendingMove,
     completePendingShapeAction,
     beginHistoryTransaction,
@@ -2610,6 +2687,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
     stopNodeDrag,
     scheduleDraw,
     applyLock,
+    pendingPreviewPointRef,
     setPendingPreviewPointRef,
     setPendingMovePreviewPointRef,
     setPendingTransformPreviewPointRef,
@@ -2627,6 +2705,8 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
     isDraggingNodeRef,
     zoomWindowActive,
     multiSelectMode,
+    clearOverlapFeaturePicker: overlapFeaturePicker.dismiss,
+    openOverlapFeaturePicker: overlapFeaturePicker.open,
     selectionRef,
     projectRef,
     pendingAddRef,
@@ -2699,6 +2779,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
     placePendingAddAt,
     placePendingSlotAt,
     placePendingNgonAt,
+    setPendingGearRadiusAt,
     placePendingTextAt,
     placeOriginAt,
     addPendingPolygonPoint,
@@ -2716,9 +2797,9 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
 
   const editingFeature =
     selection.mode === 'sketch_edit' && selection.selectedFeatureId
-      ? project.features.find((feature) => feature.id === selection.selectedFeatureId) ??
+      ? resolveFeatureInstance(project, selection.selectedFeatureId) ??
         (project.stock.sourceFeatureId === selection.selectedFeatureId && project.stock.sourceFeature
-          ? project.stock.sourceFeature
+          ? resolveFeatureRow(project, project.stock.sourceFeature)
           : null)
       : null
   const editingClamp = (() => {
@@ -2771,6 +2852,8 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
         onContextMenu={contextMenu.handleContextMenu}
         tabIndex={0}
       />
+      <OverlapFeaturePicker picker={overlapFeaturePicker} />
+      <CreationTargetBadge />
       {!depthLegendCollapsed ? <DepthLegend onToggleDepthLegend={onToggleDepthLegend} /> : null}
       {(toolpaths && toolpaths.some((tp) => tp.moves.length > 0)) && toolpathVisibility && onToolpathVisibilityChange && (
         <ToolpathVisibilityPanel
@@ -2783,14 +2866,14 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
       <DrivingDimensionPanel driving={drivingWf} />
       {pendingOffset && (
         <CanvasWorkflowPanel
-          title="Offset"
-          step={offset.offsetDistanceEditActive ? 'Set distance' : 'Preview distance'}
+          title={t('canvas.offset.title')}
+          step={offset.offsetDistanceEditActive ? t('canvas.offset.step.setDistance') : t('canvas.offset.step.previewDistance')}
           position={offset.offsetWorkflowPanel.position}
           panelRef={offset.offsetWorkflowPanel.panelRef}
           handleProps={offset.offsetWorkflowPanel.handleProps}
           actionRowProps={offset.offsetWorkflowPanel.actionRowProps}
           className="canvas-workflow-panel--offset"
-          moveLabel="Move offset controls"
+          moveLabel={t('canvas.offset.moveLabel')}
           actions={(
             <>
               {offset.offsetDistanceEditActive ? (
@@ -2798,26 +2881,26 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
                   type="button"
                   className="tablet-cmd-btn tablet-cmd-btn--confirm"
                   onClick={offset.commitOffsetDistanceEditFromPanel}
-                >Confirm</button>
+                >{t('canvas.offset.confirm')}</button>
               ) : (
                 <button
                   type="button"
                   className="tablet-cmd-btn"
                   onClick={offset.triggerDimensionFromOffsetPanel}
-                >Distance</button>
+                >{t('canvas.offset.distanceButton')}</button>
               )}
               <button
                 type="button"
                 className="tablet-cmd-btn tablet-cmd-btn--cancel"
                 onClick={offset.cancelOffsetFromPanel}
-              >Cancel</button>
+              >{t('canvas.offset.cancel')}</button>
             </>
           )}
         >
           {offset.offsetDistanceEditActive && operationDimEdit?.kind === 'offset' ? (
             <div className="canvas-workflow-panel__meta">
               <label className="canvas-workflow-panel__field">
-                <span>Distance</span>
+                <span>{t('canvas.field.distance')}</span>
                 <input
                   ref={dimEdit.widthInputRef}
                   className="canvas-workflow-panel__count-input"
@@ -2842,21 +2925,21 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
             </div>
           ) : (
             <div className="canvas-workflow-panel__summary">
-              Move inside or outside the feature to preview. Click to commit.
+              {t('canvas.offset.summary')}
             </div>
           )}
         </CanvasWorkflowPanel>
       )}
       {showJoinFlowPanel && pendingShapeAction?.kind === 'join' && (
         <CanvasWorkflowPanel
-          title="Join"
-          step="Select features"
+          title={t('canvas.join.title')}
+          step={t('canvas.join.step.selectFeatures')}
           position={joinWorkflowPanel.position}
           panelRef={joinWorkflowPanel.panelRef}
           handleProps={joinWorkflowPanel.handleProps}
           actionRowProps={joinWorkflowPanel.actionRowProps}
           className="canvas-workflow-panel--join"
-          moveLabel="Move join controls"
+          moveLabel={t('canvas.join.moveLabel')}
           actions={(
             <>
               <button
@@ -2864,19 +2947,19 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
                 className="tablet-cmd-btn tablet-cmd-btn--confirm"
                 disabled={pendingShapeAction.entityIds.length < 2}
                 onClick={completeJoinFromPanel}
-              >Confirm</button>
+              >{t('canvas.join.confirm')}</button>
               <button
                 type="button"
                 className="tablet-cmd-btn tablet-cmd-btn--cancel"
                 onClick={cancelJoinFromPanel}
-              >Cancel</button>
+              >{t('canvas.join.cancel')}</button>
             </>
           )}
         >
           <div className="canvas-workflow-panel__summary">
             {pendingShapeAction.entityIds.length < 2
-              ? 'Select at least two closed features.'
-              : `${pendingShapeAction.entityIds.length} closed features selected.`}
+              ? t('canvas.join.summary.tooFew')
+              : tPlural(pendingShapeAction.entityIds.length, 'canvas.join.summary.count.one', 'canvas.join.summary.count.other')}
           </div>
           <div className="canvas-workflow-panel__meta">
             <label className="canvas-workflow-panel__check">
@@ -2888,21 +2971,21 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
                   joinWorkflowPanel.focusCanvasAfterAction()
                 }}
               />
-              <span>Keep originals</span>
+              <span>{t('canvas.join.keepOriginals')}</span>
             </label>
           </div>
         </CanvasWorkflowPanel>
       )}
       {showCutFlowPanel && pendingShapeAction?.kind === 'cut' && (
         <CanvasWorkflowPanel
-          title="Cut"
-          step={pendingShapeAction.phase === 'cutters' ? 'Select cutters' : 'Select targets'}
+          title={t('canvas.cut.title')}
+          step={pendingShapeAction.phase === 'cutters' ? t('canvas.cut.step.selectCutters') : t('canvas.cut.step.selectTargets')}
           position={cutWorkflowPanel.position}
           panelRef={cutWorkflowPanel.panelRef}
           handleProps={cutWorkflowPanel.handleProps}
           actionRowProps={cutWorkflowPanel.actionRowProps}
           className="canvas-workflow-panel--cut"
-          moveLabel="Move cut controls"
+          moveLabel={t('canvas.cut.moveLabel')}
           actions={(
             <>
               {pendingShapeAction.phase === 'cutters' ? (
@@ -2911,31 +2994,31 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
                   className="tablet-cmd-btn tablet-cmd-btn--confirm"
                   disabled={pendingShapeAction.cutterIds.length === 0}
                   onClick={confirmCutCuttersFromTabletPanel}
-                >Next</button>
+                >{t('canvas.cut.next')}</button>
               ) : (
                 <button
                   type="button"
                   className="tablet-cmd-btn tablet-cmd-btn--confirm"
                   disabled={pendingShapeAction.targetIds.length === 0}
                   onClick={completeCutFromTabletPanel}
-                >Confirm</button>
+                >{t('canvas.cut.confirm')}</button>
               )}
               <button
                 type="button"
                 className="tablet-cmd-btn tablet-cmd-btn--cancel"
                 onClick={cancelCutFromTabletPanel}
-              >Cancel</button>
+              >{t('canvas.cut.cancel')}</button>
             </>
           )}
         >
           <div className="canvas-workflow-panel__summary">
             {pendingShapeAction.phase === 'cutters'
               ? pendingShapeAction.cutterIds.length === 0
-                ? 'Select features to mark cutters.'
-                : `${pendingShapeAction.cutterIds.length} cutter${pendingShapeAction.cutterIds.length === 1 ? '' : 's'} selected.`
+                ? t('canvas.cut.summary.noCutters')
+                : tPlural(pendingShapeAction.cutterIds.length, 'canvas.cut.summary.cutters.one', 'canvas.cut.summary.cutters.other')
               : pendingShapeAction.targetIds.length === 0
-                ? `${pendingShapeAction.cutterIds.length} cutter${pendingShapeAction.cutterIds.length === 1 ? '' : 's'} locked. Select target features.`
-                : `${pendingShapeAction.targetIds.length} target${pendingShapeAction.targetIds.length === 1 ? '' : 's'} selected.`}
+                ? tPlural(pendingShapeAction.cutterIds.length, 'canvas.cut.summary.cuttersLocked.one', 'canvas.cut.summary.cuttersLocked.other')
+                : tPlural(pendingShapeAction.targetIds.length, 'canvas.cut.summary.targets.one', 'canvas.cut.summary.targets.other')}
           </div>
           <div className="canvas-workflow-panel__meta">
             <label className="canvas-workflow-panel__check">
@@ -2947,7 +3030,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
                   cutWorkflowPanel.focusCanvasAfterAction()
                 }}
               />
-              <span>Keep originals</span>
+              <span>{t('canvas.cut.keepOriginals')}</span>
             </label>
           </div>
         </CanvasWorkflowPanel>
@@ -2955,57 +3038,60 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
       {creation.creationPanelShape && pendingAdd && (
         <CanvasWorkflowPanel
           title={
-            creation.creationPanelShape === 'rect' ? 'Rectangle'
-            : creation.creationPanelShape === 'circle' ? 'Circle'
-            : creation.creationPanelShape === 'ellipse' ? 'Ellipse'
-            : creation.creationPanelShape === 'tab' ? 'Tab'
-            : creation.creationPanelShape === 'clamp' ? 'Clamp'
-            : creation.creationPanelShape === 'polygon' ? 'Polygon'
-            : creation.creationPanelShape === 'spline' ? 'Spline'
-            : creation.creationPanelShape === 'slot' ? 'Slot'
-            : creation.creationPanelShape === 'ngon' ? 'Polygon'
-            : creation.creationPanelShape === 'roundrect' ? 'Rounded Rectangle'
-            : creation.creationPanelShape === 'chamferrect' ? 'Chamfered Rectangle'
-            : 'Composite'
+            creation.creationPanelShape === 'rect' ? t('canvas.shape.rectangle')
+            : creation.creationPanelShape === 'circle' ? t('canvas.shape.circle')
+            : creation.creationPanelShape === 'ellipse' ? t('canvas.shape.ellipse')
+            : creation.creationPanelShape === 'tab' ? t('canvas.shape.tab')
+            : creation.creationPanelShape === 'clamp' ? t('canvas.shape.clamp')
+            : creation.creationPanelShape === 'polygon' ? t('canvas.shape.polygon')
+            : creation.creationPanelShape === 'spline' ? t('canvas.shape.spline')
+            : creation.creationPanelShape === 'slot' ? t('canvas.shape.slot')
+            : creation.creationPanelShape === 'ngon' ? t('canvas.shape.polygon')
+            : creation.creationPanelShape === 'gear' ? t('canvas.shape.gear')
+            : creation.creationPanelShape === 'roundrect' ? t('canvas.shape.roundedRectangle')
+            : creation.creationPanelShape === 'chamferrect' ? t('canvas.shape.chamferedRectangle')
+            : t('canvas.shape.composite')
           }
           step={
-            creation.creationDimEditActive ? 'Enter dimensions'
+            creation.creationDimEditActive ? t('canvas.creation.step.enterDimensions')
             : creation.creationPanelShape === 'composite'
               ? (pendingAdd.shape === 'composite' && pendingAdd.start
                 ? (pendingAdd.currentMode === 'arc' && pendingAdd.pendingArcEnd
-                  ? 'Click arc curvature point'
-                  : `Add ${pendingAdd.currentMode} points`)
-                : 'Click first point')
+                  ? t('canvas.creation.step.clickArcCurvature')
+                  : t('canvas.creation.step.addPoints', { mode: pendingAdd.currentMode }))
+                : t('canvas.creation.step.clickFirstPoint'))
             : (creation.creationPanelShape === 'polygon' || creation.creationPanelShape === 'spline')
               ? (creation.creationPanelHasPoints
                 ? ('points' in pendingAdd && pendingAdd.points.length < 2
-                  ? 'Add one more point'
-                  : 'Add points or close')
-                : 'Click first point')
+                  ? t('canvas.creation.step.addOneMore')
+                  : t('canvas.creation.step.addPointsOrClose'))
+                : t('canvas.creation.step.clickFirstPoint'))
             : creation.creationPanelShape === 'slot'
               ? (pendingAdd.shape === 'slot' && pendingAdd.points.length >= 2
-                ? 'Move cursor to set width, click to commit'
+                ? t('canvas.creation.step.slotSetWidth')
                 : pendingAdd.shape === 'slot' && pendingAdd.points.length === 1
-                  ? 'Click second end center or enter dimensions'
-                  : 'Click first end center')
+                  ? t('canvas.creation.step.slotSecondEnd')
+                  : t('canvas.creation.step.slotFirstEnd'))
+            : creation.creationPanelShape === 'gear'
+              ? (pendingAdd.shape === 'gear' && pendingAdd.outsideRadius !== null ? t('canvas.creation.step.gearParams') : pendingAdd.shape === 'gear' && pendingAdd.anchor ? t('canvas.creation.step.gearSetRadius') : t('canvas.creation.step.clickCenterPoint'))
             : creation.creationPanelHasAnchor
               ? (creation.creationPanelShape === 'circle'
-                ? 'Click to set radius or enter dimensions'
+                ? t('canvas.creation.step.setRadiusOrDimensions')
                 : creation.creationPanelShape === 'ellipse'
-                  ? 'Click to set radii or enter dimensions'
+                  ? t('canvas.creation.step.setRadiiOrDimensions')
                   : creation.creationPanelShape === 'ngon'
-                    ? 'Click to set radius'
-                    : 'Click opposite corner or enter dimensions')
+                    ? t('canvas.creation.step.setRadius')
+                    : t('canvas.creation.step.setCornerOrDimensions'))
               : (creation.creationPanelShape === 'circle' || creation.creationPanelShape === 'ellipse' || creation.creationPanelShape === 'ngon')
-                ? 'Click center point'
-                : 'Click first corner'
+                ? t('canvas.creation.step.clickCenterPoint')
+                : t('canvas.creation.step.clickFirstCorner')
           }
           position={creation.creationWorkflowPanel.position}
           panelRef={creation.creationWorkflowPanel.panelRef}
           handleProps={creation.creationWorkflowPanel.handleProps}
           actionRowProps={creation.creationWorkflowPanel.actionRowProps}
           className="canvas-workflow-panel--creation"
-          moveLabel="Move creation controls"
+          moveLabel={t('canvas.creation.moveLabel')}
           actions={(
             <>
               {creation.creationDimEditActive && (
@@ -3013,41 +3099,42 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
                   type="button"
                   className="tablet-cmd-btn tablet-cmd-btn--confirm"
                   onClick={creation.commitCreationDimensionEdit}
-                >Confirm</button>
+                >{t('canvas.common.confirm')}</button>
               )}
               {(pendingAdd.shape === 'polygon' || pendingAdd.shape === 'spline') && 'points' in pendingAdd && pendingAdd.points.length >= 2 && creationTarget !== 'region' && !creation.creationDimEditActive && (
                 <button
                   type="button"
                   className="tablet-cmd-btn tablet-cmd-btn--confirm"
                   onClick={creation.finishOpenPathFromPanel}
-                >Finish</button>
+                >{t('canvas.common.finish')}</button>
               )}
               {pendingAdd.shape === 'composite' && pendingAdd.segments.length >= 1 && !pendingAdd.pendingArcEnd && creationTarget !== 'region' && !creation.creationDimEditActive && (
                 <button
                   type="button"
                   className="tablet-cmd-btn tablet-cmd-btn--confirm"
                   onClick={creation.finishOpenCompositeFromPanel}
-                >Finish</button>
+                >{t('canvas.common.finish')}</button>
               )}
+              {pendingAdd.shape === 'gear' && pendingAdd.outsideRadius !== null && !creation.creationDimEditActive && (<button type="button" className="tablet-cmd-btn tablet-cmd-btn--confirm" onClick={creation.completeGearFromPanel}>{t('canvas.creation.confirmGear')}</button>)}
               {creation.creationCanDimEdit && !creation.creationDimEditActive && (
                 <button
                   type="button"
                   className="tablet-cmd-btn"
                   onClick={creation.triggerDimensionFromCreationPanel}
-                >{pendingAdd.shape === 'slot' && 'points' in pendingAdd && pendingAdd.points.length >= 2 ? 'Width' : pendingAdd.shape === 'ngon' ? 'Radius' : 'Dimensions'}</button>
+                >{pendingAdd.shape === 'slot' && 'points' in pendingAdd && pendingAdd.points.length >= 2 ? t('canvas.creation.widthButton') : (pendingAdd.shape === 'ngon' || pendingAdd.shape === 'gear') ? t('canvas.creation.radiusButton') : t('canvas.creation.dimensionsButton')}</button>
               )}
               {((creation.creationPanelHasPoints && pendingAdd.shape !== 'slot') || (pendingAdd.shape === 'composite' && pendingAdd.start)) && !creation.creationDimEditActive && (
                 <button
                   type="button"
                   className="tablet-cmd-btn"
                   onClick={creation.undoFromCreationPanel}
-                >Undo</button>
+                >{t('canvas.common.undo')}</button>
               )}
               <button
                 type="button"
                 className="tablet-cmd-btn tablet-cmd-btn--cancel"
                 onClick={creation.cancelCreationFromPanel}
-              >Cancel</button>
+              >{t('canvas.common.cancel')}</button>
             </>
           )}
         >
@@ -3057,24 +3144,24 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
                 type="button"
                 className={`tablet-cmd-btn ${pendingAdd.currentMode === 'line' ? 'tablet-cmd-btn--active' : ''}`}
                 onClick={() => creation.setCompositeModeFromPanel('line')}
-              >Line</button>
+              >{t('canvas.composite.mode.line')}</button>
               <button
                 type="button"
                 className={`tablet-cmd-btn ${pendingAdd.currentMode === 'arc' ? 'tablet-cmd-btn--active' : ''}`}
                 onClick={() => creation.setCompositeModeFromPanel('arc')}
-              >Arc</button>
+              >{t('canvas.composite.mode.arc')}</button>
               <button
                 type="button"
                 className={`tablet-cmd-btn ${pendingAdd.currentMode === 'spline' ? 'tablet-cmd-btn--active' : ''}`}
                 onClick={() => creation.setCompositeModeFromPanel('spline')}
-              >Spline</button>
+              >{t('canvas.composite.mode.spline')}</button>
             </div>
           )}
           {creation.creationDimEditActive && dimEdit.dimensionEdit && (
             <div className="canvas-workflow-panel__meta">
               {dimEdit.dimensionEdit.shape === 'circle' ? (
                 <label className="canvas-workflow-panel__field">
-                  <span>Radius</span>
+                  <span>{t('canvas.field.radius')}</span>
                   <input
                     ref={dimEdit.radiusInputRef}
                     className="canvas-workflow-panel__count-input canvas-workflow-panel__distance-input"
@@ -3098,7 +3185,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
                 </label>
               ) : (dimEdit.dimensionEdit.shape === 'composite' && dimEdit.dimensionEdit.arcStart && dimEdit.dimensionEdit.arcEnd) ? (
                 <label className="canvas-workflow-panel__field">
-                  <span>Radius</span>
+                  <span>{t('canvas.field.radius')}</span>
                   <input
                     ref={dimEdit.radiusInputRef}
                     className="canvas-workflow-panel__count-input canvas-workflow-panel__distance-input"
@@ -3123,7 +3210,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
               ) : (dimEdit.dimensionEdit.shape === 'polygon' || dimEdit.dimensionEdit.shape === 'spline' || dimEdit.dimensionEdit.shape === 'composite') ? (
                 <>
                   <label className="canvas-workflow-panel__field">
-                    <span>Length</span>
+                    <span>{t('canvas.field.length')}</span>
                     <input
                       ref={dimEdit.widthInputRef}
                       className="canvas-workflow-panel__count-input canvas-workflow-panel__distance-input"
@@ -3149,7 +3236,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
                     />
                   </label>
                   <label className="canvas-workflow-panel__field">
-                    <span>Angle</span>
+                    <span>{t('canvas.field.angle')}</span>
                     <input
                       ref={dimEdit.heightInputRef}
                       className="canvas-workflow-panel__count-input canvas-workflow-panel__distance-input"
@@ -3179,7 +3266,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
                   </label>
                   {pendingAdd?.shape === 'composite' && pendingAdd.currentMode === 'arc' && !pendingAdd.pendingArcEnd && (
                     <label className="canvas-workflow-panel__field">
-                      <span>Radius</span>
+                      <span>{t('canvas.field.radius')}</span>
                       <input
                         ref={dimEdit.radiusInputRef}
                         className="canvas-workflow-panel__count-input canvas-workflow-panel__distance-input"
@@ -3208,7 +3295,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
               ) : dimEdit.dimensionEdit.shape === 'slot' ? (
                 dimEdit.dimensionEdit.arcEnd ? (
                   <label className="canvas-workflow-panel__field">
-                    <span>Width</span>
+                    <span>{t('canvas.field.width')}</span>
                     <input
                       ref={dimEdit.widthInputRef}
                       className="canvas-workflow-panel__count-input canvas-workflow-panel__distance-input"
@@ -3228,7 +3315,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
                 ) : (
                   <>
                     <label className="canvas-workflow-panel__field">
-                      <span>Length</span>
+                      <span>{t('canvas.field.length')}</span>
                       <input
                         ref={dimEdit.widthInputRef}
                         className="canvas-workflow-panel__count-input canvas-workflow-panel__distance-input"
@@ -3247,7 +3334,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
                       />
                     </label>
                     <label className="canvas-workflow-panel__field">
-                      <span>Angle °</span>
+                      <span>{t('canvas.field.angleDeg')}</span>
                       <input
                         ref={dimEdit.heightInputRef}
                         className="canvas-workflow-panel__count-input canvas-workflow-panel__distance-input"
@@ -3265,7 +3352,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
                       />
                     </label>
                     <label className="canvas-workflow-panel__field">
-                      <span>Width</span>
+                      <span>{t('canvas.field.width')}</span>
                       <input
                         ref={dimEdit.radiusInputRef}
                         className="canvas-workflow-panel__count-input canvas-workflow-panel__distance-input"
@@ -3284,9 +3371,9 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
                     </label>
                   </>
                 )
-              ) : dimEdit.dimensionEdit.shape === 'ngon' ? (
+              ) : (dimEdit.dimensionEdit.shape === 'ngon' || dimEdit.dimensionEdit.shape === 'gear') ? (
                 <label className="canvas-workflow-panel__field">
-                  <span>Radius</span>
+                  <span>{t('canvas.field.radius')}</span>
                   <input
                     ref={dimEdit.radiusInputRef}
                     className="canvas-workflow-panel__count-input canvas-workflow-panel__distance-input"
@@ -3306,7 +3393,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
               ) : (
                 <>
                   <label className="canvas-workflow-panel__field">
-                    <span>Width</span>
+                    <span>{t('canvas.field.width')}</span>
                     <input
                       ref={dimEdit.widthInputRef}
                       className="canvas-workflow-panel__count-input canvas-workflow-panel__distance-input"
@@ -3332,7 +3419,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
                     />
                   </label>
                   <label className="canvas-workflow-panel__field">
-                    <span>Height</span>
+                    <span>{t('canvas.field.height')}</span>
                     <input
                       ref={dimEdit.heightInputRef}
                       className="canvas-workflow-panel__count-input canvas-workflow-panel__distance-input"
@@ -3360,81 +3447,34 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
               )}
             </div>
           )}
+          {pendingAdd.shape === 'gear' && !creation.creationDimEditActive && (<GearParameterPanel pendingAdd={pendingAdd} units={project.meta.units} setPendingGearParams={setPendingGearParams} />)}
           {pendingAdd.shape === 'ngon' && !creation.creationDimEditActive && (
-            <div className="canvas-workflow-panel__meta">
-              <label className="canvas-workflow-panel__field">
-                <span>Sides (3–50)</span>
-                <input
-                  key={'sides' in pendingAdd ? pendingAdd.session : undefined}
-                  className="canvas-workflow-panel__count-input"
-                  type="text"
-                  inputMode="numeric"
-                  defaultValue={'sides' in pendingAdd ? pendingAdd.sides : 6}
-                  onBlur={(e) => {
-                    const n = Math.round(Number(e.target.value))
-                    const clamped = Number.isNaN(n) ? ('sides' in pendingAdd ? pendingAdd.sides : 6) : Math.max(3, Math.min(50, n))
-                    setPendingNgonSides(clamped)
-                    e.target.value = String(clamped)
-                  }}
-                  onKeyDown={(e) => {
-                    e.stopPropagation()
-                    if (e.key === 'Enter') {
-                      const n = Math.round(Number(e.currentTarget.value))
-                      if (!Number.isNaN(n)) setPendingNgonSides(Math.max(3, Math.min(50, n)))
-                    }
-                  }}
-                />
-              </label>
-            </div>
+            <NgonParameterPanel pendingAdd={pendingAdd} setPendingNgonSides={setPendingNgonSides} />
           )}
           {(pendingAdd.shape === 'roundrect' || pendingAdd.shape === 'chamferrect') && !creation.creationDimEditActive && (
-            <div className="canvas-workflow-panel__meta">
-              <label className="canvas-workflow-panel__field">
-                <span>{pendingAdd.shape === 'roundrect' ? 'Corner radius' : 'Chamfer'}</span>
-                <input
-                  key={'corner' in pendingAdd ? pendingAdd.session : undefined}
-                  className="canvas-workflow-panel__count-input"
-                  type="text"
-                  inputMode="decimal"
-                  defaultValue={'corner' in pendingAdd ? pendingAdd.corner : (project.meta.units === 'mm' ? 5 : 0.2)}
-                  onBlur={(e) => {
-                    const v = Number(e.target.value)
-                    const clamped = Number.isNaN(v) || v < 0 ? ('corner' in pendingAdd ? pendingAdd.corner : 0) : v
-                    setPendingRectCorner(clamped)
-                    e.target.value = String(clamped)
-                  }}
-                  onKeyDown={(e) => {
-                    e.stopPropagation()
-                    if (e.key === 'Enter') {
-                      const v = Number(e.currentTarget.value)
-                      if (!Number.isNaN(v) && v >= 0) setPendingRectCorner(v)
-                    }
-                  }}
-                />
-              </label>
-            </div>
+            <RectCornerParameterPanel pendingAdd={pendingAdd} setPendingRectCorner={setPendingRectCorner} />
           )}
           {pendingDraftHasSelfIntersection ? (
-            <div className="sketch-banner-warning">This profile self-intersects. 3D/CAM results may be invalid.</div>
+            <div className="sketch-banner-warning">{t('canvas.warning.selfIntersect')}</div>
           ) : null}
           {pendingDraftExceedsStock ? (
-            <div className="sketch-banner-warning">This profile extends outside the stock boundary.</div>
+            <div className="sketch-banner-warning">{t('canvas.warning.exceedsStock')}</div>
           ) : null}
         </CanvasWorkflowPanel>
       )}
       {creation.placementPanelActive && (
         <CanvasWorkflowPanel
-          title={pendingAdd!.shape === 'origin' ? 'Place Origin' : 'Place Text'}
+          title={pendingAdd!.shape === 'origin' ? t('canvas.placement.originTitle') : t('canvas.placement.textTitle')}
           step={
             pendingAdd!.shape === 'origin'
-              ? 'Click the sketch to place machine X0 Y0. Z remains manual in Properties.'
-              : 'Tap the sketch to place the text.'
+              ? t('canvas.placement.originStep')
+              : t('canvas.placement.textStep')
           }
           position={creation.placementWorkflowPanel.position}
           panelRef={creation.placementWorkflowPanel.panelRef}
           handleProps={creation.placementWorkflowPanel.handleProps}
           actions={
-            <button type="button" className="tablet-cmd-btn tablet-cmd-btn--cancel" onClick={cancelPendingAdd}>Cancel</button>
+            <button type="button" className="tablet-cmd-btn tablet-cmd-btn--cancel" onClick={cancelPendingAdd}>{t('canvas.placement.cancel')}</button>
           }
         >
           {null}
@@ -3442,29 +3482,29 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
       )}
       {pendingConstraint && (
         <CanvasWorkflowPanel
-          title="Constraint"
+          title={t('canvas.constraint.title')}
           step={
             !pendingConstraint.anchor
-              ? 'Pick anchor point'
+              ? t('canvas.constraint.step.pickAnchor')
               : !pendingConstraint.reference
-                ? 'Pick reference point'
-                : 'Set distance'
+                ? t('canvas.constraint.step.pickReference')
+                : t('canvas.constraint.step.setDistance')
           }
           position={constraint.constraintWorkflowPanel.position}
           panelRef={constraint.constraintWorkflowPanel.panelRef}
           handleProps={constraint.constraintWorkflowPanel.handleProps}
           actions={constraint.constraintDistanceReady ? (
             <>
-              <button type="button" className="tablet-cmd-btn tablet-cmd-btn--confirm" onClick={constraint.commitConstraintFromPanel}>Confirm</button>
-              <button type="button" className="tablet-cmd-btn tablet-cmd-btn--cancel" onClick={constraint.cancelConstraintFromPanel}>Cancel</button>
+              <button type="button" className="tablet-cmd-btn tablet-cmd-btn--confirm" onClick={constraint.commitConstraintFromPanel}>{t('canvas.constraint.confirm')}</button>
+              <button type="button" className="tablet-cmd-btn tablet-cmd-btn--cancel" onClick={constraint.cancelConstraintFromPanel}>{t('canvas.constraint.cancel')}</button>
             </>
           ) : (
-            <button type="button" className="tablet-cmd-btn tablet-cmd-btn--cancel" onClick={constraint.cancelConstraintFromPanel}>Cancel</button>
+            <button type="button" className="tablet-cmd-btn tablet-cmd-btn--cancel" onClick={constraint.cancelConstraintFromPanel}>{t('canvas.constraint.cancel')}</button>
           )}
         >
           {constraint.constraintDistanceReady && constraint.constraintDistanceInput != null && (
             <label className="canvas-workflow-panel__field">
-              <span>Distance</span>
+              <span>{t('canvas.field.distance')}</span>
               <input
                 ref={constraint.constraintDistanceInputRef}
                 className="canvas-workflow-panel__count-input canvas-workflow-panel__distance-input"
@@ -3488,31 +3528,31 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
             </label>
           )}
           {!pendingConstraint.anchor && (
-            <div className="canvas-workflow-panel__summary">Tap a snap point on this feature.</div>
+            <div className="canvas-workflow-panel__summary">{t('canvas.constraint.summary.anchor')}</div>
           )}
           {pendingConstraint.anchor && !pendingConstraint.reference && (
-            <div className="canvas-workflow-panel__summary">Tap a snap point on another feature.</div>
+            <div className="canvas-workflow-panel__summary">{t('canvas.constraint.summary.reference')}</div>
           )}
         </CanvasWorkflowPanel>
       )}
       {pendingMove && (
         <CanvasWorkflowPanel
-          title={pendingMove.mode === 'copy' ? 'Copy' : 'Move'}
+          title={pendingMove.mode === 'copy' ? t('canvas.move.title.copy') : t('canvas.move.title.move')}
           step={move.moveDistanceEditActive
-            ? 'Set distance'
+            ? t('canvas.move.step.setDistance')
             : !pendingMove.fromPoint
-              ? 'Select from point'
+              ? t('canvas.move.step.selectFrom')
               : !pendingMove.toPoint
-                ? 'Select target point'
+                ? t('canvas.move.step.selectTarget')
                 : pendingMove.mode === 'copy'
-                  ? 'Set copy count'
+                  ? t('canvas.move.step.setCopyCount')
                   : undefined}
           position={move.moveWorkflowPanel.position}
           panelRef={move.moveWorkflowPanel.panelRef}
           handleProps={move.moveWorkflowPanel.handleProps}
           actionRowProps={move.moveWorkflowPanel.actionRowProps}
           className="canvas-workflow-panel--move"
-          moveLabel={`Move ${pendingMove.mode} controls`}
+          moveLabel={t('canvas.move.moveLabel', { mode: pendingMove.mode })}
           actions={(
             <>
               {move.moveDistanceEditActive && (
@@ -3520,7 +3560,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
                   type="button"
                   className="tablet-cmd-btn tablet-cmd-btn--confirm"
                   onClick={move.commitMoveDistanceEditFromPanel}
-                >Confirm</button>
+                >{t('canvas.move.confirm')}</button>
               )}
               {!move.moveDistanceEditActive && pendingMove.mode === 'copy' && pendingMove.fromPoint && pendingMove.toPoint && (
                 <button
@@ -3533,25 +3573,25 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
                     setCopyCountDraft('1')
                     move.moveWorkflowPanel.focusCanvasAfterAction()
                   }}
-                >Confirm</button>
+                >{t('canvas.move.confirm')}</button>
               )}
               <button
                 type="button"
                 className="tablet-cmd-btn tablet-cmd-btn--cancel"
                 onClick={move.cancelMoveFromPanel}
-              >Cancel</button>
+              >{t('canvas.move.cancel')}</button>
             </>
           )}
         >
           {pendingMove.fromPoint && !pendingMove.toPoint && (
             <div className="canvas-workflow-panel__summary">
-              Select a target point to set the direction and default distance.
+              {t('canvas.move.summary.selectTarget')}
             </div>
           )}
           {move.moveDistanceEditActive && (operationDimEdit?.kind === 'move' || operationDimEdit?.kind === 'copy') && (
             <div className="canvas-workflow-panel__meta">
               <label className="canvas-workflow-panel__field">
-                <span>Distance</span>
+                <span>{t('canvas.field.distance')}</span>
                 <input
                   ref={dimEdit.widthInputRef}
                   className="canvas-workflow-panel__count-input canvas-workflow-panel__distance-input"
@@ -3578,7 +3618,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
           {!move.moveDistanceEditActive && pendingMove.mode === 'copy' && pendingMove.fromPoint && pendingMove.toPoint && (
             <div className="canvas-workflow-panel__meta">
               <label className="canvas-workflow-panel__field">
-                <span>Copies</span>
+                <span>{t('canvas.field.copies')}</span>
                 <input
                   ref={copyCountInputRef}
                   className="canvas-workflow-panel__count-input"
@@ -3609,32 +3649,32 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
       )}
       {pendingTransform && (
         <CanvasWorkflowPanel
-          title={pendingTransform.mode === 'resize' ? 'Resize' : pendingTransform.mode === 'mirror' ? 'Mirror' : 'Rotate'}
+          title={pendingTransform.mode === 'resize' ? t('canvas.transform.title.resize') : pendingTransform.mode === 'mirror' ? t('canvas.transform.title.mirror') : t('canvas.transform.title.rotate')}
           step={transformExact.transformExactEditActive
-            ? transformExact.transformScaleEditActive ? 'Set scale' : 'Set angle'
+            ? transformExact.transformScaleEditActive ? t('canvas.transform.step.setScale') : t('canvas.transform.step.setAngle')
             : transformExact.rotateCopyCountPromptActive
-            ? 'Set copy count'
+            ? t('canvas.transform.step.setCopyCount')
             : pendingTransform.mode === 'resize'
               ? !pendingTransform.referenceStart
-                ? 'Select first reference'
+                ? t('canvas.transform.step.selectFirstReference')
                 : !pendingTransform.referenceEnd
-                  ? 'Select second reference'
-                  : 'Scale to commit'
+                  ? t('canvas.transform.step.selectSecondReference')
+                  : t('canvas.transform.step.scaleToCommit')
               : pendingTransform.mode === 'mirror'
                 ? !pendingTransform.referenceStart
-                  ? 'Select first line point'
-                  : 'Select second line point'
+                  ? t('canvas.transform.step.selectFirstLinePoint')
+                  : t('canvas.transform.step.selectSecondLinePoint')
                 : !pendingTransform.referenceStart
-                  ? 'Select origin'
+                  ? t('canvas.transform.step.selectOrigin')
                   : !pendingTransform.referenceEnd
-                    ? 'Select reference direction'
-                    : 'Rotate to commit'}
+                    ? t('canvas.transform.step.selectReferenceDirection')
+                    : t('canvas.transform.step.rotateToCommit')}
           position={transformExact.transformWorkflowPanel.position}
           panelRef={transformExact.transformWorkflowPanel.panelRef}
           handleProps={transformExact.transformWorkflowPanel.handleProps}
           actionRowProps={transformExact.transformWorkflowPanel.actionRowProps}
           className="canvas-workflow-panel--transform"
-          moveLabel={`Move ${pendingTransform.mode} controls`}
+          moveLabel={t('canvas.transform.moveLabel', { mode: pendingTransform.mode })}
           actions={(
             <>
               {transformExact.transformExactEditActive && (
@@ -3642,7 +3682,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
                   type="button"
                   className="tablet-cmd-btn tablet-cmd-btn--confirm"
                   onClick={transformExact.commitTransformExactEditFromPanel}
-                >Confirm</button>
+                >{t('canvas.transform.confirm')}</button>
               )}
               {!transformExact.transformExactEditActive && !transformExact.rotateCopyCountPromptActive
                 && ((pendingTransform.mode === 'resize' && pendingTransform.referenceStart && pendingTransform.referenceEnd)
@@ -3651,27 +3691,27 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
                   type="button"
                   className="tablet-cmd-btn"
                   onClick={transformExact.triggerDimensionFromTransformPanel}
-                >{pendingTransform.mode === 'resize' ? 'Scale' : 'Angle'}</button>
+                >{pendingTransform.mode === 'resize' ? t('canvas.transform.scaleButton') : t('canvas.transform.angleButton')}</button>
               )}
               {!transformExact.transformExactEditActive && transformExact.rotateCopyCountPromptActive && (
                 <button
                   type="button"
                   className="tablet-cmd-btn tablet-cmd-btn--confirm"
                   onClick={transformExact.commitRotateCopyFromPanel}
-                >Confirm</button>
+                >{t('canvas.transform.confirm')}</button>
               )}
               <button
                 type="button"
                 className="tablet-cmd-btn tablet-cmd-btn--cancel"
                 onClick={transformExact.cancelTransformFromPanel}
-              >Cancel</button>
+              >{t('canvas.transform.cancel')}</button>
             </>
           )}
         >
           {transformExact.transformExactEditActive && (operationDimEdit?.kind === 'scale' || operationDimEdit?.kind === 'rotate') ? (
             <div className="canvas-workflow-panel__meta">
               <label className="canvas-workflow-panel__field">
-                <span>{operationDimEdit.kind === 'scale' ? 'Scale' : 'Angle'}</span>
+                <span>{operationDimEdit.kind === 'scale' ? t('canvas.field.scale') : t('canvas.field.angle')}</span>
                 <input
                   ref={dimEdit.widthInputRef}
                   className="canvas-workflow-panel__count-input"
@@ -3704,7 +3744,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
             <>
               <div className="canvas-workflow-panel__meta">
                 <label className="canvas-workflow-panel__field">
-                  <span>Copies</span>
+                  <span>{t('canvas.field.copies')}</span>
                   <input
                     ref={transformExact.rotateCopyCountInputRef}
                     className="canvas-workflow-panel__count-input"
@@ -3734,12 +3774,12 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
                 || (pendingTransform.mode === 'mirror' && pendingTransform.referenceStart)) && (
                 <div className="canvas-workflow-panel__summary">
                   {pendingTransform.mode === 'resize'
-                    ? 'Move along the reference line to preview, then click to commit.'
+                    ? t('canvas.transform.summary.resize')
                     : pendingTransform.mode === 'mirror'
-                      ? 'Move to preview, then click the second mirror line point.'
+                      ? t('canvas.transform.summary.mirror')
                       : pendingTransform.keepOriginals
-                        ? 'Move to preview the rotated copy, then click to set angle.'
-                        : 'Move to preview, then click to commit.'}
+                        ? t('canvas.transform.summary.rotateCopy')
+                        : t('canvas.transform.summary.rotate')}
                 </div>
               )}
               {((pendingTransform.mode === 'rotate' && pendingTransform.referenceStart && pendingTransform.referenceEnd)
@@ -3754,7 +3794,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
                         transformExact.transformWorkflowPanel.focusCanvasAfterAction()
                       }}
                     />
-                    <span>Keep originals</span>
+                    <span>{t('canvas.transform.keepOriginals')}</span>
                   </label>
                 </div>
               )}
@@ -3764,17 +3804,17 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
       )}
       {tapeMeasure && (
         <CanvasWorkflowPanel
-          title="Tape measure"
-          step={tapeMeasure.first ? 'Click the second point' : 'Click the first point'}
+          title={t('canvas.tape.title')}
+          step={tapeMeasure.first ? t('canvas.tape.step.second') : t('canvas.tape.step.first')}
           position={tapeWorkflowPanel.position}
           panelRef={tapeWorkflowPanel.panelRef}
           handleProps={tapeWorkflowPanel.handleProps}
           actions={(
-            <button type="button" className="tablet-cmd-btn tablet-cmd-btn--cancel" onClick={() => { clearTapeMeasure(); tapeWorkflowPanel.focusCanvasAfterAction() }}>Done</button>
+            <button type="button" className="tablet-cmd-btn tablet-cmd-btn--cancel" onClick={() => { clearTapeMeasure(); tapeWorkflowPanel.focusCanvasAfterAction() }}>{t('canvas.tape.done')}</button>
           )}
         >
           <div className="canvas-workflow-panel__summary">
-            Snaps to geometry. The measurement stays until your next click — Esc or Done to exit.
+            {t('canvas.tape.summary')}
           </div>
         </CanvasWorkflowPanel>
       )}
@@ -3786,92 +3826,92 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
           panelRef={dimensionWorkflowPanel.panelRef}
           handleProps={dimensionWorkflowPanel.handleProps}
           actions={(
-            <button type="button" className="tablet-cmd-btn tablet-cmd-btn--cancel" onClick={() => { cancelPendingDimension(); dimensionWorkflowPanel.focusCanvasAfterAction() }}>Cancel</button>
+            <button type="button" className="tablet-cmd-btn tablet-cmd-btn--cancel" onClick={() => { cancelPendingDimension(); dimensionWorkflowPanel.focusCanvasAfterAction() }}>{t('canvas.dimension.addCancel')}</button>
           )}
         >
           <div className="canvas-workflow-panel__summary">
-            Click points to anchor the dimension to geometry. Esc to cancel.
+            {t('canvas.dimension.addSummary')}
           </div>
         </CanvasWorkflowPanel>
       )}
       {dimensionDeleteArmed && (
         <CanvasWorkflowPanel
-          title="Delete dimension"
-          step="Click a dimension to delete"
+          title={t('canvas.dimension.deleteTitle')}
+          step={t('canvas.dimension.deleteStep')}
           position={dimensionDeleteWorkflowPanel.position}
           panelRef={dimensionDeleteWorkflowPanel.panelRef}
           handleProps={dimensionDeleteWorkflowPanel.handleProps}
           actions={(
-            <button type="button" className="tablet-cmd-btn tablet-cmd-btn--confirm" onClick={() => { setDimensionDeleteArmed(false); dimensionDeleteWorkflowPanel.focusCanvasAfterAction() }}>Done</button>
+            <button type="button" className="tablet-cmd-btn tablet-cmd-btn--confirm" onClick={() => { setDimensionDeleteArmed(false); dimensionDeleteWorkflowPanel.focusCanvasAfterAction() }}>{t('canvas.dimension.deleteDone')}</button>
           )}
         >
           <div className="canvas-workflow-panel__summary">
-            Click each dimension you want to remove. Esc or Done to finish.
+            {t('canvas.dimension.deleteSummary')}
           </div>
         </CanvasWorkflowPanel>
       )}
       {pendingClipboardPlacement && (
         <CanvasWorkflowPanel
-          title="Paste features"
-          step="Click in the sketch to place"
+          title={t('canvas.paste.title')}
+          step={t('canvas.paste.step')}
           position={clipboardPlacementWorkflowPanel.position}
           panelRef={clipboardPlacementWorkflowPanel.panelRef}
           handleProps={clipboardPlacementWorkflowPanel.handleProps}
           actionRowProps={clipboardPlacementWorkflowPanel.actionRowProps}
           actions={(
-            <button type="button" className="tablet-cmd-btn tablet-cmd-btn--cancel" onClick={cancelClipboardPlacement}>Cancel</button>
+            <button type="button" className="tablet-cmd-btn tablet-cmd-btn--cancel" onClick={cancelClipboardPlacement}>{t('canvas.paste.cancel')}</button>
           )}
         >
           <div className="canvas-workflow-panel__summary">
-            Move the pointer to preview the paste location.
+            {t('canvas.paste.summary')}
           </div>
         </CanvasWorkflowPanel>
       )}
       {editModeActive && (
         <CanvasWorkflowPanel
-          title="Edit"
+          title={t('canvas.edit.title')}
           step={
-            editFilletActive ? selection.sketchEditTool === 'chamfer' ? 'Enter distance' : 'Enter radius'
-            : editDimEditActive ? 'Enter dimensions'
-            : selection.sketchEditTool === 'add_point' ? 'Click to add points'
-            : selection.sketchEditTool === 'delete_point' ? 'Click to delete points'
-            : selection.sketchEditTool === 'delete_segment' ? 'Click to delete segments'
-            : selection.sketchEditTool === 'disconnect' ? 'Click an anchor to split'
-            : selection.sketchEditTool === 'fillet' ? (fillet.filletCornerPicked ? 'Click second point or enter radius' : 'Click a corner')
-            : selection.sketchEditTool === 'chamfer' ? (fillet.filletCornerPicked ? 'Click second point or enter distance' : 'Click a corner')
-            : selection.sketchEditTool === 'trim' ? (pendingSketchEdit?.phase === 'pick-reference' ? 'Click the cutting segment' : 'Click the part of the segment to remove')
-            : selection.sketchEditTool === 'extend' ? (pendingSketchEdit?.phase === 'pick-reference' ? 'Click the target segment to reach' : 'Click near the open end of the segment to extend')
-            : 'Drag nodes or click segments'
+            editFilletActive ? (selection.sketchEditTool === 'chamfer' ? t('canvas.edit.step.enterDistance') : t('canvas.edit.step.enterRadius'))
+            : editDimEditActive ? t('canvas.edit.step.enterDimensions')
+            : selection.sketchEditTool === 'add_point' ? t('canvas.edit.step.clickToAddPoints')
+            : selection.sketchEditTool === 'delete_point' ? t('canvas.edit.step.clickToDeletePoints')
+            : selection.sketchEditTool === 'delete_segment' ? t('canvas.edit.step.clickToDeleteSegments')
+            : selection.sketchEditTool === 'disconnect' ? t('canvas.edit.step.clickAnchorToSplit')
+            : selection.sketchEditTool === 'fillet' ? (fillet.filletCornerPicked ? t('canvas.edit.step.filletSecond') : t('canvas.edit.step.filletCorner'))
+            : selection.sketchEditTool === 'chamfer' ? (fillet.filletCornerPicked ? t('canvas.edit.step.chamferSecond') : t('canvas.edit.step.chamferCorner'))
+            : selection.sketchEditTool === 'trim' ? (pendingSketchEdit?.phase === 'pick-reference' ? t('canvas.edit.step.trimReference') : t('canvas.edit.step.trimSubject'))
+            : selection.sketchEditTool === 'extend' ? (pendingSketchEdit?.phase === 'pick-reference' ? t('canvas.edit.step.extendReference') : t('canvas.edit.step.extendSubject'))
+            : t('canvas.edit.step.default')
           }
           position={editWorkflowPanel.position}
           panelRef={editWorkflowPanel.panelRef}
           handleProps={editWorkflowPanel.handleProps}
           actions={editFilletActive ? (
             <>
-              <button type="button" className="tablet-cmd-btn tablet-cmd-btn--confirm" onClick={commitFilletFromPanel}>Apply</button>
-              <button type="button" className="tablet-cmd-btn tablet-cmd-btn--cancel" onClick={cancelFilletFromPanel}>Cancel</button>
+              <button type="button" className="tablet-cmd-btn tablet-cmd-btn--confirm" onClick={commitFilletFromPanel}>{t('canvas.edit.apply')}</button>
+              <button type="button" className="tablet-cmd-btn tablet-cmd-btn--cancel" onClick={cancelFilletFromPanel}>{t('canvas.edit.cancel')}</button>
             </>
           ) : editDimEditActive ? (
             <>
-              <button type="button" className="tablet-cmd-btn tablet-cmd-btn--confirm" onClick={commitEditDimensionFromPanel}>Confirm</button>
-              <button type="button" className="tablet-cmd-btn tablet-cmd-btn--cancel" onClick={cancelEditDimensionFromPanel}>Cancel</button>
+              <button type="button" className="tablet-cmd-btn tablet-cmd-btn--confirm" onClick={commitEditDimensionFromPanel}>{t('canvas.edit.confirm')}</button>
+              <button type="button" className="tablet-cmd-btn tablet-cmd-btn--cancel" onClick={cancelEditDimensionFromPanel}>{t('canvas.edit.cancel')}</button>
             </>
           ) : (
             <>
               {dimEdit.armedForDimension && (
-                <button type="button" className="tablet-cmd-btn" onClick={() => { triggerDimensionEdit(); dimEdit.setArmedForDimension(false) }}>Dimension</button>
+                <button type="button" className="tablet-cmd-btn" onClick={() => { triggerDimensionEdit(); dimEdit.setArmedForDimension(false) }}>{t('canvas.edit.dimensionButton')}</button>
               )}
               {fillet.filletCornerPicked && !editFilletActive && (
-                <button type="button" className="tablet-cmd-btn" onClick={() => fillet.enterFilletRadiusEdit()}>{selection.sketchEditTool === 'chamfer' ? 'Distance' : 'Radius'}</button>
+                <button type="button" className="tablet-cmd-btn" onClick={() => fillet.enterFilletRadiusEdit()}>{selection.sketchEditTool === 'chamfer' ? t('canvas.edit.distanceButton') : t('canvas.edit.radiusButton')}</button>
               )}
-              <button type="button" className="tablet-cmd-btn tablet-cmd-btn--confirm" onClick={applyEditFromPanel}>Apply</button>
-              <button type="button" className="tablet-cmd-btn tablet-cmd-btn--cancel" onClick={cancelEditFromPanel}>Cancel</button>
+              <button type="button" className="tablet-cmd-btn tablet-cmd-btn--confirm" onClick={applyEditFromPanel}>{t('canvas.edit.apply')}</button>
+              <button type="button" className="tablet-cmd-btn tablet-cmd-btn--cancel" onClick={cancelEditFromPanel}>{t('canvas.edit.cancel')}</button>
             </>
           )}
         >
           {editFilletActive ? (
             <label className="canvas-workflow-panel__field">
-              <span>{selection.sketchEditTool === 'chamfer' ? 'Distance' : 'Radius'}</span>
+              <span>{selection.sketchEditTool === 'chamfer' ? t('canvas.field.distance') : t('canvas.field.radius')}</span>
               <input
                 ref={fillet.filletRadiusInputRef}
                 className="canvas-workflow-panel__count-input canvas-workflow-panel__distance-input"
@@ -3898,7 +3938,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
           ) : editDimEditActive && dimEdit.dimensionEdit ? (
             dimEdit.dimensionEdit.activeField === 'radius' ? (
               <label className="canvas-workflow-panel__field">
-                <span>Radius</span>
+                <span>{t('canvas.field.radius')}</span>
                 <input
                   ref={dimEdit.radiusInputRef}
                   className="canvas-workflow-panel__count-input canvas-workflow-panel__distance-input"
@@ -3923,7 +3963,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
             ) : (
               <>
                 <label className="canvas-workflow-panel__field">
-                  <span>Length</span>
+                  <span>{t('canvas.field.length')}</span>
                   <input
                     ref={dimEdit.widthInputRef}
                     className="canvas-workflow-panel__count-input canvas-workflow-panel__distance-input"
@@ -3949,7 +3989,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
                   />
                 </label>
                 <label className="canvas-workflow-panel__field">
-                  <span>Angle</span>
+                  <span>{t('canvas.field.angle')}</span>
                   <input
                     ref={dimEdit.heightInputRef}
                     className="canvas-workflow-panel__count-input canvas-workflow-panel__distance-input"
@@ -3978,10 +4018,10 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
           ) : (
             <>
               {editingFeatureHasSelfIntersection && (
-                <div className="canvas-workflow-panel__summary" style={{ color: 'var(--warning)' }}>Self-intersecting profile</div>
+                <div className="canvas-workflow-panel__summary" style={{ color: 'var(--warning)' }}>{t('canvas.edit.warning.selfIntersecting')}</div>
               )}
               {editingFeatureExceedsStock && (
-                <div className="canvas-workflow-panel__summary" style={{ color: 'var(--warning)' }}>Extends outside stock</div>
+                <div className="canvas-workflow-panel__summary" style={{ color: 'var(--warning)' }}>{t('canvas.edit.warning.exceedsStock')}</div>
               )}
             </>
           )}
@@ -3993,8 +4033,8 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
           className="axis-lock-chip"
           style={{ borderColor: lockModeGuideColor(lockMode), color: lockModeGuideColor(lockMode) }}
           onClick={cycleLock}
-          title="Click to cycle axis lock (Alt)"
-        >{lockMode === 'x' ? 'Lock X' : 'Lock Y'}</button>
+          title={t('canvas.axisLock.cycleAria')}
+        >{lockMode === 'x' ? t('canvas.axisLock.lockX') : t('canvas.axisLock.lockY')}</button>
       )}
       {isTablet && (
         <div className="tablet-command-bar">
@@ -4003,16 +4043,16 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
             className={`tablet-cmd-btn ${lockMode !== 'none' ? 'tablet-cmd-btn--active' : ''}`}
             style={{ borderColor: lockModeGuideColor(lockMode) }}
             onClick={cycleLock}
-          >{lockMode === 'none' ? 'Lock' : lockMode === 'x' ? 'Lock X' : 'Lock Y'}</button>
+          >{lockMode === 'none' ? t('canvas.axisLock.lock') : lockMode === 'x' ? t('canvas.axisLock.lockX') : t('canvas.axisLock.lockY')}</button>
           {/* Multi-select toggle */}
           {selection.mode === 'feature' && !pendingAdd && !pendingMove && !pendingTransform && !pendingOffset && (
             <button
               type="button"
               className={`tablet-cmd-btn ${(multiSelectMode || !!pendingShapeAction) ? 'tablet-cmd-btn--active' : ''}`}
               disabled={!!pendingShapeAction}
-              title={pendingShapeAction ? 'Multi-select is automatic for Join and Cut' : 'Toggle multi-select'}
+              title={pendingShapeAction ? t('canvas.axisLock.multiSelectDisabledTitle') : t('canvas.axisLock.multiSelectTitle')}
               onClick={() => setMultiSelectMode((prev) => !prev)}
-            >Multi</button>
+            >{t('canvas.axisLock.multiSelect')}</button>
           )}
         </div>
       )}

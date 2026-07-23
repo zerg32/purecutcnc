@@ -29,6 +29,7 @@ import { Viewport3D, type Viewport3DHandle } from './components/viewport3d/Viewp
 import { type ToolpathVisibility, DEFAULT_TOOLPATH_VISIBILITY } from './components/toolpathVisibility'
 import { ExportDialog } from './components/export/ExportDialog'
 import { ModelExportDialog } from './components/export/ModelExportDialog'
+import { PrintDesignDialog } from './components/export/PrintDesignDialog'
 import { NewProjectDialog } from './components/project/NewProjectDialog'
 import { ImportGeometryDialog } from './components/project/ImportGeometryDialog'
 import { EmptyStateOverlay } from './components/onboarding/EmptyStateOverlay'
@@ -63,8 +64,11 @@ function App() {
   const [simulationDetailCells, setSimulationDetailCells] = useState(280)
   const [isSimulationPending, startSimulationTransition] = useTransition()
   const [simulationMode, setSimulationMode] = useState<'selected' | 'visible'>('selected')
-  const [showExportDialog, setShowExportDialog] = useState(false)
+  // Non-null opens the Export G-code dialog; operationIds narrows the
+  // pre-checked set to specific operations (per-operation export, issue #274).
+  const [exportDialogRequest, setExportDialogRequest] = useState<{ operationIds?: string[] } | null>(null)
   const [showModelExportDialog, setShowModelExportDialog] = useState(false)
+  const [showPrintDialog, setShowPrintDialog] = useState(false)
   const [showNewProjectDialog, setShowNewProjectDialog] = useState(false)
   const [showImportDialog, setShowImportDialog] = useState(false)
   const [showAboutDialog, setShowAboutDialog] = useState(false)
@@ -81,9 +85,11 @@ function App() {
     return () => window.removeEventListener('purecutcnc:new-project', handleMenuNew)
   }, [])
 
-  const handleExportGcode = useCallback(() => setShowExportDialog(true), [])
+  const handleExportGcode = useCallback(() => setExportDialogRequest({}), [])
+  const handlePrintDesign = useCallback(() => setShowPrintDialog(true), [])
   useDesktopIntegration({
     onExportGcode: handleExportGcode,
+    onPrintDesign: handlePrintDesign,
     onShowAbout: () => setShowAboutDialog(true),
   })
   const { snapSettings, activeSnapMode, setActiveSnapMode, onToggleSnapEnabled, onToggleSnapMode } = useSnapSettings()
@@ -122,6 +128,7 @@ function App() {
     setAddToFolderSubmenu,
     menuFeatureFolders,
     menuSelectionInGroupedFolder,
+    menuSelectionSectionsMixed,
     menuSelectionIsGroup,
     menuHasMultipleSelection,
     menuCanUseAsStock,
@@ -192,6 +199,7 @@ function App() {
     emptyStateEngaged,
     onDraw: handleEmptyStateDraw,
     onImport: handleEmptyStateImport,
+    onDismiss: handleEmptyStateDismiss,
     frameOpenedProject,
   } = useEmptyStateEngagement({
     projectKey,
@@ -276,6 +284,15 @@ function App() {
         return
       }
 
+      // Cmd/Ctrl+P prints the design document instead of the app shell. On
+      // desktop the native menu accelerator usually consumes the key first;
+      // this covers the web app and any platform that lets it through.
+      if (event.key.toLowerCase() === 'p' && !event.shiftKey) {
+        event.preventDefault()
+        setShowPrintDialog(true)
+        return
+      }
+
       if (event.key.toLowerCase() === 'z' && !event.shiftKey) {
         event.preventDefault()
         useProjectStore.getState().undo()
@@ -346,6 +363,7 @@ function App() {
             zoomWindowActive={zoomWindowActive}
             onImportComplete={handleImportComplete}
             onExportModel={() => setShowModelExportDialog(true)}
+            onPrintDesign={handlePrintDesign}
             snapSettings={snapSettings}
             activeSnapMode={activeSnapMode}
             onToggleSnapEnabled={onToggleSnapEnabled}
@@ -383,6 +401,7 @@ function App() {
                 onDraw={handleEmptyStateDraw}
                 onImport={handleEmptyStateImport}
                 onExampleOpened={frameOpenedProject}
+                onDismiss={handleEmptyStateDismiss}
               />
             ) : null}
           </>
@@ -431,7 +450,8 @@ function App() {
             mode={rightTab === 'tools' ? 'tools' : 'operations'}
             selectedOperationId={effectiveSelectedOperationId}
             onSelectedOperationIdChange={handleSelectedOperationIdChange}
-            onExport={() => setShowExportDialog(true)}
+            onExport={() => setExportDialogRequest({})}
+            onExportOperation={(operationId) => setExportDialogRequest({ operationIds: [operationId] })}
             generateToolpath={generateToolpathForOperation}
             toolpathWarnings={selectedToolpath?.warnings ?? null}
             generatingOperationIds={generatingOperationIds}
@@ -450,6 +470,7 @@ function App() {
         zoomWindowActive={zoomWindowActive}
         onImportComplete={handleImportComplete}
         onExportModel={() => setShowModelExportDialog(true)}
+        onPrintDesign={handlePrintDesign}
         snapSettings={snapSettings}
         activeSnapMode={activeSnapMode}
         onToggleSnapEnabled={onToggleSnapEnabled}
@@ -470,10 +491,20 @@ function App() {
         <ModelExportDialog onClose={() => setShowModelExportDialog(false)} />
       )}
 
-      {showExportDialog && (
+      {showPrintDialog && (
+        <PrintDesignDialog
+          onClose={() => setShowPrintDialog(false)}
+          getCurrentViewBounds={() => sketchCanvasRef.current?.getVisibleWorldBounds() ?? null}
+          toolpaths={visibleToolpaths}
+          toolpathVisibility={toolpathVisibility}
+        />
+      )}
+
+      {exportDialogRequest && (
         <ExportDialog
-          onClose={() => setShowExportDialog(false)}
+          onClose={() => setExportDialogRequest(null)}
           generateToolpath={generateToolpathForOperation}
+          initialOperationIds={exportDialogRequest.operationIds}
         />
       )}
 
@@ -516,6 +547,7 @@ function App() {
         menuFeatureFolders={menuFeatureFolders}
         addToFolderSubmenu={addToFolderSubmenu}
         menuSelectionInGroupedFolder={menuSelectionInGroupedFolder}
+        menuSelectionSectionsMixed={menuSelectionSectionsMixed}
         menuSelectionIsGroup={menuSelectionIsGroup}
         tabletShell={tabletShell}
         primaryId={treeContextMenu?.primaryId ?? null}

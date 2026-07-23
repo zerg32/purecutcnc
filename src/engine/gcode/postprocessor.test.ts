@@ -20,8 +20,10 @@
  * Run with: npx tsx src/engine/gcode/postprocessor.test.ts
  */
 
+import type { ToolpathWarning } from '../toolpaths/warningCodes'
 import { circleProfile, defaultTool, newProject } from '../../types/project'
 import type { Operation, SketchFeature } from '../../types/project'
+import { replaceProjectFeatures } from '../../test/projectFixtures'
 import { normalizeToolForProject } from '../toolpaths/geometry'
 import { generateDrillingToolpath } from '../toolpaths/drilling'
 import type { ToolpathResult } from '../toolpaths/types'
@@ -361,7 +363,8 @@ function runDrillingFixture(
   definition: MachineDefinition,
   drillType: 'simple' | 'peck' | 'dwell' | 'chip_breaking' | 'helical',
   overrides?: { peckDepth?: number; dwellTime?: number; helixDiameter?: number; helixPitch?: number },
-): { gcode: string; warnings: string[] } {
+): { gcode: string; warnings: ToolpathWarning[] } {
+
   const project = newProject('Canned Test', 'mm')
   const toolRecord = { ...defaultTool('mm', 1), id: 't1', name: '3 mm Drill', type: 'drill' as const, diameter: 3, defaultPlungeFeed: 150 }
   project.tools = [toolRecord]
@@ -384,7 +387,7 @@ function runDrillingFixture(
     visible: true,
     locked: false,
   }
-  project.features = [circle]
+  replaceProjectFeatures(project, [circle])
 
   const operation: Operation = {
     id: 'op1',

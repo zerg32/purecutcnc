@@ -15,6 +15,7 @@
  */
 
 import type { ReactNode } from 'react'
+import type { ToolpathWarning } from '../toolpaths/warningCodes'
 import type { Project } from '../../types/project'
 
 /** Triangle mesh in standard right-handed Z-up coordinates (the STL/CAD convention). */
@@ -55,12 +56,13 @@ export interface ModelExportAssembleOptions {
 export interface ModelExportAssembleResult {
   mesh: ExportTriangleMesh
   /** Non-blocking notes worth surfacing in the dialog (e.g. fallback geometry used). */
-  warnings: string[]
+  warnings: ToolpathWarning[]
 }
 
 export interface ModelExportInput {
   project: Project
-  mesh: ExportTriangleMesh
+  /** Assembled solid mesh; present only for `kind: '3d'` formats. */
+  mesh?: ExportTriangleMesh
 }
 
 export interface ModelExportOutput {
@@ -78,6 +80,11 @@ export interface ModelExportFormat<TOptions = unknown> {
   extension: string
   /** MIME type used by the browser blob save fallback. */
   mimeType: string
+  /**
+   * '3d' formats consume the assembled triangle mesh; '2d' formats render
+   * from the project directly and skip mesh assembly entirely.
+   */
+  kind: '2d' | '3d'
   defaultOptions: TOptions
   /** React node for the format-specific option controls in the dialog. */
   renderOptions: (props: {

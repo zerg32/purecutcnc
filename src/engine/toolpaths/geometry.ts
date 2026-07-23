@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+import type { ToolpathWarning } from './warningCodes'
 import type {
   DimensionRef,
   Operation,
@@ -47,7 +48,7 @@ function clonePoint(point: Point): Point {
   return { x: point.x, y: point.y }
 }
 
-export function resolveDimensionRef(project: Project, value: DimensionRef): number {
+export function resolveDimensionRef(project: Pick<Project, 'dimensions'>, value: DimensionRef): number {
   if (typeof value === 'number') {
     return value
   }
@@ -58,7 +59,7 @@ export function resolveDimensionRef(project: Project, value: DimensionRef): numb
   return named.value
 }
 
-export function resolveFeatureZSpan(project: Project, feature: SketchFeature): ResolvedFeatureZSpan {
+export function resolveFeatureZSpan(project: Pick<Project, 'dimensions'>, feature: SketchFeature): ResolvedFeatureZSpan {
   const top = resolveDimensionRef(project, feature.z_top)
   const bottom = resolveDimensionRef(project, feature.z_bottom)
   const min = Math.min(top, bottom)
@@ -252,9 +253,12 @@ export function fromClipperPath(path: ClipperPath, scale = DEFAULT_CLIPPER_SCALE
   return path.map((p) => ({ x: p.X / scale, y: p.Y / scale }))
 }
 
-export function checkMaxCutDepthWarning(tool: NormalizedTool, cutDepth: number): string | null {
+export function checkMaxCutDepthWarning(tool: NormalizedTool, cutDepth: number): ToolpathWarning | null {
   if (tool.maxCutDepth > 0 && cutDepth > tool.maxCutDepth) {
-    return `Cut depth ${cutDepth.toFixed(3)} ${tool.units} exceeds tool max cut depth ${tool.maxCutDepth.toFixed(3)} ${tool.units}`
+    return {
+      code: 'cutDepthExceedsToolMax',
+      params: { depth: cutDepth.toFixed(3), max: tool.maxCutDepth.toFixed(3), units: tool.units },
+    }
   }
   return null
 }

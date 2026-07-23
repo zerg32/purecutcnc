@@ -24,6 +24,13 @@ import { UnsupportedMobileScreen } from './components/UnsupportedMobileScreen'
 import { isDesktop } from './platform'
 import { installAnalytics } from './utils/analytics'
 import { applyVersionToTitle } from './utils/version'
+import { ThemeProvider } from './theme/ThemeProvider'
+import { bootstrapTheme } from './theme/bootstrap'
+import { I18nProvider } from './i18n/I18nProvider'
+import { bootstrapI18n } from './i18n/bootstrap'
+
+bootstrapTheme()
+bootstrapI18n()
 
 // Swap #root for a static error card if something throws before React mounts.
 // Once React is alive, AppErrorBoundary takes over — this flag prevents the
@@ -69,12 +76,20 @@ const isIconGalleryRoute =
   window.location.hash === '#icons'
 
 function rootElement() {
-  if (isPhoneSizedTouchDevice()) return <UnsupportedMobileScreen />
-  if (isIconGalleryRoute) return <IconGalleryRoute />
   return (
-    <AppErrorBoundary>
-      <App />
-    </AppErrorBoundary>
+    <ThemeProvider>
+      <I18nProvider>
+        {isPhoneSizedTouchDevice()
+          ? <UnsupportedMobileScreen />
+          : isIconGalleryRoute
+            ? <IconGalleryRoute />
+            : (
+                <AppErrorBoundary>
+                  <App />
+                </AppErrorBoundary>
+              )}
+      </I18nProvider>
+    </ThemeProvider>
   )
 }
 
@@ -94,6 +109,10 @@ if (import.meta.env.DEV) {
     getProject: async () => {
       const { useProjectStore } = await _pcTestStore()
       return JSON.parse(useProjectStore.getState().saveProject())
+    },
+    getHoveredFeatureId: async () => {
+      const { useProjectStore } = await _pcTestStore()
+      return useProjectStore.getState().selection.hoveredFeatureId
     },
     loadProject: async (json: string) => {
       const { useProjectStore } = await _pcTestStore()
@@ -134,6 +153,7 @@ declare global {
     __pcBootWatchdog?: number
     __pcTest?: {
       getProject: () => Promise<Record<string, unknown>>
+      getHoveredFeatureId: () => Promise<string | null>
       loadProject: (json: string) => Promise<void>
       getPendingMove: () => Promise<{ mode: string; entityType: string; entityIds: string[] } | null>
       completePendingMove: (x: number, y: number) => Promise<void>
