@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react'
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { Icon } from '../Icon'
 import { buildClampMesh, buildOriginTriad } from '../../engine/csg'
@@ -28,6 +28,8 @@ import type { PlaybackPose } from '../../engine/simulation/playback'
 import type { SimulationGrid, SimulationResult } from '../../engine/simulation'
 import type { ToolpathMove } from '../../engine/toolpaths/types'
 import type { Clamp, MachineOrigin, Operation, ToolType } from '../../types/project'
+import { useTheme } from '../../theme/themeContext'
+import { useI18n } from '../../i18n/i18nContext'
 
 const EMPTY_PLAYBACK_POSE: PlaybackPose = { x: 0, y: 0, z: 0, moveKind: null, feedScale: undefined }
 
@@ -575,6 +577,20 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
   isActive = true,
   projectKey,
 }, ref) {
+  const { palette } = useTheme()
+  const { t, languageTag } = useI18n()
+  const presetTitles = useMemo(() => ({
+    top: t('viewport.presets.top'),
+    bottom: t('viewport.presets.bottom'),
+    front: t('viewport.presets.front'),
+    back: t('viewport.presets.back'),
+    right: t('viewport.presets.right'),
+    left: t('viewport.presets.left'),
+    iso: t('viewport.presets.iso'),
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- t is identity-stable; languageTag drives locale recomputes
+  }), [t, languageTag])
+  const threePalette = palette.three
+  const initialThreePaletteRef = useRef(threePalette)
   const playbackUnits = playbackInput?.units ?? 'mm'
   const fallbackFeed = playbackUnits === 'in' ? PLAYBACK_FALLBACK_FEED_IN : PLAYBACK_FALLBACK_FEED_MM
   // Anchor the playback speed multiplier to the operation's feed (units/sec). If the
@@ -776,28 +792,28 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
     }
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     renderer.setSize(mount.clientWidth, mount.clientHeight)
-    renderer.setClearColor(0x141820, 1)
+    renderer.setClearColor(initialThreePaletteRef.current.background, 1)
     renderer.domElement.style.display = 'block'
     renderer.domElement.style.touchAction = 'none'
     mount.appendChild(renderer.domElement)
-    // eslint-disable-next-line react-hooks/immutability -- three.js renderer/scene/camera live in refs across effects: populated in this mount effect, read in the resize/mesh sibling effect. No behavior-preserving restructure satisfies the rule.
+     
     rendererRef.current = renderer
 
     const scene = new THREE.Scene()
-    // eslint-disable-next-line react-hooks/immutability -- see rendererRef above (three.js objects in cross-effect refs).
+     
     sceneRef.current = scene
 
-    const ambient = new THREE.AmbientLight(0xffffff, 0.7)
+    const ambient = new THREE.AmbientLight(0xffffff, 0.7) // theme-exempt: scene lighting rig
     scene.add(ambient)
-    const key = new THREE.DirectionalLight(0xffffff, 0.9)
+    const key = new THREE.DirectionalLight(0xffffff, 0.9) // theme-exempt: scene lighting rig
     key.position.set(120, 180, 120)
     scene.add(key)
-    const fill = new THREE.DirectionalLight(0x96b6ff, 0.35)
+    const fill = new THREE.DirectionalLight(0x96b6ff, 0.35) // theme-exempt: scene lighting rig
     fill.position.set(-120, 80, -80)
     scene.add(fill)
 
     const camera = new THREE.PerspectiveCamera(45, mount.clientWidth / mount.clientHeight, 0.1, 5000)
-    // eslint-disable-next-line react-hooks/immutability -- see rendererRef above (three.js objects in cross-effect refs).
+     
     cameraRef.current = camera
 
     // Camera changes request a draw from the RAF loop rather than rendering
@@ -861,6 +877,11 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
   }, [disposeClampMeshes, disposeCurrentMesh])
 
   useEffect(() => {
+    rendererRef.current?.setClearColor(threePalette.background, 1)
+    needsRenderRef.current = true
+  }, [threePalette])
+
+  useEffect(() => {
     const scene = sceneRef.current
     const controls = controlsRef.current
     if (!scene || !controls) {
@@ -878,7 +899,7 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
     const camera = cameraRef.current
     if (mount && renderer && camera) {
       renderer.setSize(mount.clientWidth, mount.clientHeight)
-      // eslint-disable-next-line react-hooks/immutability -- camera comes from cameraRef (populated in the mount effect); adjusting its aspect here is the canonical three.js resize path.
+       
       camera.aspect = mount.clientWidth / mount.clientHeight
       camera.updateProjectionMatrix()
     }
@@ -896,7 +917,7 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
 
     const grid = simulation.grid
     const heightfieldTexture = createHeightfieldTexture(grid)
-    const color = stockColor ? new THREE.Color(stockColor) : new THREE.Color(0xb5beca)
+    const color = stockColor ? new THREE.Color(stockColor) : new THREE.Color(threePalette.stockDefault)
     const material = createHeightfieldMaterial(heightfieldTexture, grid, color)
     const surface = buildHeightfieldSurfaceObject(grid, material)
     scene.add(surface)
@@ -917,6 +938,7 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
         hasAutoFramedRef.current = true
       }
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- threePalette is read from a stable theme; adding it would rebuild geometry on theme toggle
   }, [disposeCurrentMesh, playbackEnabled, simulation, stockColor])
 
   // The playback boundary mesh is static — walls track the heightfield texture
@@ -1042,7 +1064,7 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
       const grid = controller.liveGrid
       const heightfieldTexture = createHeightfieldTexture(grid)
       playbackHeightfieldTextureRef.current = heightfieldTexture
-      const color = stockColor ? new THREE.Color(stockColor) : new THREE.Color(0xb5beca)
+      const color = stockColor ? new THREE.Color(stockColor) : new THREE.Color(threePalette.stockDefault)
       const material = createHeightfieldMaterial(heightfieldTexture, grid, color)
       const surface = buildHeightfieldSurfaceObject(grid, material)
       scene.add(surface)
@@ -1060,6 +1082,7 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
         vBitAngle: playbackInput.vBitAngle,
         cutLength: playbackInput.toolCutLength,
         shankLength: playbackInput.toolShankLength,
+        threePalette,
       })
       scene.add(tool)
       toolMeshRef.current = tool
@@ -1096,6 +1119,7 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
       playbackControllerRef.current = null
       setIsPlaybackReady(false)
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- threePalette is from stable theme; adding rebuilds on toggle
   }, [playbackEnabled, playbackInput, resetPlaybackRuntime, stockColor, updateToolMeshPose])
 
   useEffect(() => {
@@ -1277,7 +1301,7 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
 
     const collidingClampIdSet = new Set(collidingClampIds)
     const nextClampMeshes = clamps.map((clamp) =>
-      buildClampMesh(clamp, clamp.id === selectedClampId, collidingClampIdSet.has(clamp.id)),
+      buildClampMesh(clamp, clamp.id === selectedClampId, collidingClampIdSet.has(clamp.id), threePalette),
     )
     for (const mesh of nextClampMeshes) {
       scene.add(mesh)
@@ -1288,6 +1312,7 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
     return () => {
       disposeClampMeshes(scene)
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- threePalette is from stable theme; adding rebuilds on toggle
   }, [clamps, collidingClampIds, disposeClampMeshes, selectedClampId])
 
   useEffect(() => {
@@ -1311,7 +1336,7 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
       ) * 0.05,
       0.05,
     )
-    const triad = buildOriginTriad(origin, axisSize)
+    const triad = buildOriginTriad(origin, axisSize, threePalette)
     scene.add(triad)
     originObjectRef.current = triad
     needsRenderRef.current = true
@@ -1319,6 +1344,7 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
     return () => {
       disposeOriginMesh(scene)
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- threePalette is from stable theme; adding rebuilds on toggle
   }, [disposeOriginMesh, origin, simulation])
 
   // Reset camera on project change so the viewport doesn't keep the previous
@@ -1375,22 +1401,16 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
       {webglStatus === 'unavailable' && (
         <div className="simulation-viewport__webgl-overlay">
           <div className="simulation-viewport__webgl-message">
-            <strong>3D simulation isn&apos;t available</strong>
-            <p>
-              This view requires WebGL2, which your browser or graphics driver did not provide.
-              Try updating your browser or enabling hardware acceleration in its settings.
-            </p>
+            <strong>{t('viewport.sim.webglUnavailableTitle')}</strong>
+            <p>{t('viewport.sim.webglUnavailableBody')}</p>
           </div>
         </div>
       )}
       {webglStatus === 'context-lost' && (
         <div className="simulation-viewport__webgl-overlay">
           <div className="simulation-viewport__webgl-message">
-            <strong>3D graphics context lost</strong>
-            <p>
-              Waiting for the browser to restore it — playback has been paused.
-              If this message persists, reload the app.
-            </p>
+            <strong>{t('viewport.sim.webglLostTitle')}</strong>
+            <p>{t('viewport.sim.webglLostBody')}</p>
           </div>
         </div>
       )}
@@ -1445,24 +1465,24 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
       )}
       <div className="viewport-presets">
         <div className="viewport-presets__group viewport-presets__group--status">
-          <div className="simulation-mode-toggle" role="tablist" aria-label="Simulation mode">
+          <div className="simulation-mode-toggle" role="tablist" aria-label={t('viewport.sim.modeLabel')}>
             <button
               className={`simulation-mode-toggle__btn ${mode === 'selected' ? 'simulation-mode-toggle__btn--active' : ''}`}
               type="button"
               onClick={() => onModeChange('selected')}
             >
-              Selected
+              {t('viewport.sim.modeSelected')}
             </button>
             <button
               className={`simulation-mode-toggle__btn ${mode === 'visible' ? 'simulation-mode-toggle__btn--active' : ''}`}
               type="button"
               onClick={() => onModeChange('visible')}
             >
-              Visible
+              {t('viewport.sim.modeVisible')}
             </button>
           </div>
-          <label className="simulation-detail-control" title="Simulation detail">
-            <span className="simulation-detail-control__label">Detail</span>
+          <label className="simulation-detail-control" title={t('viewport.sim.detailTitle')}>
+            <span className="simulation-detail-control__label">{t('viewport.sim.detailLabel')}</span>
             <input
               className="simulation-detail-control__slider"
               type="range"
@@ -1480,23 +1500,23 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
             onClick={handlePlaybackToggle}
             disabled={mode !== 'selected' || !playbackInput || webglStatus === 'unavailable'}
             title={mode !== 'selected'
-              ? 'Switch to Selected mode to use Tool playback'
+              ? t('viewport.sim.playToolDisabledMode')
               : !playbackInput
-                ? 'Select an operation with a valid toolpath to play'
-                : 'Toggle tool playback'}
+                ? t('viewport.sim.playToolDisabledNoOp')
+                : t('viewport.sim.playToolToggle')}
           >
-            Play Tool
+            {t('viewport.sim.playTool')}
           </button>
         </div>
         <div className="viewport-presets__group viewport-presets__group--views">
           <div className="preset-btn-panel">
-            <button className="preset-btn preset-btn--icon" onClick={() => controlsRef.current?.setPreset('top')} title="Top view" type="button"><Icon id="view-top" size={16} /></button>
-            <button className="preset-btn preset-btn--icon" onClick={() => controlsRef.current?.setPreset('bottom')} title="Bottom view" type="button"><Icon id="view-bottom" size={16} /></button>
-            <button className="preset-btn preset-btn--icon" onClick={() => controlsRef.current?.setPreset('front')} title="Front view" type="button"><Icon id="view-front" size={16} /></button>
-            <button className="preset-btn preset-btn--icon" onClick={() => controlsRef.current?.setPreset('back')} title="Back view" type="button"><Icon id="view-back" size={16} /></button>
-            <button className="preset-btn preset-btn--icon" onClick={() => controlsRef.current?.setPreset('right')} title="Right view" type="button"><Icon id="view-right" size={16} /></button>
-            <button className="preset-btn preset-btn--icon" onClick={() => controlsRef.current?.setPreset('left')} title="Left view" type="button"><Icon id="view-left" size={16} /></button>
-            <button className="preset-btn preset-btn--icon" onClick={() => controlsRef.current?.setPreset('iso')} title="Isometric view" type="button"><Icon id="view-iso" size={16} /></button>
+            <button className="preset-btn preset-btn--icon" onClick={() => controlsRef.current?.setPreset('top')} title={presetTitles.top} type="button"><Icon id="view-top" size={16} /></button>
+            <button className="preset-btn preset-btn--icon" onClick={() => controlsRef.current?.setPreset('bottom')} title={presetTitles.bottom} type="button"><Icon id="view-bottom" size={16} /></button>
+            <button className="preset-btn preset-btn--icon" onClick={() => controlsRef.current?.setPreset('front')} title={presetTitles.front} type="button"><Icon id="view-front" size={16} /></button>
+            <button className="preset-btn preset-btn--icon" onClick={() => controlsRef.current?.setPreset('back')} title={presetTitles.back} type="button"><Icon id="view-back" size={16} /></button>
+            <button className="preset-btn preset-btn--icon" onClick={() => controlsRef.current?.setPreset('right')} title={presetTitles.right} type="button"><Icon id="view-right" size={16} /></button>
+            <button className="preset-btn preset-btn--icon" onClick={() => controlsRef.current?.setPreset('left')} title={presetTitles.left} type="button"><Icon id="view-left" size={16} /></button>
+            <button className="preset-btn preset-btn--icon" onClick={() => controlsRef.current?.setPreset('iso')} title={presetTitles.iso} type="button"><Icon id="view-iso" size={16} /></button>
           </div>
         </div>
       </div>
@@ -1508,7 +1528,7 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
               className="simulation-playback-bar__btn simulation-playback-bar__btn--primary"
               onClick={handlePlayPause}
               disabled={playbackControlsDisabled}
-              title={isPlaying ? 'Pause' : 'Play'}
+              title={isPlaying ? t('viewport.sim.pause') : t('viewport.sim.play')}
             >
               {isPlaying ? '❚❚' : '▶'}
             </button>
@@ -1517,7 +1537,7 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
               className="simulation-playback-bar__btn"
               onClick={handleStop}
               disabled={playbackControlsDisabled}
-              title="Stop & reset"
+              title={t('viewport.sim.stop')}
             >
               ■
             </button>
@@ -1534,18 +1554,18 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
               value={Math.round(playbackProgress * 1000)}
               onChange={(event) => handleSeek(Number(event.target.value) / 1000)}
               disabled={playbackControlsDisabled}
-              aria-label="Playback progress"
+              aria-label={t('viewport.sim.progressAria')}
             />
           </div>
           <label
             className="simulation-playback-bar__speed simulation-playback-bar__speed--slider"
             title={
               playbackInput.feedPerSecond && playbackInput.feedPerSecond > 0
-                ? `Speed multiplier of operation feed (${formatSpeedLabel(baseSpeed, playbackUnits)} = 1×). Current: ${formatMultiplierLabel(playbackMultiplier)}`
-                : `Speed multiplier of fallback feed (${formatSpeedLabel(baseSpeed, playbackUnits)} = 1×). Current: ${formatMultiplierLabel(playbackMultiplier)}`
+                ? t('viewport.sim.speedTooltipFeed', { feed: formatSpeedLabel(baseSpeed, playbackUnits), multiplier: formatMultiplierLabel(playbackMultiplier) })
+                : t('viewport.sim.speedTooltipFallback', { feed: formatSpeedLabel(baseSpeed, playbackUnits), multiplier: formatMultiplierLabel(playbackMultiplier) })
             }
           >
-            <span>Speed</span>
+            <span>{t('viewport.sim.speedLabel')}</span>
             <input
               type="range"
               min={0}
@@ -1554,14 +1574,14 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
               value={multiplierToSliderPosition(playbackMultiplier)}
               onChange={(event) => setPlaybackMultiplier(sliderPositionToMultiplier(Number(event.target.value)))}
               disabled={playbackControlsDisabled}
-              aria-label="Playback speed multiplier"
+              aria-label={t('viewport.sim.speedAria')}
             />
           </label>
           <label
             className="simulation-playback-bar__speed"
-            title="Maximum distance the tool advances per frame. Smaller = smoother motion, larger = faster playback."
+            title={t('viewport.sim.stepTooltip')}
           >
-            <span>Step</span>
+            <span>{t('viewport.sim.stepLabel')}</span>
             <select
               value={playbackMaxStep}
               onChange={(event) => setPlaybackMaxStep(Number(event.target.value))}
@@ -1582,11 +1602,11 @@ export const SimulationViewport = forwardRef<SimulationViewportHandle, Simulatio
           </div>
           <div
             className="simulation-playback-bar__feed"
-            title="Cutting feed of the current move. Reduced slotting pocket cuts show their scaled feed here; the dot colour marks the move kind (rapids have no feed)."
+            title={t('viewport.sim.feedTooltip')}
           >
             <span
               className={`simulation-playback-bar__move-kind simulation-playback-bar__move-kind--${displayPose.moveKind ?? 'none'}`}
-              title={displayPose.moveKind ?? 'Idle'}
+              title={t('viewport.sim.moveKindIdle')}
             />
             <span className="simulation-playback-bar__feed-value">
               {(() => {

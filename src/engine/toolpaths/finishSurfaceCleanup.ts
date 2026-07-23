@@ -32,6 +32,7 @@ import {
   transitionToCutEntry,
   updateBounds,
 } from './pocket'
+import { cornerSmoothingRadius, smoothClosedContours } from './offsetSmoothing'
 import {
   calculateClipperArea,
   differenceClipperPaths,
@@ -551,7 +552,7 @@ export function generateFinishSurfaceCleanupToolpath(
     return {
       operationId: operation.id,
       moves: [],
-      warnings: ['Finish operation has both Finish Walls and Finish Floor disabled'],
+      warnings: [{ code: 'surfaceFinishBothDisabled' }],
       bounds: null,
       stepLevels: [],
     }
@@ -560,7 +561,7 @@ export function generateFinishSurfaceCleanupToolpath(
   const { resolved } = resolvedResult
   const warnings = [...resolved.warnings]
   if (operation.stockToLeaveRadial > 0 || operation.stockToLeaveAxial > 0) {
-    warnings.push('3D surface cleanup uses stock-to-leave values; non-zero radial or axial leave offsets cleanup from the final surface')
+    warnings.push({ code: 'cleanupStockToLeaveOffsets' })
   }
   const descendingLevels = [...resolved.levels].sort((a, b) => b.z - a.z)
   const splitTargets = operation.target.source === 'features'
@@ -649,7 +650,7 @@ export function generateFinishSurfaceCleanupToolpath(
     ...floorRegionsByZ.keys(),
   ])
   if (stepLevels.size === 0) {
-    warnings.push('No cleanup contours available for this 3D surface operation')
+    warnings.push({ code: 'cleanupNoContours' })
     return {
       operationId: resolved.operationId,
       moves: [],
@@ -661,6 +662,11 @@ export function generateFinishSurfaceCleanupToolpath(
 
   const sortedLevels = [...stepLevels].sort((a, b) => b - a)
   const moves: ToolpathMove[] = []
+  const floorSmoothRadius = cornerSmoothingRadius(
+    operation.roundOutsideCorners,
+    resolved.tool.radius,
+    resolved.effectiveStepover,
+  )
   let currentPosition: ToolpathPoint | null = null
 
   for (const z of sortedLevels) {
@@ -739,7 +745,10 @@ export function generateFinishSurfaceCleanupToolpath(
       ? buildCleanupFloorOffsetPasses(floorRegions, resolved.effectiveStepover, suppressedWallSegments)
       : { contours: [], segments: [] }
     const floorContours = operation.pocketPattern === 'offset'
-      ? applyContourDirection(offsetFloorPasses.contours, resolved.direction)
+      ? applyContourDirection(
+        smoothClosedContours(offsetFloorPasses.contours, floorSmoothRadius),
+        resolved.direction,
+      )
       : []
     const floorSegments = operation.pocketPattern === 'parallel'
       ? buildPocketParallelSegments(floorRegions, resolved.effectiveStepover, operation.pocketAngle)

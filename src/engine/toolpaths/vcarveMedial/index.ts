@@ -23,8 +23,8 @@
  * therefore exact V-bit depths, natural junctions without topology-event
  * heuristics, and zero-depth tips in sharp convex corners.
  *
- * `operation.stepover` is the boundary sampling step (skeleton resolution) in
- * project units; `operation.maxCarveDepth` clamps the depth in wide areas.
+ * Boundary sampling resolution is derived from each resolved region's scale;
+ * `operation.maxCarveDepth` clamps the depth in wide areas.
  */
 
 import type { Operation, Point, Project } from '../../../types/project'
@@ -39,14 +39,14 @@ import { isFeatureFirst, mergeToolpathResults, perFeatureOperations } from '../m
 import { updateBounds } from '../pocket'
 import { resolvePocketRegions } from '../resolver'
 import { computeMedialAxis } from './medialAxis'
+import { resolveMedialResolution } from './resolution'
 import { emitMedialToolpath } from './toolpath'
 
 export * from './medialAxis'
+export * from './resolution'
 export { emitMedialToolpath, extractChains } from './toolpath'
 export type { MedialToolpathParams } from './toolpath'
 
-/** Regions whose boundary would exceed this many samples get a coarser step. */
-const SAMPLE_BUDGET_PER_REGION = 40_000
 /** Empty-result refinement: halve the step at most this many times. */
 const MAX_AUTO_REFINEMENTS = 2
 
@@ -57,15 +57,6 @@ function computeBounds(moves: ToolpathMove[]): ToolpathBounds | null {
     bounds = updateBounds(bounds, move.to)
   }
   return bounds
-}
-
-function loopPerimeter(loop: Point[]): number {
-  let length = 0
-  for (let i = 0; i < loop.length; i += 1) {
-    const next = loop[(i + 1) % loop.length]
-    length += Math.hypot(next.x - loop[i].x, next.y - loop[i].y)
-  }
-  return length
 }
 
 function regionCentroid(region: { outer: Point[] }): { x: number; y: number } {
@@ -108,12 +99,12 @@ export function generateVCarveMedialToolpath(project: Project, operation: Operat
     return {
       operationId: operation.id,
       moves: [],
-      warnings: ['Only V-carve medial operations can be resolved by the medial-axis generator'],
+      warnings: [{ code: 'vcarveMedialWrongKind' }],
       bounds: null,
     }
   }
 
-  if (isFeatureFirst(operation)) {
+  if (isFeatureFirst(operation, project)) {
     const parts = perFeatureOperations(operation, project).map((subOp) =>
       generateVCarveMedialToolpathSingle(project, subOp),
     )
@@ -132,7 +123,7 @@ function generateVCarveMedialToolpathSingle(project: Project, operation: Operati
     return {
       operationId: operation.id,
       moves: [],
-      warnings: [...resolved.warnings, 'No tool assigned to this operation'],
+      warnings: [...resolved.warnings, { code: 'noToolAssigned' }],
       bounds: null,
     }
   }
@@ -142,7 +133,7 @@ function generateVCarveMedialToolpathSingle(project: Project, operation: Operati
     return {
       operationId: operation.id,
       moves: [],
-      warnings: [...resolved.warnings, 'V-Carve medial requires a V-bit tool'],
+      warnings: [...resolved.warnings, { code: 'vcarveMedialNeedsVBit' }],
       bounds: null,
     }
   }
@@ -151,7 +142,7 @@ function generateVCarveMedialToolpathSingle(project: Project, operation: Operati
     return {
       operationId: operation.id,
       moves: [],
-      warnings: [...resolved.warnings, 'V-bit angle must be between 0 and 180 degrees'],
+      warnings: [...resolved.warnings, { code: 'vBitAngleRange' }],
       bounds: null,
     }
   }
@@ -160,16 +151,7 @@ function generateVCarveMedialToolpathSingle(project: Project, operation: Operati
     return {
       operationId: operation.id,
       moves: [],
-      warnings: [...resolved.warnings, 'Max carve depth must be greater than zero'],
-      bounds: null,
-    }
-  }
-
-  if (!(operation.stepover > 0)) {
-    return {
-      operationId: operation.id,
-      moves: [],
-      warnings: [...resolved.warnings, 'Step size must be greater than zero'],
+      warnings: [...resolved.warnings, { code: 'maxCarveDepthPositive' }],
       bounds: null,
     }
   }
@@ -180,7 +162,7 @@ function generateVCarveMedialToolpathSingle(project: Project, operation: Operati
     return {
       operationId: operation.id,
       moves: [],
-      warnings: [...resolved.warnings, 'V-bit angle produces an invalid carving slope'],
+      warnings: [...resolved.warnings, { code: 'vBitInvalidSlope' }],
       bounds: null,
     }
   }
@@ -198,24 +180,23 @@ function generateVCarveMedialToolpathSingle(project: Project, operation: Operati
   for (const band of resolved.bands) {
     const maxBandDepth = Math.max(0, Math.min(operation.maxCarveDepth, band.topZ - band.bottomZ))
     if (!(maxBandDepth > 0)) {
-      warnings.push(`Band ${band.topZ} -> ${band.bottomZ} leaves no usable V-carve depth`)
+      warnings.push({ code: 'vcarveBandNoDepth', params: { topZ: band.topZ, bottomZ: band.bottomZ } })
       continue
     }
 
     const sortedRegions = sortRegionsNearestNeighbor(band.regions, currentPosition)
     for (const region of sortedRegions) {
-      const perimeter = loopPerimeter(region.outer)
-        + region.islands.reduce((sum, island) => sum + loopPerimeter(island), 0)
+      const resolvedResolution = resolveMedialResolution(region)
+      if (!resolvedResolution) {
+        warnings.push({ code: 'vcarveDegenerateRegion' })
+        continue
+      }
 
-      let resolution = operation.stepover
-      const budgetFloor = perimeter / SAMPLE_BUDGET_PER_REGION
-      if (resolution < budgetFloor) {
-        resolution = budgetFloor
+      let resolution = resolvedResolution.resolution
+      if (resolvedResolution.budgetLimited) {
         if (!budgetWarned) {
           budgetWarned = true
-          warnings.push(
-            `Step size raised to ${resolution.toFixed(3)} on large regions to bound computation`,
-          )
+          warnings.push({ code: 'vcarveSamplingBudget', params: { resolution: resolution.toFixed(3) } })
         }
       }
 
@@ -226,14 +207,16 @@ function generateVCarveMedialToolpathSingle(project: Project, operation: Operati
       // A region narrower than the sampling step can miss interior Voronoi
       // vertices entirely — retry at a finer step before giving up.
       for (let attempt = 0; graph.nodes.length === 0 && attempt < MAX_AUTO_REFINEMENTS; attempt += 1) {
-        resolution /= 2
+        const refinedResolution = Math.max(resolvedResolution.budgetFloor, resolution / 2)
+        if (!(refinedResolution < resolution)) break
+        resolution = refinedResolution
         graph = computeMedialAxis(
           { outer: region.outer, islands: region.islands },
           { resolution },
         )
       }
       if (graph.nodes.length === 0) {
-        warnings.push('A region produced no medial axis (feature may be thinner than the step size)')
+        warnings.push({ code: 'vcarveNoMedialAxis' })
         continue
       }
 
@@ -256,7 +239,7 @@ function generateVCarveMedialToolpathSingle(project: Project, operation: Operati
   }
 
   if (moves.length === 0) {
-    warnings.push('V-carve medial generator produced no toolpath moves')
+    warnings.push({ code: 'vcarveMedialNoMoves' })
   }
 
   return {

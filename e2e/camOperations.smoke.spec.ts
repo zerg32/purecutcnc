@@ -33,6 +33,33 @@ interface OperationSnapshot {
 }
 
 test.describe('CAM operation browser smoke', () => {
+  test('HTML5 drag reorders CAM operations', async ({ app, ui }) => {
+    await seedCamQuickOperationProject(app.page)
+
+    const edgeMenu = await openRowContextMenu(app.page, rowByName(app.page, 'Machinable Add'))
+    await ui.contextMenu.item(edgeMenu, 'Create operation').hover()
+    await clickMenuItem(ui.contextMenu.submenu(app.page), 'Create Outside Route')
+    await expect(ui.operations.rowByName(app.page, 'Edge route outside Rough')).toBeVisible()
+
+    const carveMenu = await openRowContextMenu(app.page, rowByName(app.page, 'Carve Target'))
+    await ui.contextMenu.item(carveMenu, 'Create operation').hover()
+    await clickMenuItem(ui.contextMenu.submenu(app.page), 'Create V-Carve (medial)')
+    await expect(ui.operations.rows(app.page)).toHaveCount(2)
+
+    await ui.operations.rowByName(app.page, 'V-Carve medial')
+      .dragTo(ui.operations.rowByName(app.page, 'Edge route outside Rough'))
+
+    await expect(ui.operations.rows(app.page).nth(0)).toContainText('V-Carve medial')
+    await expect(ui.operations.rows(app.page).nth(1)).toContainText('Edge route outside Rough')
+
+    const project = await getProject(app.page)
+    const operations = project.operations as Array<{ name?: unknown }>
+    expect(operations.map((operation) => operation.name)).toEqual([
+      'V-Carve medial',
+      'Edge route outside Rough',
+    ])
+  })
+
   test('feature-row quick operation creates a CAM operation', async ({ app, ui }) => {
     await seedCamQuickOperationProject(app.page)
 
@@ -47,7 +74,9 @@ test.describe('CAM operation browser smoke', () => {
     await clickMenuItem(submenu, 'Create Outside Route')
 
     await expect(ui.operations.countBadge(app.page)).toHaveText('1')
-    await expect(ui.operations.rowByName(app.page, 'Edge route outside Rough')).toBeVisible()
+    const operationRow = ui.operations.rowByName(app.page, 'Edge route outside Rough')
+    await expect(operationRow).toBeVisible()
+    await expect(app.page.getByText('Stepover Ratio', { exact: true })).toBeVisible()
 
     const project = await getProject(app.page)
     const operations = project.operations as OperationSnapshot[]
@@ -70,7 +99,10 @@ test.describe('CAM operation browser smoke', () => {
     await clickMenuItem(submenu, 'Create V-Carve (medial)')
 
     await expect(ui.operations.countBadge(app.page)).toHaveText('1')
-    await expect(ui.operations.rowByName(app.page, 'V-Carve medial')).toBeVisible()
+    const operationRow = ui.operations.rowByName(app.page, 'V-Carve medial')
+    await expect(operationRow).toBeVisible()
+    await expect(app.page.getByText('Max Carve Depth', { exact: true })).toBeVisible()
+    await expect(app.page.getByText('Step Size', { exact: true })).toHaveCount(0)
 
     const project = await getProject(app.page)
     const operations = project.operations as Array<OperationSnapshot & { toolRef?: unknown }>

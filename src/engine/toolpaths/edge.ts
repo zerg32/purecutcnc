@@ -15,6 +15,7 @@
  */
 
 import ClipperLib from 'clipper-lib'
+import type { ToolpathWarning } from './warningCodes'
 import type { Operation, Point, Project, SketchFeature } from '../../types/project'
 import { expandFeatureGeometry, featureHasClosedGeometry } from '../../text'
 import type { ClipperPath, ToolpathBounds, ToolpathMove, ToolpathPoint, ToolpathResult } from './types'
@@ -399,7 +400,7 @@ export function generateEdgeRouteToolpath(project: Project, operation: Operation
     return {
       operationId: operation.id,
       moves: [],
-      warnings: ['Only edge-route operations can be resolved by the edge-route generator'],
+      warnings: [{ code: 'edgeRouteWrongKind' }],
       bounds: null,
     }
   }
@@ -418,7 +419,7 @@ function generateEdgeRouteToolpathSingle(project: Project, operation: Operation)
     return {
       operationId: operation.id,
       moves: [],
-      warnings: ['Only edge-route operations can be resolved by the edge-route generator'],
+      warnings: [{ code: 'edgeRouteWrongKind' }],
       bounds: null,
     }
   }
@@ -427,7 +428,7 @@ function generateEdgeRouteToolpathSingle(project: Project, operation: Operation)
     return {
       operationId: operation.id,
       moves: [],
-      warnings: ['Edge-route operation has no feature targets'],
+      warnings: [{ code: 'edgeRouteNoTargets' }],
       bounds: null,
     }
   }
@@ -440,7 +441,7 @@ function generateEdgeRouteToolpathSingle(project: Project, operation: Operation)
     return {
       operationId: operation.id,
       moves: [],
-      warnings: ['No tool assigned to this operation'],
+      warnings: [{ code: 'noToolAssigned' }],
       bounds: null,
     }
   }
@@ -450,7 +451,7 @@ function generateEdgeRouteToolpathSingle(project: Project, operation: Operation)
     return {
       operationId: operation.id,
       moves: [],
-      warnings: ['Tool diameter must be greater than zero'],
+      warnings: [{ code: 'toolDiameterPositive' }],
       bounds: null,
     }
   }
@@ -459,7 +460,7 @@ function generateEdgeRouteToolpathSingle(project: Project, operation: Operation)
     return {
       operationId: operation.id,
       moves: [],
-      warnings: ['Operation stepdown must be greater than zero'],
+      warnings: [{ code: 'stepdownPositive' }],
       bounds: null,
     }
   }
@@ -472,7 +473,7 @@ function generateEdgeRouteToolpathSingle(project: Project, operation: Operation)
     .flatMap((feature) => (feature.operation === 'model' ? [feature] : expandFeatureGeometry(feature)))
     .filter((feature) => isEdgeRouteTargetFeature(feature, operation))
 
-  const warnings: string[] = []
+  const warnings: ToolpathWarning[] = []
   const maxFeatureDepth = targetFeatures.reduce((max, feature) => {
     const span = resolveFeatureZSpan(project, feature)
     return Math.max(max, span.height)
@@ -483,23 +484,22 @@ function generateEdgeRouteToolpathSingle(project: Project, operation: Operation)
   }
 
   if (splitTargets.missingFeatureIds.length > 0 || targetFeatures.length < selectedFeatures.length) {
-    warnings.push(
-      operation.kind === 'edge_route_inside'
-        ? 'Some selected target features are missing or are not subtract/region features'
-        : 'Some selected target features are missing or are not add/model/region features',
-    )
+    warnings.push({
+      code: 'targetsMissingOrWrongRole',
+      params: { roles: operation.kind === 'edge_route_inside' ? 'subtract/region' : 'add/model/region' },
+    })
   }
 
   const closedTargetFeatures = targetFeatures.filter((feature) => featureHasClosedGeometry(feature))
   if (closedTargetFeatures.length !== targetFeatures.length) {
-    warnings.push('Edge-route operations only support closed target profiles')
+    warnings.push({ code: 'edgeClosedProfilesOnly' })
   }
 
   if (closedTargetFeatures.length === 0) {
     return {
       operationId: operation.id,
       moves: [],
-      warnings: [...warnings, 'No valid target features were found for this edge-route operation'],
+      warnings: [...warnings, { code: 'edgeRouteNoValidTargets' }],
       bounds: null,
     }
   }
@@ -530,14 +530,14 @@ function generateEdgeRouteToolpathSingle(project: Project, operation: Operation)
     for (const band of resolved.bands) {
       const effectiveBottom = resolveBandBottomZ(band, operation)
       if (effectiveBottom === null) {
-        warnings.push(`Band ${band.topZ} -> ${band.bottomZ} leaves no cut depth after axial stock-to-leave`)
+        warnings.push({ code: 'edgeBandNoCutDepth', params: { topZ: band.topZ, bottomZ: band.bottomZ } })
         continue
       }
 
       const insetRegions = band.regions.flatMap((region) => buildInsetRegions(region, insideInset))
       const rawContours = buildOuterContours(insetRegions)
       if (rawContours.length === 0) {
-        warnings.push(`No valid inside contour could be generated for band ${band.topZ} -> ${band.bottomZ}`)
+        warnings.push({ code: 'edgeNoInsideContour', params: { topZ: band.topZ, bottomZ: band.bottomZ } })
         continue
       }
 
@@ -573,7 +573,7 @@ function generateEdgeRouteToolpathSingle(project: Project, operation: Operation)
     .map((feature) => {
       const effectiveBottom = resolveEffectiveBottom(feature, project, operation)
       if (effectiveBottom === null) {
-        warnings.push(`${feature.name} leaves no cut depth after axial stock-to-leave`)
+        warnings.push({ code: 'edgeFeatureNoCutDepth', params: { name: feature.name } })
         return null
       }
 
@@ -591,7 +591,7 @@ function generateEdgeRouteToolpathSingle(project: Project, operation: Operation)
     return {
       operationId: operation.id,
       moves: [],
-      warnings: [...warnings, 'No valid target features were found for this edge-route operation'],
+      warnings: [...warnings, { code: 'edgeRouteNoValidTargets' }],
       bounds: null,
     }
   }
@@ -645,7 +645,7 @@ function generateEdgeRouteToolpathSingle(project: Project, operation: Operation)
       )
 
       if (rawContours.length === 0) {
-        warnings.push('No valid combined outer contour could be generated for the selected outside edge targets')
+        warnings.push({ code: 'edgeNoCombinedContour' })
       } else {
         const contours = applyContourDirection(rawContours, outsideDirection)
         const levels =
@@ -657,7 +657,7 @@ function generateEdgeRouteToolpathSingle(project: Project, operation: Operation)
       }
     } else {
       warnings.push(
-        'Selected outside edge targets have different effective depth spans. Combined outside routing is not supported for mixed-depth targets yet; generating separate contours may cut internal overlap. Split the operation by depth or align target tops/bottoms.',
+        { code: 'edgeMixedDepthSpans' },
       )
     }
   }
@@ -666,7 +666,7 @@ function generateEdgeRouteToolpathSingle(project: Project, operation: Operation)
     for (const target of routableTargets) {
       const rawContours = resolveContourPaths(target.contourPaths)
       if (rawContours.length === 0) {
-        warnings.push(`No valid contour could be generated for ${target.feature.name}`)
+        warnings.push({ code: 'edgeNoContourForFeature', params: { name: target.feature.name } })
         continue
       }
 

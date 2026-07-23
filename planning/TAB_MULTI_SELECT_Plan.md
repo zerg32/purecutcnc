@@ -1,3 +1,9 @@
+---
+status: current
+authoritative-for: tab multi-select selection behavior and bulk tab editing
+last-verified: 2026-07-24
+---
+
 # Tab Multi-Select & Bulk Update Plan
 
 ## Goal

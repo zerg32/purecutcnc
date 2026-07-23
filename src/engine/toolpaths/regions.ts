@@ -573,7 +573,7 @@ export function clipToolpathResultToRegionMask(
       moves: clippedMoves,
       bounds: computeBounds(clippedMoves),
       warnings: clippedCutCount > 0
-        ? [...result.warnings, `Region filter clipped ${clippedCutCount} cut move${clippedCutCount === 1 ? '' : 's'}.`]
+        ? [...result.warnings, { code: clippedCutCount === 1 ? 'regionClippedOne' as const : 'regionClippedMany' as const, params: { count: clippedCutCount } }]
         : result.warnings,
     }
   }
@@ -648,7 +648,7 @@ export function clipToolpathResultToRegionMask(
     moves: clippedMoves,
     bounds: computeBounds(clippedMoves),
     warnings: clippedCutCount > 0
-      ? [...result.warnings, `Region filter clipped ${clippedCutCount} cut move${clippedCutCount === 1 ? '' : 's'}.`]
+      ? [...result.warnings, { code: clippedCutCount === 1 ? 'regionClippedOne' as const : 'regionClippedMany' as const, params: { count: clippedCutCount } }]
       : result.warnings,
   }
 }

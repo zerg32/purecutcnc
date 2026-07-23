@@ -15,6 +15,7 @@
  */
 
 import ClipperLib from 'clipper-lib'
+import type { ToolpathWarning } from './warningCodes'
 import type { Operation, Project, SketchFeature } from '../../types/project'
 import { rectProfile } from '../../types/project'
 import { expandFeatureGeometry, featureHasClosedGeometry } from '../../text'
@@ -226,7 +227,7 @@ function bandHasThickness(topZ: number, bottomZ: number): boolean {
 
 export function resolvePocketRegions(authoritativeProject: Project, operation: Operation): ResolvedPocketResult {
   const project = resolveProject(authoritativeProject)
-  const warnings: string[] = []
+  const warnings: ToolpathWarning[] = []
   const isPocketLike =
     operation.kind === 'pocket' || operation.kind === 'v_carve' || operation.kind === 'v_carve_medial'
   const operationLabel =
@@ -241,7 +242,7 @@ export function resolvePocketRegions(authoritativeProject: Project, operation: O
       operationId: operation.id,
       units: project.meta.units,
       bands: [],
-      warnings: ['Only pocket and V-carve operations can be resolved by this region resolver'],
+      warnings: [{ code: 'resolverOnlyPocketVcarve' }],
     }
   }
 
@@ -250,7 +251,7 @@ export function resolvePocketRegions(authoritativeProject: Project, operation: O
       operationId: operation.id,
       units: project.meta.units,
       bands: [],
-      warnings: [`${operationLabel} operation has no feature targets`],
+      warnings: [{ code: 'resolverNoTargets', params: { operation: operationLabel } }],
     }
   }
 
@@ -290,7 +291,7 @@ export function resolvePocketRegions(authoritativeProject: Project, operation: O
 
   if (validTargetSourceFeatures.length + regionFeatures.length !== operation.target.featureIds.length) {
     const expectedRoles = isVCarve ? 'subtract/line/region' : 'subtract/region'
-    warnings.push(`Some selected target features are missing or are not ${expectedRoles} features`)
+    warnings.push({ code: 'targetsMissingOrWrongRole', params: { roles: expectedRoles } })
   }
 
   const closedSubtractFeatures = subtractTargetFeatures.filter(({ feature }) => featureHasClosedGeometry(feature))
@@ -298,7 +299,7 @@ export function resolvePocketRegions(authoritativeProject: Project, operation: O
   const closedTargetFeatures = [...closedSubtractFeatures, ...closedLineFeatures]
 
   if (closedTargetFeatures.length !== targetFeatures.length) {
-    warnings.push(`${operationLabel} operations only support closed target profiles`)
+    warnings.push({ code: 'closedProfilesOnly', params: { operation: operationLabel } })
   }
 
   if (closedTargetFeatures.length === 0) {
@@ -307,7 +308,7 @@ export function resolvePocketRegions(authoritativeProject: Project, operation: O
       operationId: operation.id,
       units: project.meta.units,
       bands: [],
-      warnings: [...warnings, `No valid ${targetKindLabel} features were found for this ${operationLabel.toLowerCase()} operation`],
+      warnings: [...warnings, { code: 'resolverNoValidKindTargets', params: { kind: targetKindLabel, operation: operationLabel.toLowerCase() } }],
     }
   }
 
@@ -398,14 +399,33 @@ export function resolvePocketRegions(authoritativeProject: Project, operation: O
     const activeLineTargetsForBand = activeForBand(closedLineFeatures, topZ, bottomZ)
     let lineAreas: ClipperPath[] = []
     if (activeLineTargetsForBand.length > 0) {
-      const linePaths = activeLineTargetsForBand.map(({ feature }) => flattenFeatureToClipperPath(feature))
-      lineAreas = unionPathsEvenOdd(linePaths)
+      const lineEntries = activeLineTargetsForBand.map(({ feature }) => ({
+        feature,
+        path: flattenFeatureToClipperPath(feature),
+      }))
+      lineAreas = unionPathsEvenOdd(lineEntries.map((entry) => entry.path))
 
       // Subtract add islands from line areas so islands protect material
-      // from line targets as they do from subtract targets.
+      // from line targets as they do from subtract targets. But an add that
+      // fully encloses a line target is parent material the line carves into
+      // — it is not an island there and must not be subtracted from that
+      // line's fill (issue #340). A single add can be parent for the lines
+      // it encloses and a true island elsewhere, so subtract only the part
+      // of the add that lies outside the even-odd fill of the lines it
+      // encloses (empty when it encloses none; the whole add when it
+      // encloses all, which then removes nothing).
       for (const island of activeIslands) {
         if (lineAreas.length > 0) {
-          lineAreas = differencePaths(lineAreas, [flattenFeatureToClipperPath(island.feature)])
+          const islandPath = flattenFeatureToClipperPath(island.feature)
+          const enclosedLinePaths = lineEntries
+            .filter((entry) => differencePaths([entry.path], [islandPath]).length === 0)
+            .map((entry) => entry.path)
+          const effectiveIsland = enclosedLinePaths.length > 0
+            ? differencePaths([islandPath], unionPathsEvenOdd(enclosedLinePaths))
+            : [islandPath]
+          if (effectiveIsland.length > 0) {
+            lineAreas = differencePaths(lineAreas, effectiveIsland)
+          }
         }
       }
 
@@ -424,7 +444,7 @@ export function resolvePocketRegions(authoritativeProject: Project, operation: O
     }
 
     if (resolvedPaths.length === 0) {
-      warnings.push(`Band ${topZ} -> ${bottomZ} resolved to empty subject geometry`)
+      warnings.push({ code: 'bandEmptySubject', params: { topZ, bottomZ } })
       continue
     }
 
@@ -440,7 +460,7 @@ export function resolvePocketRegions(authoritativeProject: Project, operation: O
     )
 
     if (regions.length === 0) {
-      warnings.push(`Band ${topZ} -> ${bottomZ} resolved to no machinable regions`)
+      warnings.push({ code: 'bandNoRegions', params: { topZ, bottomZ } })
       continue
     }
 
@@ -457,7 +477,7 @@ export function resolvePocketRegions(authoritativeProject: Project, operation: O
   }
 
   if (bands.length === 0) {
-    warnings.push(`${operationLabel} resolver produced no depth bands`)
+    warnings.push({ code: 'resolverNoBands', params: { operation: operationLabel } })
   }
 
   return {
@@ -470,7 +490,7 @@ export function resolvePocketRegions(authoritativeProject: Project, operation: O
 
 export function resolveInsideEdgeRegions(authoritativeProject: Project, operation: Operation): ResolvedPocketResult {
   const project = resolveProject(authoritativeProject)
-  const warnings: string[] = []
+  const warnings: ToolpathWarning[] = []
   const operationLabel = 'Inside edge route'
 
   if (operation.kind !== 'edge_route_inside') {
@@ -478,7 +498,7 @@ export function resolveInsideEdgeRegions(authoritativeProject: Project, operatio
       operationId: operation.id,
       units: project.meta.units,
       bands: [],
-      warnings: ['Only inside edge-route operations can be resolved by this region resolver'],
+      warnings: [{ code: 'resolverOnlyInsideEdge' }],
     }
   }
 
@@ -487,7 +507,7 @@ export function resolveInsideEdgeRegions(authoritativeProject: Project, operatio
       operationId: operation.id,
       units: project.meta.units,
       bands: [],
-      warnings: [`${operationLabel} operation has no feature targets`],
+      warnings: [{ code: 'resolverNoTargets', params: { operation: operationLabel } }],
     }
   }
 
@@ -508,12 +528,12 @@ export function resolveInsideEdgeRegions(authoritativeProject: Project, operatio
     }))
 
   if (validTargetSourceFeatures.length + regionFeatures.length !== operation.target.featureIds.length) {
-    warnings.push('Some selected target features are missing or are not subtract/region features')
+    warnings.push({ code: 'targetsMissingOrWrongRole', params: { roles: 'subtract/region' } })
   }
 
   const closedTargetFeatures = targetFeatures.filter(({ feature }) => featureHasClosedGeometry(feature))
   if (closedTargetFeatures.length !== targetFeatures.length) {
-    warnings.push(`${operationLabel} operations only support closed target profiles`)
+    warnings.push({ code: 'closedProfilesOnly', params: { operation: operationLabel } })
   }
 
   if (closedTargetFeatures.length === 0) {
@@ -521,7 +541,7 @@ export function resolveInsideEdgeRegions(authoritativeProject: Project, operatio
       operationId: operation.id,
       units: project.meta.units,
       bands: [],
-      warnings: [...warnings, `No valid subtract features were found for this ${operationLabel.toLowerCase()} operation`],
+      warnings: [...warnings, { code: 'resolverNoValidSubtracts', params: { operation: operationLabel.toLowerCase() } }],
     }
   }
 
@@ -585,7 +605,7 @@ export function resolveInsideEdgeRegions(authoritativeProject: Project, operatio
     }
 
     if (resolvedPaths.length === 0) {
-      warnings.push(`Band ${topZ} -> ${bottomZ} resolved to empty subject geometry`)
+      warnings.push({ code: 'bandEmptySubject', params: { topZ, bottomZ } })
       continue
     }
 
@@ -598,7 +618,7 @@ export function resolveInsideEdgeRegions(authoritativeProject: Project, operatio
     )
 
     if (regions.length === 0) {
-      warnings.push(`Band ${topZ} -> ${bottomZ} resolved to no machinable regions`)
+      warnings.push({ code: 'bandNoRegions', params: { topZ, bottomZ } })
       continue
     }
 
@@ -612,7 +632,7 @@ export function resolveInsideEdgeRegions(authoritativeProject: Project, operatio
   }
 
   if (bands.length === 0) {
-    warnings.push(`${operationLabel} resolver produced no depth bands`)
+    warnings.push({ code: 'resolverNoBands', params: { operation: operationLabel } })
   }
 
   return {

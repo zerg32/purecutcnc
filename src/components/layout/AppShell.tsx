@@ -19,6 +19,7 @@ import { ExpandedPanelContext } from './expandedPanelContext'
 import { useProjectStore } from '../../store/projectStore'
 import { useLocalStorageState, type StorageCodec } from '../../hooks/useLocalStorageState'
 import { getStockBounds } from '../../types/project'
+import type { Project } from '../../types/project'
 import { formatLength } from '../../utils/units'
 import { platform } from '../../platform'
 import { loadVersion } from '../../utils/version'
@@ -29,7 +30,11 @@ import { TopCommandBar } from './TopCommandBar'
 import { ToolRail } from './ToolRail'
 import type { SnapMode, SnapSettings } from '../../sketch/snapping'
 import '../../styles/layout.css'
+import { useI18n } from '../../i18n/i18nContext'
+import type { MessageKey } from '../../i18n/locales/en'
 import { resolvedProjectFeatures } from '../../store/helpers/resolveFeatures'
+import { UnitConversionDialog } from '../project/UnitConversionDialog'
+import { UnitConversionContext } from '../project/UnitConversionContext'
 
 
 
@@ -116,6 +121,7 @@ export function AppShell({
   onShowAbout,
 }: AppShellProps) {
   const shellMode = useShellMode()
+  const { t } = useI18n()
   const tabletShell = isTabletMode(shellMode)
   const [rightDrawerOpen, setRightDrawerOpen] = useState(false)
   const [leftDrawerOpen, setLeftDrawerOpen] = useState(false)
@@ -125,6 +131,7 @@ export function AppShell({
     [],
   )
   const [statusBarExpanded, setStatusBarExpanded] = useState(false)
+  const [pendingUnits, setPendingUnits] = useState<Project['meta']['units'] | null>(null)
   const [appVersion, setAppVersion] = useState<string | null>(null)
 
   // Web only: surface the running version as an "About" affordance. The desktop
@@ -309,11 +316,22 @@ export function AppShell({
     setStock,
     setOrigin,
     updateBackdrop,
+    setShowFeatureInfo,
     setAllRegionsVisible,
     setAllConstructionVisible,
     setAllTabsVisible,
     setAllClampsVisible,
+    setUnits,
   } = useProjectStore()
+  const requestUnitConversion = useCallback((toUnits: Project['meta']['units']) => {
+    if (toUnits !== project.meta.units) setPendingUnits(toUnits)
+  }, [project.meta.units])
+  const commitPendingUnits = useCallback((mode: 'convert' | 'reinterpret') => {
+    if (!pendingUnits || pendingUnits === project.meta.units) return
+    const nextUnits = pendingUnits
+    setPendingUnits(null)
+    setUnits(nextUnits, mode)
+  }, [pendingUnits, project.meta.units, setUnits])
   const resolvedFeatures = useMemo(() => resolvedProjectFeatures(project), [project])
   const stockBounds = getStockBounds(project.stock)
   const stockWidth = stockBounds.maxX - stockBounds.minX
@@ -326,22 +344,35 @@ export function AppShell({
   const anyClampsVisible = project.clamps.some((clamp) => clamp.visible)
   const centerTabs = ['sketch', 'preview3d', 'simulation'] as const
   const rightTabs = ['operations', 'tools'] as const
-  const workspaceLayouts = [
-    { id: 'lcr', label: 'Show left, center, and right panels' },
-    { id: 'lc', label: 'Show left and center panels' },
-    { id: 'c', label: 'Show center panel only' },
-    { id: 'cr', label: 'Show center and right panels' },
-  ] as const
+  const workspaceLayouts: { id: 'lcr' | 'lc' | 'c' | 'cr'; labelKey: MessageKey }[] = [
+    { id: 'lcr', labelKey: 'appShell.layout.lcr' },
+    { id: 'lc', labelKey: 'appShell.layout.lc' },
+    { id: 'c', labelKey: 'appShell.layout.c' },
+    { id: 'cr', labelKey: 'appShell.layout.cr' },
+  ]
+
+  const nextUnits = project.meta.units === 'mm' ? 'inch' : 'mm'
+  const currentUnitLabel = project.meta.units === 'mm'
+    ? t('featureTree.properties.units.mm')
+    : t('featureTree.properties.units.inch')
+  const nextUnitLabel = nextUnits === 'mm'
+    ? t('featureTree.properties.units.mm')
+    : t('featureTree.properties.units.inch')
+  const changeUnitsLabel = t('appShell.status.changeUnits', {
+    from: currentUnitLabel,
+    to: nextUnitLabel,
+  })
 
   return (
-    <ExpandedPanelContext.Provider value={expandedPanelContextValue}>
+    <UnitConversionContext.Provider value={requestUnitConversion}>
+      <ExpandedPanelContext.Provider value={expandedPanelContextValue}>
     <div className="app-shell" data-shell-mode={shellMode} data-right-open={rightDrawerOpen ? 'true' : undefined} data-left-open={leftDrawerOpen ? 'true' : undefined}>
       <div className="tablet-rotate-overlay" aria-hidden="true">
         <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
           <rect x="4" y="2" width="16" height="20" rx="2" />
           <path d="M12 18h.01" />
         </svg>
-        <span>Please rotate your device to landscape mode</span>
+        <span>{t('appShell.tablet.rotatePrompt')}</span>
       </div>
       {(rightDrawerOpen || leftDrawerOpen) && (
         <div
@@ -376,12 +407,12 @@ export function AppShell({
           <button
             className="tablet-drawer-toggle toolbar-btn"
             type="button"
-            title="Open operations panel"
-            aria-label="Open operations panel"
+            title={t('appShell.sidebar.openOperations')}
+            aria-label={t('appShell.sidebar.openOperations')}
             aria-expanded={rightDrawerOpen}
             onClick={() => setRightDrawerOpen(true)}
           >
-            Operations{project.operations.length > 0 ? ` ${project.operations.length}` : ''}
+            {t('appShell.sidebar.operations')}{project.operations.length > 0 ? ` ${project.operations.length}` : ''}
           </button>
         </header>
       )}
@@ -389,11 +420,11 @@ export function AppShell({
       {/* Main work area */}
       <div className={`app-body app-body--${workspaceLayout} app-body--toolbar-left ${tabletShell ? 'app-body--tablet' : ''}`} style={bodyStyle}>
         {tabletShell ? (
-          <aside className="app-left-rail app-left-rail--tablet" aria-label="Tools">
+          <aside className="app-left-rail app-left-rail--tablet" aria-label={t('appShell.drawer.tools')}>
             <ToolRail onZoomToModel={onZoomToModel} onImportComplete={onImportComplete} />
           </aside>
         ) : (
-          <aside className="app-left-rail" aria-label="Creation tools" ref={leftRailRef}>
+          <aside className="app-left-rail" aria-label={t('appShell.drawer.creationTools')} ref={leftRailRef}>
             {creationToolbar}
           </aside>
         )}
@@ -405,12 +436,12 @@ export function AppShell({
                 <button
                   className="tablet-drawer-close tablet-drawer-close--left"
                   type="button"
-                  aria-label="Close project panel"
+                  aria-label={t('appShell.panel.closeProject')}
                   onClick={() => setLeftDrawerOpen(false)}
                 >
                   ✕
                 </button>
-                Project Tree
+                {t('appShell.panel.projectTree')}
                 <span className="feature-count">
                   {project.features.length + project.featureFolders.length + project.tabs.length + project.clamps.length + 6}
                 </span>
@@ -419,12 +450,12 @@ export function AppShell({
             </section>
             <section className="panel panel-properties">
               <div className="panel-header">
-                Properties
+                {t('appShell.panel.properties')}
                 <button
                   className="tree-action-btn"
                   type="button"
-                  title="Expand properties panel"
-                  aria-label="Expand properties panel"
+                  title={t('appShell.panel.expandProperties')}
+                  aria-label={t('appShell.panel.expandProperties')}
                   onClick={() => setExpandedPanel('properties')}
                 >
                   <Icon id="expand" />
@@ -444,7 +475,7 @@ export function AppShell({
 
         <main className="panel-centre" ref={centrePanelRef}>
           <div className="panel centre-workspace">
-            <div className="panel-tabs-header" role="tablist" aria-label="Workspace Views">
+            <div className="panel-tabs-header" role="tablist" aria-label={t('appShell.workspace.tabList')}>
               <button
                 id="workspace-tab-sketch"
                 className={`panel-tab ${centerTab === 'sketch' ? 'panel-tab--active' : ''}`}
@@ -470,7 +501,7 @@ export function AppShell({
                 aria-controls="workspace-panel-sketch"
                 tabIndex={centerTab === 'sketch' ? 0 : -1}
               >
-                Sketch
+                {t('appShell.workspace.sketch')}
               </button>
               <button
                 id="workspace-tab-preview3d"
@@ -497,7 +528,7 @@ export function AppShell({
                 aria-controls="workspace-panel-preview3d"
                 tabIndex={centerTab === 'preview3d' ? 0 : -1}
               >
-                3D View
+                {t('appShell.workspace.3d')}
               </button>
               <button
                 id="workspace-tab-simulation"
@@ -524,19 +555,19 @@ export function AppShell({
                 aria-controls="workspace-panel-simulation"
                 tabIndex={centerTab === 'simulation' ? 0 : -1}
               >
-                Simulation
+                {t('appShell.workspace.simulation')}
               </button>
               <div className="panel-tabs-spacer" />
               {!tabletShell && (
                 <>
-                  <div className="workspace-layout-controls" aria-label="Workspace layout presets">
+                  <div className="workspace-layout-controls" aria-label={t('appShell.layout.presets')}>
                     {workspaceLayouts.map((layout) => (
                       <button
                         key={layout.id}
                         className={`workspace-layout-btn ${workspaceLayout === layout.id ? 'workspace-layout-btn--active' : ''}`}
                         type="button"
-                        title={layout.label}
-                        aria-label={layout.label}
+                        title={t(layout.labelKey)}
+                        aria-label={t(layout.labelKey)}
                         onClick={() => onWorkspaceLayoutChange(layout.id)}
                       >
                         <span className={`workspace-layout-icon workspace-layout-icon--${layout.id}`} aria-hidden="true">
@@ -591,13 +622,13 @@ export function AppShell({
           )}
         </main>
 
-        <aside className="panel-right" ref={rightPanelRef} aria-label="CAM panel">
+        <aside className="panel-right" ref={rightPanelRef} aria-label={t('appShell.panel.cam')}>
           <section className="panel panel-tabs">
-            <div className="panel-tabs-header" role="tablist" aria-label="Right Sidebar">
+            <div className="panel-tabs-header" role="tablist" aria-label={t('appShell.sidebar.tabList')}>
               <button
                 className="tablet-drawer-close"
                 type="button"
-                aria-label="Close operations panel"
+                aria-label={t('appShell.sidebar.closeOperations')}
                 onClick={() => setRightDrawerOpen(false)}
               >
                 ✕
@@ -627,7 +658,7 @@ export function AppShell({
                 aria-controls="sidebar-panel-operations"
                 tabIndex={rightTab === 'operations' ? 0 : -1}
               >
-                Operations
+                {t('appShell.sidebar.operations')}
               </button>
               <button
                 id="sidebar-tab-tools"
@@ -654,7 +685,7 @@ export function AppShell({
                 aria-controls="sidebar-panel-tools"
                 tabIndex={rightTab === 'tools' ? 0 : -1}
               >
-                Tools
+                {t('appShell.sidebar.tools')}
               </button>
             </div>
             <div
@@ -669,7 +700,7 @@ export function AppShell({
             >
               {camPanel ?? (
                 <div className="panel-empty">
-                  CAM operations and toolpaths are scheduled for Phase 4.
+                  {t('appShell.empty.camPanel')}
                 </div>
               )}
             </div>
@@ -680,101 +711,123 @@ export function AppShell({
 
       <footer className={`app-statusbar ${tabletShell ? (statusBarExpanded ? 'app-statusbar--tablet-expanded' : 'app-statusbar--tablet-compact') : ''}`}>
         <span>{project.meta.name}</span>
-        <span>{project.meta.units.toUpperCase()}</span>
+        <button
+          className="statusbar-units"
+          type="button"
+          onClick={() => requestUnitConversion(nextUnits)}
+          title={changeUnitsLabel}
+          aria-label={changeUnitsLabel}
+        >
+          {project.meta.units.toUpperCase()}
+        </button>
         <span>
-          Stock: {formatLength(stockWidth, project.meta.units)} × {formatLength(stockHeight, project.meta.units)} × {formatLength(project.stock.thickness, project.meta.units)} {project.meta.units}
+          {t('appShell.status.stockDim', {
+            width: formatLength(stockWidth, project.meta.units),
+            height: formatLength(stockHeight, project.meta.units),
+            thickness: formatLength(project.stock.thickness, project.meta.units),
+            units: project.meta.units,
+          })}
         </span>
         {tabletShell ? (
           <button
             type="button"
             className="statusbar-expand-btn"
             onClick={() => setStatusBarExpanded((v) => !v)}
-            title={statusBarExpanded ? 'Collapse status bar' : 'Expand status bar'}
-            aria-label={statusBarExpanded ? 'Collapse status bar' : 'Expand status bar'}
+            title={statusBarExpanded ? t('appShell.status.collapse') : t('appShell.status.expand')}
+            aria-label={statusBarExpanded ? t('appShell.status.collapse') : t('appShell.status.expand')}
             aria-expanded={statusBarExpanded}
           >
             {statusBarExpanded ? '▾' : '▸'}
           </button>
         ) : null}
-        <div className={`statusbar-visibility ${tabletShell && !statusBarExpanded ? 'statusbar-visibility--hidden' : ''}`} aria-label="View visibility">
+        <div className={`statusbar-visibility ${tabletShell && !statusBarExpanded ? 'statusbar-visibility--hidden' : ''}`} aria-label={t('appShell.status.viewVisibility')}>
+          <button
+            className={`statusbar-toggle ${project.meta.showFeatureInfo ? 'statusbar-toggle--active' : ''}`}
+            type="button"
+            aria-pressed={project.meta.showFeatureInfo}
+            title={project.meta.showFeatureInfo ? t('appShell.status.hideFeatureLabels') : t('appShell.status.showFeatureLabels')}
+            onClick={() => setShowFeatureInfo(!project.meta.showFeatureInfo)}
+          >
+            {t('appShell.status.featureLabels')}
+          </button>
           <button
             className={`statusbar-toggle ${project.grid.visible ? 'statusbar-toggle--active' : ''}`}
             type="button"
             aria-pressed={project.grid.visible}
-            title={project.grid.visible ? 'Hide grid' : 'Show grid'}
+            title={project.grid.visible ? t('appShell.status.hideGrid') : t('appShell.status.showGrid')}
             onClick={() => setGrid({ ...project.grid, visible: !project.grid.visible })}
           >
-            Grid
+            {t('appShell.status.grid')}
           </button>
           <button
             className={`statusbar-toggle ${project.stock.visible ? 'statusbar-toggle--active' : ''}`}
             type="button"
             aria-pressed={project.stock.visible}
-            title={project.stock.visible ? 'Hide stock' : 'Show stock'}
+            title={project.stock.visible ? t('appShell.status.hideStock') : t('appShell.status.showStock')}
             onClick={() => setStock({ ...project.stock, visible: !project.stock.visible })}
           >
-            Stock
+            {t('appShell.status.stock')}
           </button>
           <button
             className={`statusbar-toggle ${project.backdrop?.visible ? 'statusbar-toggle--active' : ''}`}
             type="button"
             aria-pressed={project.backdrop?.visible ?? false}
             disabled={!project.backdrop}
-            title={!project.backdrop ? 'No backdrop loaded' : project.backdrop.visible ? 'Hide backdrop' : 'Show backdrop'}
+            title={!project.backdrop ? t('appShell.status.noBackdrop') : project.backdrop.visible ? t('appShell.status.hideBackdrop') : t('appShell.status.showBackdrop')}
             onClick={() => {
               if (project.backdrop) updateBackdrop({ visible: !project.backdrop.visible })
             }}
           >
-            Backdrop
+            {t('appShell.status.backdrop')}
           </button>
           <button
             className={`statusbar-toggle ${project.origin.visible ? 'statusbar-toggle--active' : ''}`}
             type="button"
             aria-pressed={project.origin.visible}
-            title={project.origin.visible ? 'Hide origin' : 'Show origin'}
+            title={project.origin.visible ? t('appShell.status.hideOrigin') : t('appShell.status.showOrigin')}
             onClick={() => setOrigin({ ...project.origin, visible: !project.origin.visible })}
           >
-            Origin
+            {t('appShell.status.origin')}
           </button>
           <button
             className={`statusbar-toggle ${anyRegionsVisible ? 'statusbar-toggle--active' : ''}`}
             type="button"
             aria-pressed={anyRegionsVisible}
             disabled={regionCount === 0}
-            title={regionCount === 0 ? 'No regions in project' : anyRegionsVisible ? 'Hide regions' : 'Show regions'}
+            title={regionCount === 0 ? t('appShell.status.noRegions') : anyRegionsVisible ? t('appShell.status.hideRegions') : t('appShell.status.showRegions')}
             onClick={() => setAllRegionsVisible(!anyRegionsVisible)}
           >
-            Regions
+            {t('appShell.status.regions')}
           </button>
           <button
             className={`statusbar-toggle ${anyConstructionVisible ? 'statusbar-toggle--active' : ''}`}
             type="button"
             aria-pressed={anyConstructionVisible}
             disabled={constructionCount === 0}
-            title={constructionCount === 0 ? 'No construction geometry in project' : anyConstructionVisible ? 'Hide construction geometry' : 'Show construction geometry'}
+            title={constructionCount === 0 ? t('appShell.status.noConstruction') : anyConstructionVisible ? t('appShell.status.hideConstruction') : t('appShell.status.showConstruction')}
             onClick={() => setAllConstructionVisible(!anyConstructionVisible)}
           >
-            Construction
+            {t('appShell.status.construction')}
           </button>
           <button
             className={`statusbar-toggle ${anyTabsVisible ? 'statusbar-toggle--active' : ''}`}
             type="button"
             aria-pressed={anyTabsVisible}
             disabled={project.tabs.length === 0}
-            title={project.tabs.length === 0 ? 'No tabs in project' : anyTabsVisible ? 'Hide tabs' : 'Show tabs'}
+            title={project.tabs.length === 0 ? t('appShell.status.noTabs') : anyTabsVisible ? t('appShell.status.hideTabs') : t('appShell.status.showTabs')}
             onClick={() => setAllTabsVisible(!anyTabsVisible)}
           >
-            Tabs
+            {t('appShell.status.tabs')}
           </button>
           <button
             className={`statusbar-toggle ${anyClampsVisible ? 'statusbar-toggle--active' : ''}`}
             type="button"
             aria-pressed={anyClampsVisible}
             disabled={project.clamps.length === 0}
-            title={project.clamps.length === 0 ? 'No clamps in project' : anyClampsVisible ? 'Hide clamps' : 'Show clamps'}
+            title={project.clamps.length === 0 ? t('appShell.status.noClamps') : anyClampsVisible ? t('appShell.status.hideClamps') : t('appShell.status.showClamps')}
             onClick={() => setAllClampsVisible(!anyClampsVisible)}
           >
-            Clamps
+            {t('appShell.status.clamps')}
           </button>
         </div>
         {statusBarExtras}
@@ -783,13 +836,13 @@ export function AppShell({
             className="statusbar-about"
             type="button"
             onClick={onShowAbout}
-            title="About PureCutCNC"
+            title={t('appShell.status.about')}
           >
             PureCutCNC{appVersion ? ` ${appVersion}` : ''}
           </button>
         )}
         {import.meta.env.DEV && (
-          <span className="statusbar-shell-mode" title="Shell mode (dev only)">{shellMode}</span>
+          <span className="statusbar-shell-mode" title={t('appShell.status.shellMode')}>{shellMode}</span>
         )}
       </footer>
 
@@ -798,8 +851,8 @@ export function AppShell({
         <div className="dialog-backdrop" onClick={() => setExpandedPanel(null)}>
           <div className="dialog dialog--panel-expand" onClick={(event) => event.stopPropagation()}>
             <div className="dialog-header">
-              <h2 className="dialog-title">Properties</h2>
-              <button className="dialog-close" onClick={() => setExpandedPanel(null)} aria-label="Close" type="button">
+              <h2 className="dialog-title">{t('appShell.panel.properties')}</h2>
+              <button className="dialog-close" onClick={() => setExpandedPanel(null)} aria-label={t('appShell.panel.close')} type="button">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                   <path d="M18 6L6 18M6 6l12 12" />
                 </svg>
@@ -811,7 +864,17 @@ export function AppShell({
           </div>
         </div>
       )}
-    </div>
-    </ExpandedPanelContext.Provider>
+        </div>
+      </ExpandedPanelContext.Provider>
+      {pendingUnits && pendingUnits !== project.meta.units ? (
+        <UnitConversionDialog
+          fromUnits={project.meta.units}
+          toUnits={pendingUnits}
+          onConvert={() => commitPendingUnits('convert')}
+          onReinterpret={() => commitPendingUnits('reinterpret')}
+          onCancel={() => setPendingUnits(null)}
+        />
+      ) : null}
+    </UnitConversionContext.Provider>
   )
 }

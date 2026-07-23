@@ -26,6 +26,187 @@
 
 import type { Locator, Page } from '@playwright/test'
 
+// ── Appearance ─────────────────────────────────────────────────────
+
+export const appearance = {
+  trigger: (page: Page) => page.getByRole('button', { name: /^Appearance:/ }),
+  menu: (page: Page) => page.getByRole('menu', { name: 'Appearance theme' }),
+  option: (page: Page, label: 'Dark' | 'Light' | 'System') =>
+    appearance.menu(page).getByRole('menuitemradio', { name: new RegExp(`^${label}`) }),
+  customOption: (page: Page, name: string) =>
+    appearance.menu(page).getByRole('menuitemradio').filter({ has: page.getByText(name, { exact: true }) }),
+  manageEntry: (page: Page) =>
+    appearance.menu(page).getByRole('menuitem', { name: /^Manage themes/ }),
+  positiveActionProbe: (page: Page) =>
+    page.getByRole('button', { name: 'Positive action contrast probe' }),
+}
+
+// ── Language ───────────────────────────────────────────────────────
+
+export const language = {
+  // The trigger's accessible name is localized ("Language: English" /
+  // "语言：简体中文" / "Sprache: Deutsch" / "Idioma: Español" / "Langue : Français"),
+  // so match every shipped locale.
+  trigger: (page: Page) => page.getByRole('button', { name: /^(Language:|Idioma:|Sprache:|Langue :|语言：)/ }),
+  menu: (page: Page) => page.getByRole('menu', { name: /^(Interface language|Idioma de la interfaz|Oberflächensprache|Langue de l’interface|界面语言)$/ }),
+  option: (page: Page, label: string) =>
+    language.menu(page).getByRole('menuitemradio', { name: new RegExp(`^${label}`) }),
+  manageEntry: (page: Page) =>
+    language.menu(page).getByRole('menuitem', { name: /^(Manage languages|Gérer les langues)/ }),
+}
+
+// ── Language manager & editor ──────────────────────────────────────
+
+export const languageManager = {
+  dialog: (page: Page) => page.getByRole('dialog', { name: 'Manage languages' }),
+  localeItem: (page: Page, name: string) =>
+    languageManager.dialog(page).getByRole('option')
+      .filter({ has: page.getByText(name, { exact: true }) }),
+  detailName: (page: Page) =>
+    languageManager.dialog(page).locator('.machine-manager-detail-name'),
+  progress: (page: Page) =>
+    languageManager.dialog(page).locator('.language-manager-progress'),
+  useButton: (page: Page) =>
+    languageManager.dialog(page).getByRole('button', { name: 'Use this language' }),
+  duplicateButton: (page: Page) =>
+    languageManager.dialog(page).getByRole('button', { name: 'Duplicate & edit' }),
+  editButton: (page: Page) =>
+    languageManager.dialog(page).getByRole('button', { name: 'Edit', exact: true }),
+  renameButton: (page: Page) =>
+    languageManager.dialog(page).getByRole('button', { name: 'Rename' }),
+  renameInput: (page: Page) =>
+    languageManager.dialog(page).getByRole('textbox', { name: 'Language name' }),
+  saveNameButton: (page: Page) =>
+    languageManager.dialog(page).getByRole('button', { name: 'Save name' }),
+  importButton: (page: Page) =>
+    languageManager.dialog(page).getByRole('button', { name: 'Import language' }),
+  exportButton: (page: Page) =>
+    languageManager.dialog(page).getByRole('button', { name: 'Export language' }),
+  deleteButton: (page: Page) =>
+    languageManager.dialog(page).getByRole('button', { name: 'Delete language' }),
+  notice: (page: Page) =>
+    languageManager.dialog(page).locator('.theme-manager-notice'),
+  doneButton: (page: Page) =>
+    languageManager.dialog(page).getByRole('button', { name: 'Done' }),
+}
+
+export const languageEditor = {
+  dialog: (page: Page) => page.getByRole('dialog', { name: /^Edit language/ }),
+  nameInput: (page: Page) =>
+    languageEditor.dialog(page).getByLabel('Language name'),
+  tagInput: (page: Page) =>
+    languageEditor.dialog(page).getByLabel('BCP-47 language tag'),
+  searchInput: (page: Page) =>
+    languageEditor.dialog(page).getByRole('searchbox'),
+  filterSelect: (page: Page) =>
+    languageEditor.dialog(page).getByLabel('Show'),
+  section: (page: Page, namespace: string) =>
+    languageEditor.dialog(page).locator('.language-editor-section')
+      .filter({ has: page.locator('.language-editor-section__name', { hasText: new RegExp(`^${namespace}$`) }) }),
+  keyInput: (page: Page, key: string) =>
+    languageEditor.dialog(page).getByRole('textbox', { name: key, exact: true }),
+  rowIssue: (page: Page) =>
+    languageEditor.dialog(page).locator('.language-editor-row__issue'),
+  footerBlocked: (page: Page) =>
+    languageEditor.dialog(page).locator('.theme-editor-footer-blocked'),
+  previewingNote: (page: Page) =>
+    languageEditor.dialog(page).locator('.language-editor-footer-note'),
+  previewButton: (page: Page) =>
+    languageEditor.dialog(page).getByRole('button', { name: 'Preview in app' }),
+  applyButton: (page: Page) =>
+    languageEditor.dialog(page).getByRole('button', { name: 'Apply', exact: true }),
+  cancelButton: (page: Page) =>
+    languageEditor.dialog(page).getByRole('button', { name: 'Cancel', exact: true }),
+}
+
+// ── Theme manager & editor ─────────────────────────────────────────
+
+export const themeManager = {
+  dialog: (page: Page) => page.getByRole('dialog', { name: 'Manage themes' }),
+  themeItem: (page: Page, name: string) =>
+    themeManager.dialog(page).getByRole('option')
+      .filter({ has: page.getByText(name, { exact: true }) }),
+  detailName: (page: Page) =>
+    themeManager.dialog(page).locator('.machine-manager-detail-name'),
+  useButton: (page: Page) =>
+    themeManager.dialog(page).getByRole('button', { name: 'Use this theme' }),
+  duplicateButton: (page: Page) =>
+    themeManager.dialog(page).getByRole('button', { name: /^Duplicate/ }),
+  editButton: (page: Page) =>
+    themeManager.dialog(page).getByRole('button', { name: 'Edit', exact: true }),
+  renameButton: (page: Page) =>
+    themeManager.dialog(page).getByRole('button', { name: 'Rename' }),
+  renameInput: (page: Page) =>
+    themeManager.dialog(page).getByRole('textbox', { name: 'Theme name' }),
+  saveNameButton: (page: Page) =>
+    themeManager.dialog(page).getByRole('button', { name: 'Save name' }),
+  resetButton: (page: Page) =>
+    themeManager.dialog(page).getByRole('button', { name: 'Reset to base' }),
+  importButton: (page: Page) =>
+    themeManager.dialog(page).getByRole('button', { name: 'Import theme' }),
+  exportButton: (page: Page) =>
+    themeManager.dialog(page).getByRole('button', { name: 'Export theme' }),
+  deleteButton: (page: Page) =>
+    themeManager.dialog(page).getByRole('button', { name: 'Delete theme' }),
+  notice: (page: Page) =>
+    themeManager.dialog(page).locator('.theme-manager-notice'),
+  fixedModeRadio: (page: Page) =>
+    themeManager.dialog(page).getByRole('radio', { name: 'Fixed theme' }),
+  systemModeRadio: (page: Page) =>
+    themeManager.dialog(page).getByRole('radio', { name: 'Follow system light/dark' }),
+  systemLightSelect: (page: Page) =>
+    themeManager.dialog(page).getByLabel('Light theme'),
+  systemDarkSelect: (page: Page) =>
+    themeManager.dialog(page).getByLabel('Dark theme'),
+  doneButton: (page: Page) =>
+    themeManager.dialog(page).getByRole('button', { name: 'Done' }),
+}
+
+export const themeEditor = {
+  dialog: (page: Page) => page.getByRole('dialog', { name: /^Edit theme/ }),
+  nameInput: (page: Page) =>
+    themeEditor.dialog(page).getByLabel('Theme name'),
+  colorText: (page: Page, label: string) =>
+    themeEditor.dialog(page).getByLabel(label, { exact: true }),
+  resetField: (page: Page, label: string) =>
+    themeEditor.dialog(page).getByRole('button', { name: `Reset ${label} to base value` }),
+  restoreButton: (page: Page) =>
+    themeEditor.dialog(page).getByRole('button', { name: 'Restore saved colors' }),
+  applyButton: (page: Page) =>
+    themeEditor.dialog(page).getByRole('button', { name: 'Apply theme' }),
+  cancelButton: (page: Page) =>
+    themeEditor.dialog(page).getByRole('button', { name: 'Cancel' }),
+  blockers: (page: Page) =>
+    themeEditor.dialog(page).locator('.theme-editor-contrast__item--block'),
+  contrastOk: (page: Page) =>
+    themeEditor.dialog(page).locator('.theme-editor-contrast__ok'),
+}
+
+// ── Status bar and About dialog ────────────────────────────────────
+
+export const statusBar = {
+  root: (page: Page) => page.locator('.app-statusbar'),
+  toggle: (page: Page, label: string) =>
+    statusBar.root(page).getByRole('button', { name: label, exact: true }),
+  units: (page: Page) =>
+    statusBar.root(page).getByRole('button', { name: /^Change project units from / }),
+  about: (page: Page) => statusBar.root(page).locator('.statusbar-about'),
+}
+
+export const aboutDialog = {
+  root: (page: Page) => page.getByRole('dialog', { name: 'About PureCutCNC' }),
+  title: (page: Page) => aboutDialog.root(page).locator('.dialog-title'),
+  productName: (page: Page) => aboutDialog.root(page).locator('.about-name'),
+}
+
+// ── New Project dialog ─────────────────────────────────────────────
+
+export const newProjectDialog = {
+  root: (page: Page) => page.locator('.dialog--new-project'),
+  template: (page: Page, label: string) =>
+    newProjectDialog.root(page).getByRole('button', { name: new RegExp(`^${label}`) }),
+}
+
 // ── Feature tree ────────────────────────────────────────────────────
 
 export const tree = {
@@ -41,9 +222,19 @@ export const tree = {
   /** Feature rows only (excludes folders, section headers, etc.). */
   featureRows: (page: Page) => page.locator('.tree-row.tree-row--feature'),
 
+  /** Feature-folder rows only. */
+  folderRows: (page: Page) => page.locator('.tree-row.tree-row--folder'),
+
   /** A specific feature row by its label text. */
   rowByName: (page: Page, name: string) =>
     page.locator('.tree-row--feature').filter({ hasText: name }),
+
+  /** A specific feature-folder row by its label text. */
+  folderRowByName: (page: Page, name: string) =>
+    page.locator('.tree-row--folder').filter({ hasText: name }),
+
+  /** Adds a folder to the machining-features section. */
+  addFolderButton: (page: Page) => page.getByRole('button', { name: 'Add folder', exact: true }),
 
   /** Rows that are currently selected. */
   selectedRows: (page: Page) => page.locator('.tree-row--selected'),
@@ -133,6 +324,12 @@ export const operations = {
   headerExportButton: (page: Page) =>
     page.locator('.cam-panel .cam-section-toolbar').getByRole('button', { name: 'Export', exact: true }),
 
+  /** The "Add" button and menu in the Operations panel header. */
+  headerAddButton: (page: Page) =>
+    page.locator('.cam-panel .cam-section-toolbar').getByRole('button', { name: 'Add', exact: true }),
+  addMenu: (page: Page) => page.locator('.cam-add-menu--vertical'),
+  addMenuHint: (page: Page) => page.locator('.cam-add-menu--vertical .cam-operation-hint').first(),
+
   /** The Properties-header "Export G-code" action for the selected operation. */
   propertiesExportButton: (page: Page, name: string) =>
     page
@@ -198,4 +395,7 @@ export const toolbar = {
 
   /** Add-point button (visible during sketch edit). */
   addPointButton: (page: Page) => page.locator('button[aria-label="Add point"]'),
+
+  /** Opens the New Project dialog. */
+  newProjectButton: (page: Page) => page.getByRole('button', { name: 'New project' }),
 }

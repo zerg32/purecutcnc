@@ -1,3 +1,9 @@
+---
+status: current
+authoritative-for: smooth tabs, helical drilling, and ramp entry strategies
+last-verified: 2026-07-24
+---
+
 # Smooth Tabs, Helical Drilling & Ramp Entry
 
 > **Status:** Implemented (uncommitted)

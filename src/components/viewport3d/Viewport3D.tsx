@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from 'react'
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { Icon } from '../Icon'
 import { ToolpathVisibilityPanel } from '../ToolpathVisibilityPanel'
@@ -25,8 +25,12 @@ import { modelFeatures } from '../../store/helpers/featureRoles'
 import { resolvedProjectFeatures } from '../../store/helpers/resolveFeatures'
 import { applyClampHighlight, applyTabHighlight, buildOriginTriad, buildScene } from '../../engine/csg'
 import { getStockBounds, rectProfile } from '../../types/project'
+import { getFeaturesWorldBounds } from '../canvas/scenePrimitives'
 import { getFeatureGeometryProfiles } from '../../text'
 import { buildToolpathLinePositionChunks, toolpathPointToWorldTuple } from './toolpathOverlay'
+import { useTheme } from '../../theme/themeContext'
+import type { ThreeThemePalette } from '../../theme/palette'
+import { useI18n } from '../../i18n/i18nContext'
 
 function configureGridMaterial(material: THREE.Material | THREE.Material[]) {
   const materials = Array.isArray(material) ? material : [material]
@@ -124,7 +128,7 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value))
 }
 
-function buildToolpathEndpointMarkers(toolpath: ToolpathResult, emphasized: boolean): THREE.Object3D[] {
+function buildToolpathEndpointMarkers(toolpath: ToolpathResult, emphasized: boolean, palette: ThreeThemePalette): THREE.Object3D[] {
   if (toolpath.moves.length === 0) {
     return []
   }
@@ -144,7 +148,7 @@ function buildToolpathEndpointMarkers(toolpath: ToolpathResult, emphasized: bool
     new THREE.Vector3(0, -1, 0),
     firstPoint.clone().add(new THREE.Vector3(0, markerLength, 0)),
     markerLength,
-    0xd583df,
+    palette.toolpathPlunge,
     headLength,
     headWidth,
   )
@@ -152,7 +156,7 @@ function buildToolpathEndpointMarkers(toolpath: ToolpathResult, emphasized: bool
     new THREE.Vector3(0, 1, 0),
     lastPoint,
     markerLength,
-    0x78b8de,
+    palette.toolpathRapid,
     headLength,
     headWidth,
   )
@@ -179,6 +183,7 @@ function buildToolpathDirectionMarkers(
   toolpath: ToolpathResult,
   emphasized: boolean,
   visibility: ToolpathVisibility,
+  palette: ThreeThemePalette,
 ): THREE.Object3D[] {
   if (!emphasized || toolpath.moves.length === 0) {
     return []
@@ -268,7 +273,7 @@ function buildToolpathDirectionMarkers(
     const headWidth = markerLength * 0.18
     const center = from.clone().add(to).multiplyScalar(0.5)
     const origin = center.clone().sub(direction.clone().multiplyScalar(markerLength * 0.5))
-    const color = move.kind === 'rapid' ? 0x78b8de : 0xff735c
+    const color = move.kind === 'rapid' ? palette.toolpathRapid : palette.toolpathCut
     const arrow = new THREE.ArrowHelper(
       direction,
       origin,
@@ -306,6 +311,7 @@ function buildToolpathOverlay(
   toolpath: ToolpathResult,
   emphasized: boolean,
   visibility: ToolpathVisibility,
+  palette: ThreeThemePalette,
 ): THREE.Object3D[] {
   const layers: Array<{
     kinds: ToolpathResult['moves'][number]['kind'][]
@@ -315,10 +321,10 @@ function buildToolpathOverlay(
     horizontalOnly?: boolean
     retractOnly?: boolean
   }> = [
-    { kinds: ['cut', 'lead_in', 'lead_out'], color: 0xff735c, opacity: 0.98, visible: visibility.cuts },
-    { kinds: ['rapid'], color: 0x78b8de, opacity: 0.75, visible: visibility.rapids, horizontalOnly: true },
-    { kinds: ['plunge'], color: 0xd583df, opacity: 0.9, visible: visibility.plunges },
-    { kinds: ['rapid'], color: 0x78b8de, opacity: 0.75, visible: visibility.retractions, retractOnly: true },
+    { kinds: ['cut', 'lead_in', 'lead_out'], color: palette.toolpathCut, opacity: 0.98, visible: visibility.cuts },
+    { kinds: ['rapid'], color: palette.toolpathRapid, opacity: 0.75, visible: visibility.rapids, horizontalOnly: true },
+    { kinds: ['plunge'], color: palette.toolpathPlunge, opacity: 0.9, visible: visibility.plunges },
+    { kinds: ['rapid'], color: palette.toolpathRapid, opacity: 0.75, visible: visibility.retractions, retractOnly: true },
   ]
 
   const objects: THREE.Object3D[] = []
@@ -356,8 +362,8 @@ function buildToolpathOverlay(
   }
 
   if (emphasized && visibility.directions) {
-    objects.push(...buildToolpathDirectionMarkers(toolpath, emphasized, visibility))
-    objects.push(...buildToolpathEndpointMarkers(toolpath, emphasized))
+    objects.push(...buildToolpathDirectionMarkers(toolpath, emphasized, visibility, palette))
+    objects.push(...buildToolpathEndpointMarkers(toolpath, emphasized, palette))
   }
 
   return objects
@@ -669,6 +675,20 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
   toolpathVisibility,
   onToolpathVisibilityChange,
 }, ref) {
+  const { palette } = useTheme()
+  const { t, languageTag } = useI18n()
+  const presetTitles = useMemo(() => ({
+    top: t('viewport.presets.top'),
+    bottom: t('viewport.presets.bottom'),
+    front: t('viewport.presets.front'),
+    back: t('viewport.presets.back'),
+    right: t('viewport.presets.right'),
+    left: t('viewport.presets.left'),
+    iso: t('viewport.presets.iso'),
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- t is identity-stable; languageTag drives locale recomputes
+  }), [t, languageTag])
+  const threePalette = palette.three
+  const threePaletteRef = useRef(threePalette)
   const mountRef = useRef<HTMLDivElement>(null)
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null)
   const sceneRef = useRef<THREE.Scene | null>(null)
@@ -694,9 +714,10 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
   // pointer handlers (which read them outside render). Write after commit, not
   // during render, so we don't touch refs while rendering.
   useLayoutEffect(() => {
+    threePaletteRef.current = threePalette
     zoomWindowActiveRef.current = zoomWindowActive
     zoomWindowBoxRef.current = zoomWindowBox
-  }, [zoomWindowActive, zoomWindowBox])
+  }, [threePalette, zoomWindowActive, zoomWindowBox])
 
   // Reset the zoom-window box during render when the tool deactivates (React-
   // recommended adjust-state-during-render; the ref mirror above nulls
@@ -739,7 +760,7 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
     })
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     renderer.setSize(mount.clientWidth, mount.clientHeight)
-    renderer.setClearColor(0x141820, 1)
+    renderer.setClearColor(threePaletteRef.current.background, 1)
     renderer.domElement.style.display = 'block'
     renderer.domElement.style.touchAction = 'none'
     mount.appendChild(renderer.domElement)
@@ -748,12 +769,12 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
     const scene = new THREE.Scene()
     sceneRef.current = scene
 
-    const ambient = new THREE.AmbientLight(0xffffff, 0.6)
+    const ambient = new THREE.AmbientLight(0xffffff, 0.6) // theme-exempt: scene lighting rig
     scene.add(ambient)
-    const dir = new THREE.DirectionalLight(0xffffff, 0.8)
+    const dir = new THREE.DirectionalLight(0xffffff, 0.8) // theme-exempt: scene lighting rig
     dir.position.set(100, 200, 100)
     scene.add(dir)
-    const dir2 = new THREE.DirectionalLight(0x8899ff, 0.3)
+    const dir2 = new THREE.DirectionalLight(0x8899ff, 0.3) // theme-exempt: scene lighting rig
     dir2.position.set(-100, 50, -100)
     scene.add(dir2)
 
@@ -835,19 +856,40 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
     syncGridVisibility()
     if (!project.grid.visible) return
 
-    const extent = Math.max(project.grid.extent, project.grid.minorSpacing)
+    const defaultExtent = Math.max(project.grid.extent, project.grid.minorSpacing)
+    let extent = defaultExtent
+
+    // Dynamically extend the grid to cover feature geometry on all sides.
+    const featureWorldBounds = getFeaturesWorldBounds(resolvedProjectFeatures(project))
+    if (featureWorldBounds) {
+      const toLeft = Math.abs(featureWorldBounds.minX - centerX)
+      const toRight = Math.abs(featureWorldBounds.maxX - centerX)
+      const toTop = Math.abs(featureWorldBounds.minY - centerZ)
+      const toBottom = Math.abs(featureWorldBounds.maxY - centerZ)
+      const neededReach = Math.max(toLeft, toRight, toTop, toBottom)
+      const padding = project.grid.majorSpacing
+      extent = Math.max(defaultExtent, (neededReach + padding) * 2)
+    }
+
+    // THREE.GridHelper expects total extent, not half-extent.
     const minorDivisions = Math.max(1, Math.round(extent / project.grid.minorSpacing))
     const majorDivisions = Math.max(1, Math.round(extent / project.grid.majorSpacing))
 
-    const minorGrid = new THREE.GridHelper(extent, minorDivisions, 0x223344, 0x223344)
-    const majorGrid = new THREE.GridHelper(extent, majorDivisions, 0x334455, 0x51657a)
+    const palette = threePaletteRef.current
+    const minorGrid = new THREE.GridHelper(extent, minorDivisions, palette.gridMinorCenter, palette.gridMinor)
+    const majorGrid = new THREE.GridHelper(extent, majorDivisions, palette.gridMajorCenter, palette.gridMajor)
     configureGridMaterial(minorGrid.material)
     configureGridMaterial(majorGrid.material)
     majorGrid.position.y = 0.001
 
     gridGroup.add(minorGrid)
     gridGroup.add(majorGrid)
-  }, [disposeObjectMaterial, project.grid.extent, project.grid.majorSpacing, project.grid.minorSpacing, project.grid.visible, project.stock, syncGridVisibility])
+  }, [disposeObjectMaterial, project, syncGridVisibility])
+
+  useEffect(() => {
+    rendererRef.current?.setClearColor(threePalette.background, 1)
+    rebuildGridHelpers()
+  }, [rebuildGridHelpers, threePalette])
 
   const clearRenderedObjects = useCallback((scene: THREE.Scene) => {
     for (const object of objectsRef.current) {
@@ -890,11 +932,12 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
   const applyFixtureHighlights = useCallback(() => {
     const collidingClampIdSet = new Set(collidingClampIds)
     for (const [id, mesh] of clampMeshesRef.current) {
-      applyClampHighlight(mesh, id === selectedClampId, collidingClampIdSet.has(id))
+      applyClampHighlight(mesh, id === selectedClampId, collidingClampIdSet.has(id), threePalette)
     }
     for (const [id, mesh] of tabMeshesRef.current) {
-      applyTabHighlight(mesh, id === selectedTabId)
+      applyTabHighlight(mesh, id === selectedTabId, threePalette)
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- threePalette changes only on theme toggle; adding it would force fixture rebuilds
   }, [collidingClampIds, selectedClampId, selectedTabId])
 
   // Mirror the latest highlighter into a ref so the async scene-build callback can
@@ -920,7 +963,7 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
 
     const timeout = window.setTimeout(() => {
       void (async () => {
-        const nextSceneObjects = await buildScene(project)
+        const nextSceneObjects = await buildScene(project, threePaletteRef.current)
 
         if (cancelled || buildRequestRef.current !== buildRequestId) {
           nextSceneObjects.stockMesh.geometry.dispose()
@@ -1063,7 +1106,7 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
     clearToolpathObjects(scene)
 
     const nextObjects = toolpaths.flatMap((toolpath) => (
-      toolpath.moves.length > 0 ? buildToolpathOverlay(toolpath, toolpath.operationId === selectedOperationId, toolpathVisibility) : []
+      toolpath.moves.length > 0 ? buildToolpathOverlay(toolpath, toolpath.operationId === selectedOperationId, toolpathVisibility, threePalette) : []
     ))
     if (nextObjects.length === 0) {
       return
@@ -1076,6 +1119,7 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
     return () => {
       clearToolpathObjects(scene)
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- threePalette is stable per theme; adding would recreate overlay on theme toggle
   }, [clearToolpathObjects, selectedOperationId, toolpaths, toolpathVisibility])
 
   useEffect(() => {
@@ -1093,13 +1137,14 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
     const stockWidth = stockBounds.maxX - stockBounds.minX
     const stockHeight = stockBounds.maxY - stockBounds.minY
     const axisSize = Math.max(Math.max(stockWidth, stockHeight, project.stock.thickness) * 0.05, 0.05)
-    const triad = buildOriginTriad(project.origin, axisSize)
+    const triad = buildOriginTriad(project.origin, axisSize, threePalette)
     scene.add(triad)
     originObjectRef.current = triad
 
     return () => {
       clearOriginObject(scene)
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- threePalette is stable per theme; adding would rebuild triad on theme toggle
   }, [clearOriginObject, originVisible, project.origin, project.stock])
 // Reset to default isometric view when a new project is created/loaded
 useEffect(() => {
@@ -1200,25 +1245,25 @@ useImperativeHandle(ref, () => ({
       )}
       <div className="viewport-presets">
         <div className="preset-btn-panel">
-          <button className="preset-btn preset-btn--icon" onClick={() => controlsRef.current?.setPreset('top')} title="Top view" type="button">
+          <button className="preset-btn preset-btn--icon" onClick={() => controlsRef.current?.setPreset('top')} title={presetTitles.top} type="button">
             <Icon id="view-top" size={16} />
           </button>
-          <button className="preset-btn preset-btn--icon" onClick={() => controlsRef.current?.setPreset('bottom')} title="Bottom view" type="button">
+          <button className="preset-btn preset-btn--icon" onClick={() => controlsRef.current?.setPreset('bottom')} title={presetTitles.bottom} type="button">
             <Icon id="view-bottom" size={16} />
           </button>
-          <button className="preset-btn preset-btn--icon" onClick={() => controlsRef.current?.setPreset('front')} title="Front view" type="button">
+          <button className="preset-btn preset-btn--icon" onClick={() => controlsRef.current?.setPreset('front')} title={presetTitles.front} type="button">
             <Icon id="view-front" size={16} />
           </button>
-          <button className="preset-btn preset-btn--icon" onClick={() => controlsRef.current?.setPreset('back')} title="Back view" type="button">
+          <button className="preset-btn preset-btn--icon" onClick={() => controlsRef.current?.setPreset('back')} title={presetTitles.back} type="button">
             <Icon id="view-back" size={16} />
           </button>
-          <button className="preset-btn preset-btn--icon" onClick={() => controlsRef.current?.setPreset('right')} title="Right view" type="button">
+          <button className="preset-btn preset-btn--icon" onClick={() => controlsRef.current?.setPreset('right')} title={presetTitles.right} type="button">
             <Icon id="view-right" size={16} />
           </button>
-          <button className="preset-btn preset-btn--icon" onClick={() => controlsRef.current?.setPreset('left')} title="Left view" type="button">
+          <button className="preset-btn preset-btn--icon" onClick={() => controlsRef.current?.setPreset('left')} title={presetTitles.left} type="button">
             <Icon id="view-left" size={16} />
           </button>
-          <button className="preset-btn preset-btn--icon" onClick={() => controlsRef.current?.setPreset('iso')} title="Isometric view" type="button">
+          <button className="preset-btn preset-btn--icon" onClick={() => controlsRef.current?.setPreset('iso')} title={presetTitles.iso} type="button">
             <Icon id="view-iso" size={16} />
           </button>
         </div>
