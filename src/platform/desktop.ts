@@ -19,6 +19,7 @@ import { readTextFile, writeFile, writeTextFile } from '@tauri-apps/plugin-fs'
 import { getVersion } from '@tauri-apps/api/app'
 import { openUrl, revealItemInDir } from '@tauri-apps/plugin-opener'
 import { translate } from '../i18n/store'
+import { basenameFromPath } from './path'
 import type { PlatformApi, OpenProjectResult, PickGeometryResult } from './api'
 
 // ---------------------------------------------------------------------------
@@ -117,7 +118,7 @@ export const desktopPlatform: PlatformApi = {
     })
     if (!path) return null
     const content = await readTextFile(path)
-    const name = path.split('/').pop() ?? path
+    const name = basenameFromPath(path)
     return { name, content }
   },
 
