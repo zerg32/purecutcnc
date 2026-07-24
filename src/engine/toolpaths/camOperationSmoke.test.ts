@@ -461,7 +461,7 @@ test('drilling helical: G1 helical interpolation path + rapid retract', () => {
 
   // Helical path uses G1 cut moves, not a single plunge
   const cuts = result.moves.filter((m) => m.kind === 'cut')
-  assert(cuts.length >= 32, `helical drilling should have >= 32 cut segments, got ${cuts.length}`)
+  assert(cuts.length >= 64, `helical drilling should have >= 64 cut segments, got ${cuts.length}`)
 
   // No plunge should be emitted (helical path reaches bottomZ exactly with these params)
   const plunges = result.moves.filter((m) => m.kind === 'plunge')
@@ -482,6 +482,10 @@ test('drilling helical: G1 helical interpolation path + rapid retract', () => {
   const zChanges = firstZCuts.map((m) => m.to.z - m.from.z)
   assert(zChanges.every((dz) => dz < 0), 'helical cuts should descend in Z')
   assert(zChanges.every((dz) => dz > -1), 'Z drop per segment should be small (< 1 unit)')
+
+  const lastCut = cuts[cuts.length - 1]
+  assert(approx(lastCut.to.x, centreX) && approx(lastCut.to.y, centreY), 'final helical cut should clean the hole bottom at centre')
+  assert(approx(lastCut.to.z, -6), `final helical cut should stay at bottomZ=-6, got ${lastCut.to.z}`)
 
   // Last move should be a rapid retract to safe-Z
   const lastMove = result.moves[result.moves.length - 1]

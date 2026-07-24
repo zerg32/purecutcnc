@@ -30,6 +30,7 @@ import type { ToolpathResult } from '../toolpaths/types'
 import { runPostProcessor } from './postprocessor'
 import { validateMachineDefinition } from './types'
 import type { MachineDefinition } from './types'
+import { formatGCodeNumber, projectToMachinePoint } from './utils'
 
 function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(`Assertion failed: ${message}`)
@@ -363,7 +364,7 @@ function runDrillingFixture(
   definition: MachineDefinition,
   drillType: 'simple' | 'peck' | 'dwell' | 'chip_breaking' | 'helical',
   overrides?: { peckDepth?: number; dwellTime?: number; helixDiameter?: number; helixPitch?: number },
-): { gcode: string; warnings: ToolpathWarning[] } {
+): { gcode: string; warnings: ToolpathWarning[]; project: ReturnType<typeof newProject>; operation: Operation; toolpath: ToolpathResult } {
 
   const project = newProject('Canned Test', 'mm')
   const toolRecord = { ...defaultTool('mm', 1), id: 't1', name: '3 mm Drill', type: 'drill' as const, diameter: 3, defaultPlungeFeed: 150 }
@@ -438,13 +439,23 @@ function runDrillingFixture(
       programName: project.meta.name,
     },
   })
-  return { gcode: result.gcode, warnings: result.warnings }
+  return { gcode: result.gcode, warnings: result.warnings, project, operation, toolpath }
 }
 
 function testHelicalG1Moves(): void {
   console.log('Testing helical drilling G1 moves (no canned cycle)...')
-  const { gcode } = runDrillingFixture(cannedCycleDefinition(), 'helical', { helixDiameter: 3, helixPitch: 2 })
+  const definition = cannedCycleDefinition()
+  const { gcode, project, toolpath } = runDrillingFixture(definition, 'helical', { helixDiameter: 3, helixPitch: 2 })
+  const cuts = toolpath.moves.filter((move) => move.kind === 'cut')
+  const lastCut = cuts[cuts.length - 1]!
+  const machineCleanup = projectToMachinePoint(lastCut.to, project.origin, definition)
+  const cleanupLine = [
+    `X${formatGCodeNumber(machineCleanup.x, definition, project.meta.units)}`,
+    `Y${formatGCodeNumber(machineCleanup.y, definition, project.meta.units)}`,
+    `Z${formatGCodeNumber(machineCleanup.z, definition, project.meta.units)}`,
+  ].join(' ')
   assert(gcode.includes('G1'), 'helical G-code should contain G1 moves')
+  assert(gcode.includes(cleanupLine), 'helical G-code should include the bottom cleanup move')
   assert(!gcode.includes('G81'), 'helical G-code should NOT contain G81')
   assert(!gcode.includes('G80'), 'helical G-code should NOT contain G80 (no canned cycle to cancel)')
   assert(gcode.includes('M30'), 'helical G-code should contain program end')

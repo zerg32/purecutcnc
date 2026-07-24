@@ -292,6 +292,27 @@ function emitHelicalDrill(
     prev = finalPlunge
   }
 
+  if (helixRadius > 1e-9) {
+    // Spiral back to centre at the target depth to clean the hole floor.
+    const cleanupStartAngle = Math.atan2(prev.y - center.y, prev.x - center.x)
+    const cleanupSteps = stepsPerRev
+    const cleanupRadiusStart = helixRadius
+    const cleanupAngleStep = (Math.PI * 2) / cleanupSteps
+
+    for (let i = 1; i <= cleanupSteps; i += 1) {
+      const t = i / cleanupSteps
+      const radius = cleanupRadiusStart * (1 - t)
+      const angle = cleanupStartAngle + cleanupAngleStep * i
+      const next: ToolpathPoint = {
+        x: center.x + Math.cos(angle) * radius,
+        y: center.y + Math.sin(angle) * radius,
+        z: bottomZ,
+      }
+      moves.push({ kind: 'cut', from: prev, to: next })
+      prev = next
+    }
+  }
+
   const retract: ToolpathPoint = { x: center.x, y: center.y, z: safeZ }
   moves.push({ kind: 'rapid', from: prev, to: retract })
   return retract
