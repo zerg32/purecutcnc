@@ -179,6 +179,7 @@ function selectionOf(ids: string[]): SelectionState {
     mode: 'feature',
     selectedFeatureId: ids[0] ?? null,
     selectedFeatureIds: ids,
+    selectedTabIds: [],
     selectedNode: null,
     hoveredFeatureId: null,
     sketchEditTool: null,
