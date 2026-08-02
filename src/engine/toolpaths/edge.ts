@@ -28,7 +28,9 @@ import {
   getOperationSafeZ,
   normalizeToolForProject,
   normalizeWinding,
+  pushRampOrPlunge,
   resolveFeatureZSpan,
+  retractToSafe,
   toClipperPath,
 } from './geometry'
 import { isFeatureFirst, mergeToolpathResults, perFeatureOperations } from './multiFeature'
@@ -110,68 +112,34 @@ function toClosedCutMoves(points: Point[], z: number): ToolpathMove[] {
   return moves
 }
 
-function pushRapidAndPlunge(
-  moves: ToolpathMove[],
-  from: ToolpathPoint | null,
-  toXY: ToolpathPoint,
-  safeZ: number,
-): ToolpathPoint {
-  const start = from ?? { x: toXY.x, y: toXY.y, z: safeZ }
-
-  if (!from || from.x !== toXY.x || from.y !== toXY.y || from.z !== safeZ) {
-    moves.push({
-      kind: 'rapid',
-      from: start,
-      to: { x: toXY.x, y: toXY.y, z: safeZ },
-    })
-  }
-
-  moves.push({
-    kind: 'plunge',
-    from: { x: toXY.x, y: toXY.y, z: safeZ },
-    to: toXY,
-  })
-
-  return toXY
-}
-
-function retractToSafe(moves: ToolpathMove[], from: ToolpathPoint | null, safeZ: number): ToolpathPoint | null {
-  if (!from) {
-    return null
-  }
-
-  const safePoint = { x: from.x, y: from.y, z: safeZ }
-  if (from.z !== safeZ) {
-    moves.push({
-      kind: 'rapid',
-      from,
-      to: safePoint,
-    })
-  }
-  return safePoint
-}
-
 function transitionToCutEntry(
   moves: ToolpathMove[],
   from: ToolpathPoint | null,
   toXY: ToolpathPoint,
   safeZ: number,
   maxLinkDistance: number,
+  rampEntry?: boolean,
+  rampAngle?: number,
+  rampType?: 'zigzag' | 'spiral',
 ): ToolpathPoint {
   // Vertical-only move at same XY — no retraction needed
   if (from && from.x === toXY.x && from.y === toXY.y) {
     if (from.z === toXY.z) {
       return toXY
     }
-    moves.push({
-      kind: toXY.z < from.z ? 'plunge' : 'rapid',
-      from,
-      to: toXY,
-    })
-    return toXY
-  }
-
-  if (from) {
+    if (!rampEntry || toXY.z >= from.z) {
+      moves.push({
+        kind: toXY.z < from.z ? 'plunge' : 'rapid',
+        from,
+        to: toXY,
+      })
+      return toXY
+    }
+    // Ramp entry enabled and descending — ramp from current Z instead of
+    // retracting to safeZ first.  pushRampOrPlunge now starts from the
+    // tool's current position so no retract is needed.
+    return pushRampOrPlunge(moves, from, toXY, safeZ, rampEntry, rampAngle, rampType)
+  } else if (from) {
     const dx = toXY.x - from.x
     const dy = toXY.y - from.y
     const distance = Math.hypot(dx, dy)
@@ -191,8 +159,11 @@ function transitionToCutEntry(
     }
   }
 
+  if (rampEntry && from) {
+    return pushRampOrPlunge(moves, from, toXY, safeZ, rampEntry, rampAngle, rampType)
+  }
   const safePosition = retractToSafe(moves, from, safeZ)
-  return pushRapidAndPlunge(moves, safePosition, toXY, safeZ)
+  return pushRampOrPlunge(moves, safePosition, toXY, safeZ, rampEntry, rampAngle, rampType)
 }
 
 function generateStepLevels(topZ: number, bottomZ: number, stepdown: number): number[] {
@@ -290,13 +261,131 @@ function appendContoursAtLevels(
   levels: number[],
   safeZ: number,
   maxLinkDistance: number,
+  rampEntry?: boolean,
+  rampAngle?: number,
+  rampType?: 'zigzag' | 'spiral',
 ): ToolpathPoint | null {
   let nextPosition = currentPosition
 
   for (const z of levels) {
     for (const contour of contours) {
       const entryPoint = contourStartPoint(contour, z)
-      nextPosition = transitionToCutEntry(moves, nextPosition, entryPoint, safeZ, maxLinkDistance)
+
+      const sameXY = nextPosition
+        && Math.abs(nextPosition.x - entryPoint.x) <= 1e-9
+        && Math.abs(nextPosition.y - entryPoint.y) <= 1e-9
+
+      // Zigzag ramp along the first cut segment: approach to entry at current
+      // Z (or safeZ) without a perpendicular nudge, then ramp diagonally along
+      // the first contour segment instead of nudging away and back.
+      const rampAlongCut = rampEntry
+        && rampType === 'zigzag'
+        && contour.length >= 2
+        && (sameXY || !nextPosition)
+        && z < (nextPosition?.z ?? safeZ)
+
+      if (rampAlongCut) {
+        if (!nextPosition) {
+          // First entry: position at entry point at safeZ
+          const pos: ToolpathPoint = { x: entryPoint.x, y: entryPoint.y, z: safeZ }
+          moves.push({ kind: 'rapid', from: pos, to: pos })
+          nextPosition = pos
+        }
+        // else: already at entry XY at previous Z
+
+        const zDrop = nextPosition.z - z
+        const angleRad = ((rampAngle ?? 5) * Math.PI) / 180
+        const rampLen = zDrop / Math.tan(angleRad)
+
+        // Walk along the contour accumulating segments until we've traveled
+        // half the ramp length, then retrace in reverse.  This works for any
+        // contour shape — circles, rectangles, complex polygons.
+        let perimeter = 0
+        for (let i = 0; i < contour.length - 1; i++) {
+          perimeter += Math.hypot(contour[i + 1].x - contour[i].x, contour[i + 1].y - contour[i].y)
+        }
+
+        const halfTarget = Math.min(rampLen / 2, perimeter / 2)
+
+        if (halfTarget >= 0.5 && perimeter > 1e-9) {
+          // Accumulate waypoints along the contour up to halfTarget
+          const waypoints: ToolpathPoint[] = [{ x: contour[0].x, y: contour[0].y, z: z }]
+          let accumXY = 0
+
+          for (let i = 0; i < contour.length - 1 && accumXY < halfTarget; i++) {
+            const dx = contour[i + 1].x - contour[i].x
+            const dy = contour[i + 1].y - contour[i].y
+            const segLen = Math.hypot(dx, dy)
+            if (segLen < 1e-12) continue
+
+            const remaining = halfTarget - accumXY
+            if (segLen <= remaining) {
+              waypoints.push({ x: contour[i + 1].x, y: contour[i + 1].y, z: z })
+              accumXY += segLen
+            } else {
+              const t = remaining / segLen
+              waypoints.push({
+                x: waypoints[waypoints.length - 1].x + dx * t,
+                y: waypoints[waypoints.length - 1].y + dy * t,
+                z: z,
+              })
+              accumXY = halfTarget
+              break
+            }
+          }
+
+          // Cumulative distance along waypoints for proportional Z descent
+          const cumDist: number[] = [0]
+          for (let i = 1; i < waypoints.length; i++) {
+            cumDist.push(
+              cumDist[i - 1] + Math.hypot(waypoints[i].x - waypoints[i - 1].x, waypoints[i].y - waypoints[i - 1].y),
+            )
+          }
+          const totalDist = cumDist[cumDist.length - 1]
+          const entryZ = nextPosition.z
+
+          // Forward leg: descend from entryZ to midZ along accumulated path
+          for (let i = 0; i < waypoints.length - 1; i++) {
+            const fromFrac = cumDist[i] / totalDist
+            const toFrac = cumDist[i + 1] / totalDist
+            moves.push({
+              kind: 'cut',
+              from: { x: waypoints[i].x, y: waypoints[i].y, z: entryZ - (zDrop / 2) * fromFrac },
+              to: { x: waypoints[i + 1].x, y: waypoints[i + 1].y, z: entryZ - (zDrop / 2) * toFrac },
+            })
+          }
+          nextPosition = { x: waypoints[waypoints.length - 1].x, y: waypoints[waypoints.length - 1].y, z: entryZ - zDrop / 2 }
+
+          // Backward leg: retrace in reverse, descend from midZ to targetZ
+          for (let i = waypoints.length - 1; i > 0; i--) {
+            const fromFrac = cumDist[i] / totalDist
+            const toFrac = cumDist[i - 1] / totalDist
+            moves.push({
+              kind: 'cut',
+              from: { x: waypoints[i].x, y: waypoints[i].y, z: entryZ - zDrop + (zDrop / 2) * fromFrac },
+              to: { x: waypoints[i - 1].x, y: waypoints[i - 1].y, z: entryZ - zDrop + (zDrop / 2) * toFrac },
+            })
+          }
+          nextPosition = { x: waypoints[0].x, y: waypoints[0].y, z: entryZ - zDrop }
+
+          // Full flat contour at target Z
+          const cutMoves = toClosedCutMoves(contour, z)
+          moves.push(...cutMoves)
+          nextPosition = cutMoves.at(-1)?.to ?? nextPosition
+          continue
+        }
+
+        // Fall through: segment too short for a meaningful zigzag — use a
+        // spiral ramp at the entry point instead (maintains rampAngle, no
+        // perpendicular nudge).
+        nextPosition = pushRampOrPlunge(moves, nextPosition, { x: entryPoint.x, y: entryPoint.y, z }, safeZ, true, rampAngle, 'spiral')
+        const cutMoves = toClosedCutMoves(contour, z)
+        moves.push(...cutMoves)
+        nextPosition = cutMoves.at(-1)?.to ?? nextPosition
+        continue
+      }
+
+      nextPosition = transitionToCutEntry(moves, nextPosition, entryPoint, safeZ, maxLinkDistance, rampEntry, rampAngle, rampType)
       const cutMoves = toClosedCutMoves(contour, z)
       moves.push(...cutMoves)
       nextPosition = cutMoves.at(-1)?.to ?? nextPosition
@@ -459,7 +548,7 @@ function generateEdgeRouteToolpathSingle(project: Project, operation: Operation)
           : generateStepLevels(band.topZ, effectiveBottom, operation.stepdown)
 
       for (const z of levels) {
-        currentPosition = cutClosedContours(moves, contours, z, safeZ, maxLinkDistance, currentPosition)
+        currentPosition = cutClosedContours(moves, contours, z, safeZ, maxLinkDistance, currentPosition, false, 'conventional', undefined, operation.rampEntry, operation.rampAngle, operation.rampType)
       }
     }
 
@@ -564,7 +653,7 @@ function generateEdgeRouteToolpathSingle(project: Project, operation: Operation)
             ? [referenceTarget.bottomZ]
             : generateStepLevels(referenceTarget.topZ, referenceTarget.bottomZ, operation.stepdown)
 
-        currentPosition = appendContoursAtLevels(moves, currentPosition, contours, levels, safeZ, maxLinkDistance)
+        currentPosition = appendContoursAtLevels(moves, currentPosition, contours, levels, safeZ, maxLinkDistance, operation.rampEntry, operation.rampAngle, operation.rampType)
       }
     } else {
       warnings.push(
@@ -587,7 +676,7 @@ function generateEdgeRouteToolpathSingle(project: Project, operation: Operation)
           ? [target.bottomZ]
           : generateStepLevels(target.topZ, target.bottomZ, operation.stepdown)
 
-      currentPosition = appendContoursAtLevels(moves, currentPosition, contours, levels, safeZ, maxLinkDistance)
+      currentPosition = appendContoursAtLevels(moves, currentPosition, contours, levels, safeZ, maxLinkDistance, operation.rampEntry, operation.rampAngle, operation.rampType)
     }
   }
 
@@ -605,6 +694,7 @@ function generateEdgeRouteToolpathSingle(project: Project, operation: Operation)
     warnings,
     bounds,
   }
+
   if (allAdditiveObstacles.length > 0) {
     result = clipToolpathResultToObstaclesByLevel(project, result, obstacleMaskForZ)
   }

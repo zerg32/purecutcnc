@@ -747,10 +747,8 @@ export function usePointerGestures(ctx: PointerGesturesCtx): UsePointerGesturesR
       }
       const dragOrigin = dragStartWorldRef.current ?? constrainedPoint
       const lockedPoint = applyLock(constrainedPoint, dragOrigin)
-      // When lock is active, move the snap indicator to the locked position
       if (lockModeRef.current !== 'none' && snap.activeSnapRef.current) {
-        // eslint-disable-next-line react-hooks/immutability
-        snap.activeSnapRef.current = { ...snap.activeSnapRef.current, point: lockedPoint }
+        snap.updateActiveSnap({ ...snap.activeSnapRef.current, point: lockedPoint })
       }
       moveFeatureControl(selection.selectedFeatureId, selection.activeControl, lockedPoint)
       return

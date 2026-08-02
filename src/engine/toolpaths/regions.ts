@@ -354,7 +354,13 @@ function pushSafeTransition(moves: ToolpathMove[], current: ToolpathPoint | null
     return target
   }
 
+  // No prior known position — emit a positioning rapid so the post-processor
+  // has a defined position before the first cut move. Without this, the nudge
+  // rapid (or any initial rapid) that was stripped by the obstacle clipper's
+  // cut-only filter is never restored and the first cut emits G1 without a
+  // preceding G0, causing a diagonal feed move from the tool-change Z.
   const safeTo = { x: target.x, y: target.y, z: safeZ }
+  moves.push({ kind: 'rapid', from: safeTo, to: safeTo })
   if (Math.abs(safeTo.z - target.z) > 1e-9) {
     moves.push({ kind: 'plunge', from: safeTo, to: target })
   }
@@ -401,17 +407,36 @@ export function clipToolpathResultToObstaclesByLevel(
   const safeZ = getOperationSafeZ(project)
   const clippedMoves: ToolpathMove[] = []
   let current: ToolpathPoint | null = null
-  const cutMoves = result.moves.filter((move) => move.kind === 'cut')
 
-  for (const move of cutMoves) {
+  for (const move of result.moves) {
+    // Non-cut moves (rapid, plunge) are transitions — keep them as-is so
+    // the toolpath generator's own transition strategy (same-Z nudge,
+    // ramp entry, direct-cut link, etc.) is preserved.  If we stripped
+    // them and rebuilt via pushSafeTransition we would always retract
+    // to safeZ between cuts, defeating ramp entry and feed-link
+    // optimisations.
+    if (move.kind !== 'cut') {
+      clippedMoves.push(move)
+      current = move.to
+      continue
+    }
+
     const mask = maskForZ(move.to.z)
     if (!mask) {
+      // No obstacle at this Z — keep cut move as-is,
+      // but insert safe transition if our tracking position differs
+      // from the move's expected start (shouldn't happen when the
+      // preceding non-cut moves are kept above, but be defensive).
       current = pushSafeTransition(clippedMoves, current, move.from, safeZ)
       clippedMoves.push(move)
       current = move.to
       continue
     }
 
+    // Obstacle present at this Z level — clip the cut move to avoid it.
+    // The original transition (if any) is replaced by a safe transition
+    // (retract → rapid → plunge) which is necessary to clear the
+    // obstacle geometry.
     const inverseMask: RegionMask = {
       paths: mask.paths,
       hasIncludeRegions: false,

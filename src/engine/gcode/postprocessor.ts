@@ -241,6 +241,11 @@ export function runPostProcessor(input: PostProcessorInput): PostProcessorResult
       }
 
       state.currentToolId = tool.id
+      // Tool ran raw G-code commands (probe, Z retract, etc.) that moved the
+      // machine without the post-processor tracking them.  Reset position so
+      // the first move of this operation emits a full G0 to safe Z before
+      // any cut/plunge, preventing a long feed-rate diagonal through air.
+      state.currentPosition = null
     } else if (toolChanged && !options.emitToolChanges && opIndex > 0) {
       warnings.push({ code: 'postToolChangesDisabled', params: { operation: operation.name, tool: tool.name } })
     }
@@ -530,7 +535,23 @@ export function runPostProcessor(input: PostProcessorInput): PostProcessorResult
             return
           }
 
-          const feed = feedForMove(move.kind, move.feedScale)
+          const feed = (() => {
+            const baseFeed = feedForMove(move.kind, move.feedScale)
+            if (move.kind !== 'cut' || !move.from) {
+              return baseFeed
+            }
+
+            const dz = Math.abs(move.to.z - move.from.z)
+            if (dz <= 1e-6) {
+              return baseFeed
+            }
+
+            const dx = move.to.x - move.from.x
+            const dy = move.to.y - move.from.y
+            const totalDist = Math.hypot(dx, dy, dz)
+            const plungeFeed = operation.plungeFeed || tool.defaultPlungeFeed
+            return Math.min(baseFeed, plungeFeed * totalDist / dz)
+          })()
           emitMotionLine(definition.motion.linearCommand, mPoint, feed)
         })
       }

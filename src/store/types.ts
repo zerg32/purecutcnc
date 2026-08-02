@@ -50,6 +50,7 @@ export interface SelectionState {
   mode: SelectionMode
   selectedFeatureId: string | null
   selectedFeatureIds: string[]
+  selectedTabIds: string[]
   selectedNode: SelectedNode
   hoveredFeatureId: string | null
   sketchEditTool: SketchEditTool | null
@@ -390,6 +391,7 @@ export interface ProjectStore {
   enterTabEdit: (id: string) => void
   moveTabControl: (tabId: string, control: SketchControlRef, point: Point) => void
   updateTab: (id: string, patch: Partial<Tab>) => void
+  updateTabs: (ids: string[], patch: Partial<Tab>) => void
   deleteTab: (id: string) => void
   setAllTabsVisible: (visible: boolean) => void
   startAddTabPlacement: () => void
@@ -429,7 +431,8 @@ export interface ProjectStore {
   selectTabsRoot: () => void
   selectClampsRoot: () => void
   selectFeatureFolder: (id: string) => void
-  selectTab: (id: string) => void
+  selectTab: (id: string, additive?: boolean) => void
+  selectAllTabs: () => void
   selectClamp: (id: string) => void
   hoverFeature: (id: string | null) => void
   enterSketchEdit: (id: string) => void

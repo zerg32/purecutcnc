@@ -27,7 +27,7 @@
  * Run with: npx tsx src/engine/toolpaths/camOperationSmoke.test.ts
  */
 
-import type { Operation, Project, SketchFeature, Tool } from '../../types/project'
+import type { DrillType, Operation, Project, SketchFeature, Tool } from '../../types/project'
 import { circleProfile, defaultTool, newProject, rectProfile } from '../../types/project'
 import { projectWithFeatures } from '../../test/projectFixtures'
 import { runPostProcessor } from '../gcode/postprocessor'
@@ -363,7 +363,10 @@ test('pocket waterline pattern: generates non-empty toolpath + posts', () => {
 
 console.log('\nDrilling drill-type differentiation')
 
-function drillingFixture(drillType: 'simple' | 'peck' | 'dwell' | 'chip_breaking', peckDepth?: number): {
+function drillingFixture(drillType: DrillType, peckDepth?: number, helixOverrides?: {
+  helixDiameter?: number
+  helixPitch?: number
+}): {
   project: Project
   operation: Operation
 } {
@@ -377,6 +380,7 @@ function drillingFixture(drillType: 'simple' | 'peck' | 'dwell' | 'chip_breaking
     stepdown: 2,
     drillType,
     peckDepth,
+    ...helixOverrides,
   })
   return { project, operation: op }
 }
@@ -448,6 +452,50 @@ test('drilling chip_breaking: multiple plunges with small retracts', () => {
 
   const gcode = postToolpath(project, operation, result)
   assert(gcode.length > 0, 'chip_breaking should produce non-empty G-code')
+})
+
+test('drilling helical: G1 helical interpolation path + rapid retract', () => {
+  const { project, operation } = drillingFixture('helical', undefined, { helixDiameter: 6, helixPitch: 2 })
+  const result = generateDrillingToolpath(project, operation)
+  assert(result.moves.length > 0, 'helical drilling should produce moves')
+
+  // Helical path uses G1 cut moves, not a single plunge
+  const cuts = result.moves.filter((m) => m.kind === 'cut')
+  assert(cuts.length >= 32, `helical drilling should have >= 32 cut segments, got ${cuts.length}`)
+
+  // No plunge should be emitted (helical path reaches bottomZ exactly with these params)
+  const plunges = result.moves.filter((m) => m.kind === 'plunge')
+  assert(plunges.length === 0, `helical drilling should have 0 plunges, got ${plunges.length}`)
+
+  // First cut move should start at helix radius from centre (not at centre)
+  const firstCut = cuts[0]
+  const helixRadius = (6 - 3) / 2 // (helixDiameter - tool.diameter) / 2 = desired hole radius
+  const centreX = 20
+  const centreY = 20
+  assert(
+    Math.abs(Math.hypot(firstCut.from.x - centreX, firstCut.from.y - centreY) - helixRadius) < 1e-6,
+    `first cut should start at helix radius ${helixRadius} from centre, got distance ${Math.hypot(firstCut.from.x - centreX, firstCut.from.y - centreY)}`,
+  )
+
+  // Helix should descend Z incrementally across segments
+  const firstZCuts = cuts.slice(0, 5)
+  const zChanges = firstZCuts.map((m) => m.to.z - m.from.z)
+  assert(zChanges.every((dz) => dz < 0), 'helical cuts should descend in Z')
+  assert(zChanges.every((dz) => dz > -1), 'Z drop per segment should be small (< 1 unit)')
+
+  // Last move should be a rapid retract to safe-Z
+  const lastMove = result.moves[result.moves.length - 1]
+  assert(lastMove.kind === 'rapid', 'last move should be a rapid retract')
+  const safeZ = project.stock.thickness + project.meta.operationClearanceZ
+  assert(
+    approx(lastMove.to.z, safeZ),
+    `final retract should go to safeZ=${safeZ}, got ${lastMove.to.z}`,
+  )
+
+  const gcode = postToolpath(project, operation, result)
+  assert(gcode.length > 0, 'helical drilling should produce non-empty G-code')
+  assert(gcode.includes('G1'), 'helical G-code should contain G1 moves')
+  assert(!gcode.includes('G81'), 'helical G-code should not contain G81 canned cycle')
 })
 
 // ---------------------------------------------------------------------

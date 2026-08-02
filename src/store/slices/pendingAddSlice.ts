@@ -116,6 +116,7 @@ export function createPendingAddSlice(
           ...resetFeaturePlacementSelection(s.selection),
           selectedFeatureId: null,
           selectedFeatureIds: [],
+          selectedTabIds: [],
           selectedNode: { type: 'tabs_root' },
         },
       })),
@@ -302,6 +303,7 @@ export function createPendingAddSlice(
               state.project.stock.thickness,
             ),
             visible: true,
+            shape: 'smooth',
           }
 
           set((s) => ({
@@ -315,6 +317,7 @@ export function createPendingAddSlice(
               ...s.selection,
               selectedFeatureId: null,
               selectedFeatureIds: [],
+              selectedTabIds: [id],
               selectedNode: { type: 'tab', tabId: id },
               mode: 'feature',
               activeControl: null,

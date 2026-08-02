@@ -19,6 +19,9 @@ Every top-level design reference except this index declares:
 - `authoritative-for`: the narrow decisions the document owns;
 - `last-verified`: the date it was checked against the repository.
 
+## CAM features
+- [SMOOTH_TABS_HELICAL_RAMP_Plan.md](SMOOTH_TABS_HELICAL_RAMP_Plan.md) — smooth tab gaussian Z profile, helical drilling, and ramp entry strategies.
+
 Superseded plans, completed execution ledgers, and historical analyses belong
 in [`archive/`](archive/). Do not use archived documents as current authority.
 Reviews under [`reviews/`](reviews/) are dated assessments, not product or

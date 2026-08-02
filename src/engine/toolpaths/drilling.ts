@@ -118,6 +118,23 @@ function getCircleCenter(profile: SketchProfile): Point | null {
   return null
 }
 
+function getCircleRadius(profile: SketchProfile): number | null {
+  if (profile.segments.length === 1 && profile.segments[0].type === 'circle') {
+    const seg = profile.segments[0]
+    return Math.hypot(profile.start.x - seg.center.x, profile.start.y - seg.center.y)
+  }
+
+  if (profile.segments.length === 4 && profile.segments.every((s) => s.type === 'arc')) {
+    const first = profile.segments[0]
+    if (first.type === 'arc') {
+      const r = Math.hypot(profile.start.x - first.center.x, profile.start.y - first.center.y)
+      return r
+    }
+  }
+
+  return null
+}
+
 function emitDrillCycle(
   moves: ToolpathMove[],
   current: ToolpathPoint | null,
@@ -186,6 +203,72 @@ function emitDrillCycle(
   return finalRetract
 }
 
+function emitHelicalDrill(
+  moves: ToolpathMove[],
+  current: ToolpathPoint | null,
+  center: Point,
+  _topZ: number,
+  bottomZ: number,
+  safeZ: number,
+  retractZ: number,
+  helixDiameter: number,
+  helixPitch: number,
+  toolDiameter: number,
+): ToolpathPoint {
+  const aboveSafe: ToolpathPoint = { x: center.x, y: center.y, z: safeZ }
+  if (current && (current.x !== aboveSafe.x || current.y !== aboveSafe.y || current.z !== aboveSafe.z)) {
+    moves.push({ kind: 'rapid', from: current, to: aboveSafe })
+  }
+
+  const rapidStart: ToolpathPoint = { x: center.x, y: center.y, z: retractZ }
+  if (retractZ < safeZ) {
+    moves.push({ kind: 'rapid', from: aboveSafe, to: rapidStart })
+  }
+
+  const helixRadius = Math.max(0, (helixDiameter - toolDiameter) / 2)
+  const startAngle = 0
+  const zDrop = retractZ - bottomZ
+  const revolutions = Math.max(1, zDrop / helixPitch)
+  const stepsPerRev = 32
+  const totalSteps = Math.ceil(revolutions * stepsPerRev)
+  const angleStep = (Math.PI * 2) / stepsPerRev
+  const zPerStep = zDrop / totalSteps
+
+  let prev: ToolpathPoint = { x: center.x + helixRadius, y: center.y, z: retractZ }
+
+  const first: ToolpathPoint = {
+    x: center.x + Math.cos(startAngle) * helixRadius,
+    y: center.y + Math.sin(startAngle) * helixRadius,
+    z: retractZ,
+  }
+  if (prev.x !== first.x || prev.y !== first.y) {
+    moves.push({ kind: 'rapid', from: rapidStart, to: first })
+    prev = first
+  }
+
+  for (let i = 1; i <= totalSteps; i += 1) {
+    const angle = startAngle + angleStep * i
+    const z = retractZ - zPerStep * i
+    const next: ToolpathPoint = {
+      x: center.x + Math.cos(angle) * helixRadius,
+      y: center.y + Math.sin(angle) * helixRadius,
+      z: Math.max(z, bottomZ),
+    }
+    moves.push({ kind: 'cut', from: prev, to: next })
+    prev = next
+  }
+
+  if (Math.abs(prev.z - bottomZ) > 1e-9) {
+    const finalPlunge: ToolpathPoint = { x: prev.x, y: prev.y, z: bottomZ }
+    moves.push({ kind: 'cut', from: prev, to: finalPlunge })
+    prev = finalPlunge
+  }
+
+  const retract: ToolpathPoint = { x: center.x, y: center.y, z: safeZ }
+  moves.push({ kind: 'rapid', from: prev, to: retract })
+  return retract
+}
+
 export function generateDrillingToolpath(project: Project, operation: Operation): ToolpathResult {
   if (operation.kind !== 'drilling') {
     return {
@@ -252,6 +335,8 @@ export function generateDrillingToolpath(project: Project, operation: Operation)
     warnings.push({ code: 'drillPeckDepthPositive' })
   }
 
+  const isHelical = drillType === 'helical'
+
   // Precompute and sort targets by nearest-neighbor travel
   const { targets: drillTargets, warnings: precomputeWarnings } = precomputeDrillTargets(targetFeatures, project, regionMask)
   warnings.push(...precomputeWarnings)
@@ -283,6 +368,7 @@ export function generateDrillingToolpath(project: Project, operation: Operation)
   let currentPosition: ToolpathPoint | null = null
 
   const dwellTime = operation.dwellTime ?? 0
+  const helixPitch = operation.helixPitch ?? operation.stepdown
 
   for (const target of sortedTargets) {
     const topZ = target.span.top
@@ -293,17 +379,35 @@ export function generateDrillingToolpath(project: Project, operation: Operation)
       warnings.push({ code: 'cutDepthExceedsToolMaxForFeature', params: { name: target.feature.name, ...depthWarning.params } })
     }
 
-    currentPosition = emitDrillCycle(
-      moves,
-      currentPosition,
-      target.center,
-      topZ,
-      bottomZ,
-      safeZ,
-      retractZ,
-      drillType,
-      peckDepth,
-    )
+    if (isHelical) {
+      const featureRadius = getCircleRadius(target.feature.sketch.profile)
+      const helixDiameter = operation.helixDiameter ?? (featureRadius != null ? featureRadius * 2 : tool.diameter * 2)
+
+      currentPosition = emitHelicalDrill(
+        moves,
+        currentPosition,
+        target.center,
+        topZ,
+        bottomZ,
+        safeZ,
+        retractZ,
+        helixDiameter,
+        helixPitch,
+        tool.diameter,
+      )
+    } else {
+      currentPosition = emitDrillCycle(
+        moves,
+        currentPosition,
+        target.center,
+        topZ,
+        bottomZ,
+        safeZ,
+        retractZ,
+        drillType,
+        peckDepth,
+      )
+    }
 
     drillCycles.push({
       x: target.center.x,

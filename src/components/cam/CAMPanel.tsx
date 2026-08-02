@@ -351,6 +351,8 @@ function drillTypeLabel(type: DrillType): string {
       return camT('cam.drillType.dwell')
     case 'chip_breaking':
       return camT('cam.drillType.chipBreaking')
+    case 'helical':
+      return 'Helical'
   }
 }
 
@@ -710,8 +712,27 @@ export function CAMPanel({
       return
     }
 
-    void ensureBundledLibraryLoaded()
-  }, [ensureBundledLibraryLoaded, libraryError, libraryLoading, libraryTools.length, mode])
+    let cancelled = false
+    queueMicrotask(() => {
+      if (!cancelled) setLibraryLoading(true)
+    })
+    loadBundledToolLibrary()
+      .then((library) => {
+        if (cancelled) return
+        setLibraryTools(library.tools)
+        setLibraryError(null)
+        setLibraryLoading(false)
+      })
+      .catch((error) => {
+        if (cancelled) return
+        setLibraryError(error instanceof Error ? error.message : 'Failed to load tool library.')
+        setLibraryLoading(false)
+      })
+    return () => { cancelled = true }
+    // libraryLoading omitted from deps: the microtask-delayed set would re-trigger
+    // the effect and cancel the inflight load via cancelled flag.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, libraryTools.length, libraryError])
   // Close expanded section modal on Escape.
   useEffect(() => {
     if (!expandedCamSection) return
@@ -1415,6 +1436,47 @@ export function CAMPanel({
                       <span>{camT('cam.operation.roundOutsideCorners')}</span>
                     </label>
                   ) : null}
+                  {(selectedOperation.kind === 'pocket'
+                    || selectedOperation.kind === 'edge_route_inside'
+                    || selectedOperation.kind === 'edge_route_outside') ? (
+                    <>
+                      <label className="properties-check">
+                        <input
+                          type="checkbox"
+                          checked={selectedOperation.rampEntry ?? false}
+                          onChange={(event) => updateOperation(selectedOperation.id, {
+                            rampEntry: event.target.checked,
+                            ...(event.target.checked && !selectedOperation.rampType ? { rampType: 'zigzag' } : {}),
+                          })}
+                        />
+                        <span>Ramp Entry</span>
+                      </label>
+                      {selectedOperation.rampEntry ? (
+                        <>
+                          <label className="properties-field">
+                            <span>Ramp Angle (°)</span>
+                            <DraftNumberInput
+                              value={selectedOperation.rampAngle ?? 5}
+                              min={1}
+                              max={45}
+                              onCommit={(value) => updateOperation(selectedOperation.id, { rampAngle: value })}
+                            />
+                          </label>
+                          <label className="properties-field">
+                            <span>Ramp Type</span>
+                            <Select
+                              value={selectedOperation.rampType ?? 'zigzag'}
+                              options={[
+                                { value: 'zigzag', label: 'Zigzag' },
+                                { value: 'spiral', label: 'Spiral' },
+                              ]}
+                              onChange={(value) => updateOperation(selectedOperation.id, { rampType: value })}
+                            />
+                          </label>
+                        </>
+                      ) : null}
+                    </>
+                  ) : null}
                   {selectedOperation.kind === 'drilling' ? (
                     <>
                       <label className="properties-field">
@@ -1426,6 +1488,7 @@ export function CAMPanel({
                             { value: 'peck', label: drillTypeLabel('peck') },
                             { value: 'dwell', label: drillTypeLabel('dwell') },
                             { value: 'chip_breaking', label: drillTypeLabel('chip_breaking') },
+                            { value: 'helical', label: drillTypeLabel('helical') },
                           ]}
                           onChange={(value) => updateOperation(selectedOperation.id, { drillType: value })}
                         />
@@ -1453,6 +1516,28 @@ export function CAMPanel({
                           />
                           <OperationParameterReference kind="dwell" />
                         </label>
+                      ) : null}
+                      {selectedOperation.drillType === 'helical' ? (
+                        <>
+                          <label className="properties-field">
+                            <span>Helix Diameter</span>
+                            <DraftLengthInput
+                              value={selectedOperation.helixDiameter ?? 0}
+                              units={project.meta.units}
+                              min={0}
+                              onCommit={(value) => updateOperation(selectedOperation.id, { helixDiameter: value })}
+                            />
+                          </label>
+                          <label className="properties-field">
+                            <span>Helix Pitch</span>
+                            <DraftLengthInput
+                              value={selectedOperation.helixPitch ?? 0}
+                              units={project.meta.units}
+                              min={0}
+                              onCommit={(value) => updateOperation(selectedOperation.id, { helixPitch: value })}
+                            />
+                          </label>
+                        </>
                       ) : null}
                       <label className="properties-field">
                         <span>{camT('cam.operation.retractHeight')}</span>

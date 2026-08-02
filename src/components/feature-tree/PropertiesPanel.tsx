@@ -170,48 +170,50 @@ function DraftNumberInput({
  * 30 panel renders both before and after converting them. With it, 0.
  */
 export const PropertiesPanel = memo(function PropertiesPanel() {
-  const project = useProjectStore((s) => s.project)
-  const selection = useProjectStore((s) => s.selection)
-  const addFeatureFolder = useProjectStore((s) => s.addFeatureFolder)
-  const startAddTabPlacement = useProjectStore((s) => s.startAddTabPlacement)
-  const startAddClampPlacement = useProjectStore((s) => s.startAddClampPlacement)
-  const assignFeaturesToFolder = useProjectStore((s) => s.assignFeaturesToFolder)
-  const deleteTab = useProjectStore((s) => s.deleteTab)
-  const deleteClamp = useProjectStore((s) => s.deleteClamp)
-  const deleteFeatureFolder = useProjectStore((s) => s.deleteFeatureFolder)
-  const toggleFolderGrouped = useProjectStore((s) => s.toggleFolderGrouped)
-  const setProjectName = useProjectStore((s) => s.setProjectName)
-  const setShowFeatureInfo = useProjectStore((s) => s.setShowFeatureInfo)
-  const setProjectClearances = useProjectStore((s) => s.setProjectClearances)
-  const setProjectMachine = useProjectStore((s) => s.setProjectMachine)
-  const { library: machineLibrary } = useMachineLibrary()
-  const setOrigin = useProjectStore((s) => s.setOrigin)
-  const startPlaceOrigin = useProjectStore((s) => s.startPlaceOrigin)
-  const loadBackdropImage = useProjectStore((s) => s.loadBackdropImage)
-  const backdropImageLoading = useProjectStore((s) => s.backdropImageLoading)
-  const setBackdropImageLoading = useProjectStore((s) => s.setBackdropImageLoading)
-  const updateBackdrop = useProjectStore((s) => s.updateBackdrop)
-  const deleteBackdrop = useProjectStore((s) => s.deleteBackdrop)
-  const startMoveBackdrop = useProjectStore((s) => s.startMoveBackdrop)
-  const startResizeBackdrop = useProjectStore((s) => s.startResizeBackdrop)
-  const startRotateBackdrop = useProjectStore((s) => s.startRotateBackdrop)
-  const setGrid = useProjectStore((s) => s.setGrid)
-  const setStock = useProjectStore((s) => s.setStock)
-  const setStockSourceFeature = useProjectStore((s) => s.setStockSourceFeature)
-  const updateTab = useProjectStore((s) => s.updateTab)
-  const updateClamp = useProjectStore((s) => s.updateClamp)
-  const updateFeatureFolder = useProjectStore((s) => s.updateFeatureFolder)
-  const updateFeature = useProjectStore((s) => s.updateFeature)
-  const updateFeatures = useProjectStore((s) => s.updateFeatures)
-  const deleteFeature = useProjectStore((s) => s.deleteFeature)
-  const deleteFeatures = useProjectStore((s) => s.deleteFeatures)
-  const enterSketchEdit = useProjectStore((s) => s.enterSketchEdit)
-  const enterStockSketchEdit = useProjectStore((s) => s.enterStockSketchEdit)
-  const enterTabEdit = useProjectStore((s) => s.enterTabEdit)
-  const enterClampEdit = useProjectStore((s) => s.enterClampEdit)
-  const deleteConstraint = useProjectStore((s) => s.deleteConstraint)
-  const makeUnique = useProjectStore((s) => s.makeUnique)
-  const expandTextFeature = useProjectStore((s) => s.expandTextFeature)
+  const {
+    project,
+    selection,
+    addFeatureFolder,
+    startAddTabPlacement,
+    startAddClampPlacement,
+    assignFeaturesToFolder,
+    deleteTab,
+    deleteClamp,
+    deleteFeatureFolder,
+    toggleFolderGrouped,
+    setProjectName,
+    setShowFeatureInfo,
+    setProjectClearances,
+    setProjectMachine,
+    setOrigin,
+    startPlaceOrigin,
+    loadBackdropImage,
+    backdropImageLoading,
+    setBackdropImageLoading,
+    updateBackdrop,
+    deleteBackdrop,
+    startMoveBackdrop,
+    startResizeBackdrop,
+    startRotateBackdrop,
+    setGrid,
+    setStock,
+    setStockSourceFeature,
+    updateTab,
+    updateTabs,
+    updateClamp,
+    updateFeatureFolder,
+    updateFeature,
+    updateFeatures,
+    deleteFeature,
+    deleteFeatures,
+    enterSketchEdit,
+    enterStockSketchEdit,
+    enterTabEdit,
+    enterClampEdit,
+    deleteConstraint,
+    makeUnique,
+    expandTextFeature,
+  } = useProjectStore()
   const features = useMemo(() => resolvedProjectFeatures(project), [project])
   const { t } = useI18n()
   const backdropFileInputRef = useRef<HTMLInputElement>(null)
@@ -242,9 +244,117 @@ export const PropertiesPanel = memo(function PropertiesPanel() {
       ? project.clamps.find((clamp) => clamp.id === selectedNode.clampId) ?? null
       : null
   const selectedTab =
-    selectedNode?.type === 'tab'
-      ? project.tabs.find((tab) => tab.id === selectedNode.tabId) ?? null
+    selection.selectedTabIds.length === 1
+      ? project.tabs.find((tab) => tab.id === selection.selectedTabIds[0]) ?? null
+      : selectedNode?.type === 'tab'
+        ? project.tabs.find((tab) => tab.id === selectedNode.tabId) ?? null
+        : null
+  const allSelectedTabs = project.tabs.filter((tab) => selection.selectedTabIds.includes(tab.id))
+  const allSelectedFeatures = features.filter((feature) => selectedFeatureIds.includes(feature.id))
+  const commonSelectedFolderId =
+    allSelectedFeatures.length > 0 &&
+    allSelectedFeatures.every((feature) => feature.folderId === allSelectedFeatures[0]?.folderId)
+      ? allSelectedFeatures[0]?.folderId ?? null
+      : '__mixed__'
+  // P2-1: all selected features are in a grouped folder — disable the folder dropdown.
+  const allSelectedInGroupedFolder =
+    allSelectedFeatures.length > 0 &&
+    allSelectedFeatures.every((f) => {
+      if (!f.folderId) return false
+      const folder = project.featureFolders.find((ff) => ff.id === f.folderId)
+      return folder?.grouped === true
+    })
+  const commonSelectedOperation =
+    allSelectedFeatures.length > 0 &&
+    allSelectedFeatures.every((feature) => feature.operation === allSelectedFeatures[0]?.operation)
+      ? allSelectedFeatures[0]?.operation ?? null
+      : '__mixed__'
+  const selectedRegionFeatures = allSelectedFeatures.filter((feature) => feature.operation === 'region')
+  const commonSelectedRegionMaskMode =
+    selectedRegionFeatures.length > 0 &&
+    selectedRegionFeatures.every(
+      (feature) => (feature.regionMaskMode ?? 'include') === (selectedRegionFeatures[0]?.regionMaskMode ?? 'include'),
+    )
+      ? selectedRegionFeatures[0]?.regionMaskMode ?? 'include'
+      : '__mixed__'
+  const selectedZEditableFeatures = allSelectedFeatures.filter(isMachinable)
+  const selectedZEditableFeatureIds = selectedZEditableFeatures.map((feature) => feature.id)
+  const selectedClosedEditableFeatures = selectedZEditableFeatures.filter((feature) => feature.sketch.profile.closed)
+  const selectedOpenEditableFeatures = selectedZEditableFeatures.filter((feature) => !feature.sketch.profile.closed)
+  const hasOpenEditableFeatures = selectedOpenEditableFeatures.length > 0
+  const commonSelectedZTop =
+    selectedZEditableFeatures.length > 0 &&
+    typeof selectedZEditableFeatures[0]?.z_top === 'number' &&
+    selectedZEditableFeatures.every((feature) => feature.z_top === selectedZEditableFeatures[0]?.z_top)
+      ? selectedZEditableFeatures[0]?.z_top ?? null
       : null
+  const commonSelectedZBottom =
+    selectedClosedEditableFeatures.length > 0 &&
+    typeof selectedClosedEditableFeatures[0]?.z_bottom === 'number' &&
+    selectedClosedEditableFeatures.every((feature) => feature.z_bottom === selectedClosedEditableFeatures[0]?.z_bottom)
+      ? selectedClosedEditableFeatures[0]?.z_bottom ?? null
+      : null
+  const selectedNumericZBottoms = selectedClosedEditableFeatures
+    .map((feature) => feature.z_bottom)
+    .filter((value): value is number => typeof value === 'number')
+  const selectedNumericZTops = selectedZEditableFeatures
+    .map((feature) => feature.z_top)
+    .filter((value): value is number => typeof value === 'number')
+  const multiEditMinZTop =
+    selectedNumericZBottoms.length === selectedClosedEditableFeatures.length
+      ? Math.max(...selectedNumericZBottoms)
+      : null
+  const multiEditMaxZBottom =
+    selectedNumericZTops.length === selectedZEditableFeatures.length
+      ? Math.min(...selectedNumericZTops)
+      : null
+  // The project embeds only its own snapshot; the picker lists the current
+  // application library, plus the embedded machine when it is not in it.
+  const selectedMachine = getActiveMachineDefinition(project)
+  const machineStatus = machineSnapshotStatus(selectedMachine, machineLibrary)
+  const machineOptions = [
+    { value: '', label: t('featureTree.properties.machine.none') },
+    ...machineLibrary.map((definition) => ({ value: definition.id, label: definition.name })),
+    ...(selectedMachine && !machineLibrary.some((definition) => definition.id === selectedMachine.id)
+      ? [{ value: selectedMachine.id, label: selectedMachine.name }]
+      : []),
+  ]
+  const features = useMemo(() => resolvedProjectFeatures(project), [project])
+  const { t } = useI18n()
+  const backdropFileInputRef = useRef<HTMLInputElement>(null)
+  const expandedPanelCtx = useContext(ExpandedPanelContext)
+  const requestUnitConversion = useRequestUnitConversion()
+  const closeExpanded = useCallback(
+    () => expandedPanelCtx?.closeExpandedPanel(),
+    [expandedPanelCtx],
+  )
+
+  const selectedFeatureIds = selection.selectedFeatureIds
+  const selectedFeatureId = selectedFeatureIds.length === 1 ? selectedFeatureIds[0] : null
+  const units = project.meta.units
+  const minimumLength = convertLength(1, 'mm', units)
+  const minimumPanelSpan = convertLength(20, 'mm', units)
+  const minimumSnap = convertLength(0.0001, 'mm', units)
+
+  const selectedFeature = selectedFeatureId
+    ? features.find((feature) => feature.id === selectedFeatureId) ?? null
+    : null
+  const selectedNode = selection.selectedNode
+  const selectedFolder =
+    selectedNode?.type === 'folder'
+      ? project.featureFolders.find((folder) => folder.id === selectedNode.folderId) ?? null
+      : null
+  const selectedClamp =
+    selectedNode?.type === 'clamp'
+      ? project.clamps.find((clamp) => clamp.id === selectedNode.clampId) ?? null
+      : null
+  const selectedTab =
+    selection.selectedTabIds.length === 1
+      ? project.tabs.find((tab) => tab.id === selection.selectedTabIds[0]) ?? null
+      : selectedNode?.type === 'tab'
+        ? project.tabs.find((tab) => tab.id === selectedNode.tabId) ?? null
+        : null
+  const allSelectedTabs = project.tabs.filter((tab) => selection.selectedTabIds.includes(tab.id))
   const allSelectedFeatures = features.filter((feature) => selectedFeatureIds.includes(feature.id))
   const commonSelectedFolderId =
     allSelectedFeatures.length > 0 &&
@@ -1082,6 +1192,85 @@ export const PropertiesPanel = memo(function PropertiesPanel() {
     )
   }
 
+  if (allSelectedTabs.length > 1) {
+    const commonSize = allSelectedTabs.every((tab) => tab.w === allSelectedTabs[0].w) ? allSelectedTabs[0].w : null
+    const commonZTop = allSelectedTabs.every((tab) => tab.z_top === allSelectedTabs[0].z_top) ? allSelectedTabs[0].z_top : null
+    const commonZBottom = allSelectedTabs.every((tab) => tab.z_bottom === allSelectedTabs[0].z_bottom) ? allSelectedTabs[0].z_bottom : null
+    const commonShape = allSelectedTabs.every((tab) => (tab.shape ?? 'rect') === (allSelectedTabs[0].shape ?? 'rect')) ? (allSelectedTabs[0].shape ?? 'rect') : null
+
+    return (
+      <div className="properties-panel">
+        <div className="properties-group">
+          <label className="properties-field">
+            <span>Selection</span>
+            <DraftTextInput value={`${allSelectedTabs.length} Tabs`} disabled />
+          </label>
+          <label className="properties-field">
+            <span>Size</span>
+            <DraftNumberInput
+              value={commonSize}
+              placeholder="Mixed values"
+              units={units}
+              min={0.1}
+              onCommit={(next) => {
+                for (const tab of allSelectedTabs) {
+                  const cx = tab.x + tab.w / 2
+                  const cy = tab.y + tab.h / 2
+                  updateTab(tab.id, {
+                    w: next, h: next,
+                    x: cx - next / 2,
+                    y: cy - next / 2,
+                  })
+                }
+              }}
+            />
+          </label>
+          <label className="properties-field">
+            <span>Z Top</span>
+            <DraftNumberInput
+              value={commonZTop}
+              placeholder="Mixed values"
+              units={units}
+              min={0}
+              onCommit={(next) => updateTabs(allSelectedTabs.map((t) => t.id), { z_top: next })}
+            />
+          </label>
+          <label className="properties-field">
+            <span>Z Bottom</span>
+            <DraftNumberInput
+              value={commonZBottom}
+              placeholder="Mixed values"
+              units={units}
+              min={0}
+              onCommit={(next) => updateTabs(allSelectedTabs.map((t) => t.id), { z_bottom: next })}
+            />
+          </label>
+          <label className="properties-field">
+            <span>Shape</span>
+            <Select
+              value={commonShape ?? 'rect'}
+              options={[
+                { value: 'rect', label: commonShape === null ? 'Mixed' : 'Rectangle' },
+                { value: 'smooth', label: 'Smooth' },
+              ]}
+              onChange={(value) => updateTabs(allSelectedTabs.map((t) => t.id), { shape: value as 'rect' | 'smooth' })}
+            />
+          </label>
+        </div>
+        <div className="properties-actions">
+          <button className="feat-btn feat-btn--delete" type="button" onClick={() => {
+            for (const tab of allSelectedTabs) {
+              deleteTab(tab.id)
+            }
+            closeExpanded()
+          }}>
+            Delete Selected
+          </button>
+        </div>
+      </div>
+    )
+  }
+
   if (selectedTab) {
     return (
       <div className="properties-panel">
@@ -1114,6 +1303,35 @@ export const PropertiesPanel = memo(function PropertiesPanel() {
               min={0}
               validate={(next) => next <= selectedTab.z_top}
               onCommit={(next) => updateTab(selectedTab.id, { z_bottom: next })}
+            />
+          </label>
+          <label className="properties-field">
+            <span>Size</span>
+            <DraftNumberInput
+              key={`tab-size-${selectedTab.id}-${selectedTab.w}`}
+              value={selectedTab.w}
+              units={units}
+              min={0.1}
+              onCommit={(next) => {
+                const cx = selectedTab.x + selectedTab.w / 2
+                const cy = selectedTab.y + selectedTab.h / 2
+                updateTab(selectedTab.id, {
+                  w: next, h: next,
+                  x: cx - next / 2,
+                  y: cy - next / 2,
+                })
+              }}
+            />
+          </label>
+          <label className="properties-field">
+            <span>Shape</span>
+            <Select
+              value={selectedTab.shape ?? 'rect'}
+              options={[
+                { value: 'rect', label: 'Rectangle' },
+                { value: 'smooth', label: 'Smooth' },
+              ]}
+              onChange={(value) => updateTab(selectedTab.id, { shape: value as 'rect' | 'smooth' })}
             />
           </label>
           <label className="properties-check">

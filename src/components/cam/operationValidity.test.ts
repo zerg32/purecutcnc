@@ -97,6 +97,7 @@ function selectionFor(featureIds: string[]): SelectionState {
     mode: 'feature',
     selectedFeatureId: featureIds[0] ?? null,
     selectedFeatureIds: featureIds,
+    selectedTabIds: [],
     selectedNode: null,
     hoveredFeatureId: null,
     sketchEditTool: null,

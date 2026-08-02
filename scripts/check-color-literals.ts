@@ -34,9 +34,10 @@
  */
 
 import { readdirSync, readFileSync, statSync } from 'node:fs'
-import { join, relative } from 'node:path'
+import { dirname, join, relative } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const ROOT = join(import.meta.dirname, '..')
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const SRC = join(ROOT, 'src')
 
 /** Files permitted to define raw colour values. */

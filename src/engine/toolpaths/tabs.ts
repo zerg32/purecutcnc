@@ -26,6 +26,7 @@ interface PreservedObstacle {
   points: Point[]
   zTop: number
   zBottom: number
+  shape: 'rect' | 'smooth'
 }
 
 function offsetObstaclePoints(points: Point[], delta: number): Point[] {
@@ -63,6 +64,7 @@ function buildTabObstacles(project: Project): PreservedObstacle[] {
     points: sampleProfilePoints(rectProfile(tab.x, tab.y, tab.w, tab.h)),
     zTop: tab.z_top,
     zBottom: tab.z_bottom,
+    shape: tab.shape ?? 'smooth',
   }))
 }
 
@@ -250,6 +252,15 @@ function computeBounds(moves: ToolpathMove[]): ToolpathBounds | null {
   return bounds
 }
 
+const SMOOTH_TAB_SIGMA = 0.18
+const SMOOTH_TAB_SAMPLES = 20
+
+function gaussianTabZ(tLocal: number, baseZ: number, zTop: number): number {
+  const amplitude = zTop - baseZ
+  if (amplitude < 1e-9) return baseZ
+  return baseZ + amplitude * Math.exp(-Math.pow((tLocal - 0.5) / SMOOTH_TAB_SIGMA, 2))
+}
+
 function splitCutMoveAcrossTabsFrom(
   move: ToolpathMove,
   obstacles: PreservedObstacle[],
@@ -274,8 +285,21 @@ function splitCutMoveAcrossTabsFrom(
     return [{ ...move, from: { ...actualFrom } }]
   }
 
+  const extraBreakpoints: number[] = []
+  for (const entry of activeObstacles) {
+    if (entry.obstacle.shape === 'smooth') {
+      const intervalWidth = entry.interval[1] - entry.interval[0]
+      if (intervalWidth > 1e-9) {
+        for (let i = 1; i < SMOOTH_TAB_SAMPLES; i++) {
+          const t = entry.interval[0] + intervalWidth * (i / SMOOTH_TAB_SAMPLES)
+          extraBreakpoints.push(Math.max(0, Math.min(1, Number(t.toFixed(9)))))
+        }
+      }
+    }
+  }
+
   const breakpoints = Array.from(new Set(
-    [0, 1, ...activeObstacles.flatMap((entry) => [entry.interval[0], entry.interval[1]])]
+    [0, 1, ...activeObstacles.flatMap((entry) => [entry.interval[0], entry.interval[1]]), ...extraBreakpoints]
       .map((value) => Math.max(0, Math.min(1, Number(value.toFixed(9))))),
   )).sort((left, right) => left - right)
 
@@ -292,31 +316,49 @@ function splitCutMoveAcrossTabsFrom(
     const midT = (startT + endT) / 2
     const raisedZ = activeObstacles
       .filter((entry) => midT >= entry.interval[0] - 1e-9 && midT <= entry.interval[1] + 1e-9)
-      .reduce<number | null>((max, entry) => (
-        max === null ? entry.obstacle.zTop : Math.max(max, entry.obstacle.zTop)
-      ), null)
+      .reduce<number | null>((max, entry) => {
+        let z: number
+        if (entry.obstacle.shape === 'smooth') {
+          const intervalWidth = entry.interval[1] - entry.interval[0]
+          if (intervalWidth < 1e-9) return max
+          const tLocal = (midT - entry.interval[0]) / intervalWidth
+          z = gaussianTabZ(tLocal, baseZ, entry.obstacle.zTop)
+        } else {
+          z = entry.obstacle.zTop
+        }
+        return max === null ? z : Math.max(max, z)
+      }, null)
 
     const segmentZ = raisedZ ?? baseZ
     const segmentStart = pointAt(move, startT, segmentZ)
     const segmentEnd = pointAt(move, endT, segmentZ)
 
-    if (!pointsEqualXY(current, segmentStart) || Math.abs(current.z - segmentZ) > 1e-9) {
-      const transitionTo = { x: segmentStart.x, y: segmentStart.y, z: segmentZ }
-      result.push({
-        kind: segmentZ > current.z ? 'lead_out' : 'lead_in',
-        from: current,
-        to: transitionTo,
-      })
-      current = transitionTo
-    }
+    const zChanged = Math.abs(current.z - segmentZ) > 1e-9
+    const xyMoved = !pointsEqualXY(current, segmentEnd)
 
-    if (!pointsEqualXY(segmentStart, segmentEnd)) {
-      result.push({
-        kind: 'cut',
-        from: { ...segmentStart },
-        to: { ...segmentEnd },
-      })
-      current = { ...segmentEnd }
+    if (zChanged && xyMoved) {
+      const to = { x: segmentEnd.x, y: segmentEnd.y, z: segmentZ }
+      result.push({ kind: 'cut', from: { ...current }, to })
+      current = to
+    } else {
+      if (!pointsEqualXY(current, segmentStart) || zChanged) {
+        const transitionTo = { x: segmentStart.x, y: segmentStart.y, z: segmentZ }
+        result.push({
+          kind: segmentZ > current.z ? 'lead_out' : 'lead_in',
+          from: current,
+          to: transitionTo,
+        })
+        current = transitionTo
+      }
+
+      if (!pointsEqualXY(segmentStart, segmentEnd)) {
+        result.push({
+          kind: 'cut',
+          from: { ...segmentStart },
+          to: { ...segmentEnd },
+        })
+        current = { ...segmentEnd }
+      }
     }
   }
 
