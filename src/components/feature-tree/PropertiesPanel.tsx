@@ -1116,6 +1116,17 @@ export const PropertiesPanel = memo(function PropertiesPanel() {
               onCommit={(next) => updateTab(selectedTab.id, { z_bottom: next })}
             />
           </label>
+          <label className="properties-field">
+            <span>Shape</span>
+            <Select
+              value={selectedTab.shape ?? 'rect'}
+              options={[
+                { value: 'rect', label: 'Rectangle' },
+                { value: 'smooth', label: 'Smooth' },
+              ]}
+              onChange={(value) => updateTab(selectedTab.id, { shape: value as 'rect' | 'smooth' })}
+            />
+          </label>
           <label className="properties-check">
             <input
               type="checkbox"

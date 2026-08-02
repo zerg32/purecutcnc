@@ -33,17 +33,16 @@ export type TabsSlice = Pick<
   | 'autoPlaceTabsForOperation'
 >
 
-function nextAutoTabName(baseName: string, tabs: Tab[]): string {
-  const preferred = `${baseName} Tab`
-  if (!tabs.some((tab) => tab.name === preferred)) {
-    return preferred
+function nextTabName(tabs: Tab[]): string {
+  if (!tabs.some((tab) => tab.name === 'Tab 1')) {
+    return 'Tab 1'
   }
 
   let index = 2
-  while (tabs.some((tab) => tab.name === `${preferred} ${index}`)) {
+  while (tabs.some((tab) => tab.name === `Tab ${index}`)) {
     index += 1
   }
-  return `${preferred} ${index}`
+  return `Tab ${index}`
 }
 
 function defaultAutoTabZTop(project: Project): number {
@@ -66,12 +65,12 @@ function resolveToolDiameterInProjectUnits(project: Project, operation: Operatio
 }
 
 function buildAutoTabsForFeature(
-  feature: SketchFeature,
+  _feature: SketchFeature,
   project: Project,
   operation: Operation,
   existingTabs: Tab[],
 ): Tab[] {
-  const bounds = getProfileBounds(feature.sketch.profile)
+  const bounds = getProfileBounds(_feature.sketch.profile)
   const width = Math.max(bounds.maxX - bounds.minX, convertLength(0.1, 'mm', project.meta.units))
   const height = Math.max(bounds.maxY - bounds.minY, convertLength(0.1, 'mm', project.meta.units))
   const cx = bounds.minX + width / 2
@@ -113,7 +112,7 @@ function buildAutoTabsForFeature(
         },
         'tb',
       ),
-      name: nextAutoTabName(feature.name, [...existingTabs, ...created]),
+      name: nextTabName([...existingTabs, ...created]),
       x: entry.x,
       y: entry.y,
       w: entry.w,
@@ -121,6 +120,7 @@ function buildAutoTabsForFeature(
       z_top: zTop,
       z_bottom: zBottom,
       visible: true,
+      shape: 'smooth',
     })
   }
 

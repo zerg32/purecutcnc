@@ -541,6 +541,7 @@ export interface Tab {
   z_top: number
   z_bottom: number
   visible: boolean
+  shape?: 'rect' | 'smooth'
 }
 
 // ============================================================
