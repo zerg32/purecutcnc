@@ -1879,8 +1879,8 @@ function testTrochoidalEdgeEntrySafetyWarnings(): void {
 function testTrochoidalEdgeBudgetIsSharedAcrossTargets(): void {
   console.log('Testing trochoidal move budget is shared across targets...')
   const tool = makeFlatEndmill('t1', 4)
-  const first = makePocketFeature('first', 0, 0, 160, 160, 0, -2)
-  const second = makePocketFeature('second', 220, 0, 160, 160, 0, -2)
+  const first = makePocketFeature('first', 0, 0, 1600, 1600, 0, -2)
+  const second = makePocketFeature('second', 2200, 0, 1600, 1600, 0, -2)
   const project = baseProject([tool], [first, second])
   const result = generateEdgeRouteToolpath(project, makePocketOp({
     kind: 'edge_route_inside',

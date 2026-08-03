@@ -17,7 +17,7 @@
 import type { Point } from '../../types/project'
 
 const MIN_STEPS_PER_LOOP = 36
-export const TROCHOIDAL_OPERATION_POINT_BUDGET = 50_000
+export const TROCHOIDAL_OPERATION_POINT_BUDGET = 500_000
 const GEOMETRY_EPSILON = 1e-9
 
 export type TrochoidalContourError = 'invalid-guide' | 'move-budget'

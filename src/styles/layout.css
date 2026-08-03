@@ -3253,6 +3253,17 @@
   gap: 6px;
 }
 
+.cam-toolpath-warning-banner {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--danger-text) 55%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--danger-text) 12%, var(--surface-panel));
+  color: var(--danger-text);
+  font-size: 12px;
+}
+
 .cam-field-note {
   padding: 8px 10px;
   border-radius: 8px;

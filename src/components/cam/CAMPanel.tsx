@@ -1109,6 +1109,18 @@ export function CAMPanel({
     return (
       <div key={`${selectedOperation.id}-${selectedOperation.toolRef ?? ''}`} className="properties-panel cam-tool-properties cam-operation-properties">
                     <div className="properties-group">
+                  {toolpathWarnings && toolpathWarnings.length > 0 ? (
+                    <div className="cam-toolpath-warning-banner" role="alert">
+                      <strong>{camT('cam.operation.toolpathWarnings')}</strong>
+                      <div className="cam-field-note-list">
+                        {toolpathWarnings.map((warning, index) => (
+                          <div key={`${selectedOperation.id}-warning-${index}`} className="cam-field-note">
+                            {toolpathWarningText(warning)}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
                   <label className="properties-field">
                     <span>{camT('cam.operation.name')}</span>
                     <DraftTextInput value={selectedOperation.name} onCommit={(value) => updateOperation(selectedOperation.id, { name: value })} />
@@ -1232,18 +1244,6 @@ export function CAMPanel({
                       >
                         {camT('cam.operation.autoPlaceTabs')}
                       </button>
-                    </div>
-                  ) : null}
-                  {toolpathWarnings && toolpathWarnings.length > 0 ? (
-                    <div className="properties-field">
-                      <span>{camT('cam.operation.toolpathWarnings')}</span>
-                      <div className="cam-field-note-list">
-                        {toolpathWarnings.map((warning, index) => (
-                          <div key={`${selectedOperation.id}-warning-${index}`} className="cam-field-note">
-                            {toolpathWarningText(warning)}
-                          </div>
-                        ))}
-                      </div>
                     </div>
                   ) : null}
                   <label className="properties-field">
