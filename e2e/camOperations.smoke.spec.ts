@@ -29,6 +29,9 @@ interface OperationSnapshot {
   entryStrategy?: unknown
   entryRampAngle?: unknown
   entryHelixDiameterPercent?: unknown
+  edgeStrategy?: unknown
+  trochoidalCutWidth?: unknown
+  stepover?: unknown
   target?: {
     source?: unknown
     featureIds?: unknown
@@ -84,11 +87,28 @@ test.describe('CAM operation browser smoke', () => {
     await app.page.getByRole('button', { name: 'Advanced', exact: true }).click()
     await expect(app.page.getByText('Entry', { exact: true })).toHaveCount(0)
 
+    const edgeStrategyField = app.page.getByText('Strategy', { exact: true }).locator('..')
+    await expect(edgeStrategyField.locator('.ui-select__label')).toHaveText('Contour')
+    await edgeStrategyField.locator('.ui-select__trigger').click()
+    await app.page.getByRole('option', { name: 'Trochoidal', exact: true }).click()
+
+    await expect(app.page.getByText('Trochoidal Cut Width', { exact: true })).toBeVisible()
+    await expect(app.page.getByText('Advance / Loop (tool ratio)', { exact: true })).toBeVisible()
+    await expect(app.page.getByText('Physical advance per loop:', { exact: false })).toBeVisible()
+    await expect(app.page.getByText('Entry', { exact: true })).toBeVisible()
+    await expect(app.page.getByText('Entry Strategy', { exact: true }).locator('..').locator('.ui-select__label')).toHaveText('Helix')
+    await expect(app.page.getByRole('button', { name: 'Create rest operation', exact: true })).toBeDisabled()
+    await expect(app.page.getByRole('button', { name: 'Auto place tabs', exact: true })).toBeDisabled()
+
     const project = await getProject(app.page)
     const operations = project.operations as OperationSnapshot[]
     expect(operations).toHaveLength(1)
     expect(operations[0].kind).toBe('edge_route_outside')
     expect(operations[0].pass).toBe('rough')
+    expect(operations[0].edgeStrategy).toBe('trochoidal')
+    expect(Number(operations[0].trochoidalCutWidth)).toBeGreaterThan(0)
+    expect(operations[0].stepover).toBe(0.1)
+    expect(operations[0].entryStrategy).toBe('helix')
     expect(operations[0].target?.source).toBe('features')
     expect(operations[0].target?.featureIds).toEqual(['f-machinable-add'])
   })

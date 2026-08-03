@@ -1656,6 +1656,282 @@ function testEdgeOutsideCombinedRoundCorners() {
   console.log('combined edge_route_outside round outside corners: PASSED')
 }
 
+function testTrochoidalEdgeInsideStaysOffRetainedWall() {
+  console.log('Testing trochoidal edge inside stays off retained wall...')
+  const tool = makeFlatEndmill('t1', 4)
+  const feature = makePocketFeature('slot', 0, 0, 40, 30, 0, -4)
+  const project = baseProject([tool], [feature])
+  const operation = makePocketOp({
+    kind: 'edge_route_inside',
+    target: { source: 'features', featureIds: ['slot'] },
+    toolRef: 't1',
+    edgeStrategy: 'trochoidal',
+    trochoidalCutWidth: 8,
+    stepover: 0.2,
+    entryStrategy: 'helix',
+  })
+
+  const result = generateEdgeRouteToolpath(project, operation)
+  const cuts = cutMoves(result.moves)
+  assert(cuts.length > 500, `expected dense trochoidal moves, got ${cuts.length}`)
+  assert(!result.warnings.some((warning) => warning.code.startsWith('edgeTrochoidal')), 'expected valid trochoidal guide')
+  for (const move of cuts) {
+    for (const t of [0, 0.25, 0.5, 0.75, 1]) {
+      const point = {
+        x: move.from.x + (move.to.x - move.from.x) * t,
+        y: move.from.y + (move.to.y - move.from.y) * t,
+      }
+      assert(point.x >= 2 - 1e-6 && point.x <= 38 + 1e-6, `inside tool center violates X wall clearance at ${point.x}`)
+      assert(point.y >= 2 - 1e-6 && point.y <= 28 + 1e-6, `inside tool center violates Y wall clearance at ${point.y}`)
+    }
+  }
+  const cutLevels = [...new Set(cuts.map((move) => move.to.z))].filter((z) => z < 0).sort((a, b) => b - a)
+  assert(cutLevels.some((z) => approx(z, -2)) && cutLevels.some((z) => approx(z, -4)), 'expected both rough depth levels')
+  console.log('trochoidal edge inside wall clearance: PASSED')
+}
+
+function distanceOutsideRectangle(point: { x: number; y: number }, width: number, height: number): number {
+  const dx = Math.max(0, -point.x, point.x - width)
+  const dy = Math.max(0, -point.y, point.y - height)
+  return Math.hypot(dx, dy)
+}
+
+function testTrochoidalEdgeOutsideStaysOffRetainedWall() {
+  console.log('Testing trochoidal edge outside stays off retained wall...')
+  const tool = makeFlatEndmill('t1', 4)
+  const feature = makeAddFeature('part', 0, 0, 30, 20, 0, -2)
+  const project = baseProject([tool], [feature])
+  const operation = makePocketOp({
+    kind: 'edge_route_outside',
+    target: { source: 'features', featureIds: ['part'] },
+    toolRef: 't1',
+    edgeStrategy: 'trochoidal',
+    trochoidalCutWidth: 8,
+    stepover: 0.2,
+    entryStrategy: 'helix',
+  })
+
+  const result = generateEdgeRouteToolpath(project, operation)
+  const cuts = cutMoves(result.moves)
+  assert(cuts.length > 500, `expected dense outside trochoidal moves, got ${cuts.length}`)
+  for (const move of cuts) {
+    for (const t of [0, 0.25, 0.5, 0.75, 1]) {
+      const point = {
+        x: move.from.x + (move.to.x - move.from.x) * t,
+        y: move.from.y + (move.to.y - move.from.y) * t,
+      }
+      assert(
+        distanceOutsideRectangle(point, 30, 20) >= tool.diameter / 2 - 0.03,
+        `outside tool center approaches retained wall at (${point.x}, ${point.y})`,
+      )
+    }
+  }
+  console.log('trochoidal edge outside wall clearance: PASSED')
+}
+
+function testTrochoidalEdgeFollowsCircularBoundary(): void {
+  console.log('Testing trochoidal edge follows a circular boundary...')
+  const tool = makeFlatEndmill('t1', 4)
+  const feature = makeAddFeature('round', 0, 0, 30, 30, 0, -2)
+  feature.kind = 'circle'
+  feature.sketch.profile = circleProfile(15, 15, 15)
+  const project = baseProject([tool], [feature])
+  const result = generateEdgeRouteToolpath(project, makePocketOp({
+    kind: 'edge_route_outside',
+    target: { source: 'features', featureIds: ['round'] },
+    toolRef: 't1',
+    edgeStrategy: 'trochoidal',
+    trochoidalCutWidth: 8,
+    stepover: 0.2,
+    entryStrategy: 'helix',
+  }))
+
+  assert(result.moves.length > 500, `expected circular trochoidal motion, got ${result.moves.length}`)
+  assert(!result.warnings.some((warning) => hasFatalTrochoidalTestWarning(warning.code)), 'circular guide should pass containment')
+  console.log('trochoidal circular boundary: PASSED')
+}
+
+function hasFatalTrochoidalTestWarning(code: string): boolean {
+  return code === 'edgeTrochoidalInvalidGuide'
+    || code === 'edgeTrochoidalMoveBudget'
+    || code === 'edgeTrochoidalEntryBudget'
+    || code === 'edgeTrochoidalObstacleUnsupported'
+}
+
+function testTrochoidalEdgeValidationAndLegacyParity() {
+  console.log('Testing trochoidal edge validation and contour parity...')
+  const tool = makeFlatEndmill('t1', 4)
+  const feature = makePocketFeature('slot', 0, 0, 20, 20, 0, -2)
+  const project = baseProject([tool], [feature])
+  const base = makePocketOp({
+    kind: 'edge_route_inside',
+    target: { source: 'features', featureIds: ['slot'] },
+    toolRef: 't1',
+  })
+
+  const legacy = generateEdgeRouteToolpath(project, base)
+  const explicitContour = generateEdgeRouteToolpath(project, { ...base, edgeStrategy: 'contour' })
+  assert(movesEqual(legacy.moves, explicitContour.moves), 'explicit contour must preserve legacy move stream')
+
+  const finishTrochoidal = generateEdgeRouteToolpath(project, {
+    ...base,
+    pass: 'finish',
+    edgeStrategy: 'trochoidal',
+    trochoidalCutWidth: 8,
+  })
+  const finishContour = generateEdgeRouteToolpath(project, { ...base, pass: 'finish', edgeStrategy: 'contour' })
+  assert(movesEqual(finishTrochoidal.moves, finishContour.moves), 'finish pass must always use contour strategy')
+
+  const tooNarrow = generateEdgeRouteToolpath(project, {
+    ...base,
+    edgeStrategy: 'trochoidal',
+    trochoidalCutWidth: 4,
+  })
+  assert(tooNarrow.moves.length === 0, 'invalid cut width must produce no motion')
+  assert(tooNarrow.warnings.some((warning) => warning.code === 'edgeTrochoidalWidthTooSmall'), 'expected cut-width warning')
+  console.log('trochoidal edge validation and contour parity: PASSED')
+}
+
+function testTrochoidalEdgeUnsupportedClippingFailsClosed() {
+  console.log('Testing trochoidal edge unsupported clipping fails closed...')
+  const tool = makeFlatEndmill('t1', 4)
+  const inside = makePocketFeature('inside', 0, 0, 30, 20, 0, -2)
+  const region = makeRegionFeature('region', 0, 0, 15, 20)
+  const regionProject = baseProject([tool], [inside, region])
+  const baseInside = makePocketOp({
+    kind: 'edge_route_inside',
+    target: { source: 'features', featureIds: ['inside'] },
+    toolRef: 't1',
+    edgeStrategy: 'trochoidal',
+    trochoidalCutWidth: 8,
+    stepover: 0.2,
+    entryStrategy: 'helix',
+  })
+
+  const regionResult = generateEdgeRouteToolpath(regionProject, {
+    ...baseInside,
+    target: { source: 'features', featureIds: ['inside', 'region'] },
+  })
+  assert(regionResult.moves.length === 0, 'Region-filtered trochoidal path must emit no motion')
+  assert(regionResult.warnings.some((warning) => warning.code === 'edgeTrochoidalRegionUnsupported'), 'expected Region warning')
+
+  regionProject.tabs = [{
+    id: 'tab1', name: 'Tab 1', x: 0, y: 0, w: 5, h: 5, z_top: -1, z_bottom: -2, visible: true,
+  }]
+  const tabResult = generateEdgeRouteToolpath(regionProject, baseInside)
+  assert(tabResult.moves.length === 0, 'trochoidal path with tabs must emit no motion')
+  assert(tabResult.warnings.some((warning) => warning.code === 'tabsTrochoidalUnsupported'), 'expected tab warning')
+
+  const outsideA = makeAddFeature('a', 0, 0, 20, 20, 0, -2)
+  const outsideB = makeAddFeature('b', 22, 0, 20, 20, 0, -2)
+  const obstacleProject = baseProject([tool], [outsideA, outsideB])
+  const obstacleResult = generateEdgeRouteToolpath(obstacleProject, makePocketOp({
+    kind: 'edge_route_outside',
+    target: { source: 'features', featureIds: ['a'] },
+    toolRef: 't1',
+    edgeStrategy: 'trochoidal',
+    trochoidalCutWidth: 8,
+    stepover: 0.2,
+    entryStrategy: 'helix',
+  }))
+  assert(obstacleResult.moves.length === 0, 'obstacle-clipped trochoidal path must emit no motion')
+  assert(obstacleResult.warnings.some((warning) => warning.code === 'edgeTrochoidalObstacleUnsupported'), 'expected obstacle warning')
+  console.log('trochoidal edge unsupported clipping fails closed: PASSED')
+}
+
+function testTrochoidalEdgeEntrySafetyWarnings(): void {
+  console.log('Testing trochoidal edge entry safety warnings...')
+  const tool = makeFlatEndmill('t1', 4)
+  const feature = makePocketFeature('inside', 0, 0, 30, 20, 0, -2)
+  const project = baseProject([tool], [feature])
+  const base = makePocketOp({
+    kind: 'edge_route_inside',
+    target: { source: 'features', featureIds: ['inside'] },
+    toolRef: 't1',
+    edgeStrategy: 'trochoidal',
+    trochoidalCutWidth: 8,
+    stepover: 0.2,
+  })
+
+  const plunge = generateEdgeRouteToolpath(project, base)
+  assert(plunge.moves.length > 0, 'explicit plunge remains available')
+  assert(plunge.warnings.some((warning) => warning.code === 'edgeTrochoidalPlungeEntry'), 'plunge must carry a center-cutting warning')
+
+  const excessiveEntry = generateEdgeRouteToolpath(project, {
+    ...base,
+    entryStrategy: 'helix',
+    entryRampAngle: 0.1,
+    trochoidalCutWidth: 4.0001,
+  })
+  assert(excessiveEntry.moves.length === 0, 'entry over budget must emit no motion')
+  assert(excessiveEntry.warnings.some((warning) => warning.code === 'edgeTrochoidalEntryBudget'), 'expected entry-budget warning')
+
+  const excessiveLevels = generateEdgeRouteToolpath(project, {
+    ...base,
+    entryStrategy: 'helix',
+    stepdown: 0.001,
+  })
+  assert(excessiveLevels.moves.length === 0, 'excessive depth levels must emit no motion')
+  assert(excessiveLevels.warnings.some((warning) => warning.code === 'edgeTrochoidalMoveBudget'), 'expected level-budget warning')
+  console.log('trochoidal edge entry safety warnings: PASSED')
+}
+
+function testTrochoidalEdgeBudgetIsSharedAcrossTargets(): void {
+  console.log('Testing trochoidal move budget is shared across targets...')
+  const tool = makeFlatEndmill('t1', 4)
+  const first = makePocketFeature('first', 0, 0, 160, 160, 0, -2)
+  const second = makePocketFeature('second', 220, 0, 160, 160, 0, -2)
+  const project = baseProject([tool], [first, second])
+  const result = generateEdgeRouteToolpath(project, makePocketOp({
+    kind: 'edge_route_inside',
+    target: { source: 'features', featureIds: ['first', 'second'] },
+    toolRef: 't1',
+    edgeStrategy: 'trochoidal',
+    trochoidalCutWidth: 8,
+    stepover: 0.2,
+    stepdown: 2,
+    entryStrategy: 'helix',
+  }))
+
+  assert(result.moves.length === 0, 'operation-wide budget overflow must emit no motion')
+  assert(result.warnings.some((warning) => warning.code === 'edgeTrochoidalMoveBudget'), 'expected shared move-budget warning')
+  console.log('trochoidal shared move budget: PASSED')
+}
+
+function testTrochoidalEdgeMultiTargetFailureIsAtomic(): void {
+  console.log('Testing trochoidal multi-target guide failure is atomic...')
+  const tool = makeFlatEndmill('t1', 4)
+  const valid = makePocketFeature('valid', 0, 0, 30, 20, 0, -2)
+  const collapsed = makePocketFeature('collapsed', 50, 0, 5, 5, 0, -2)
+  const project = baseProject([tool], [valid, collapsed])
+  const result = generateEdgeRouteToolpath(project, makePocketOp({
+    kind: 'edge_route_inside',
+    target: { source: 'features', featureIds: ['valid', 'collapsed'] },
+    toolRef: 't1',
+    edgeStrategy: 'trochoidal',
+    trochoidalCutWidth: 8,
+    stepover: 0.2,
+    entryStrategy: 'helix',
+    machiningOrder: 'feature_first',
+  }))
+
+  assert(result.moves.length === 0, 'one collapsed target must suppress all operation motion')
+  assert(result.warnings.some((warning) => warning.code === 'edgeTrochoidalInvalidGuide'), 'expected invalid-guide warning')
+
+  const missingTarget = generateEdgeRouteToolpath(project, makePocketOp({
+    kind: 'edge_route_inside',
+    target: { source: 'features', featureIds: ['valid', 'missing'] },
+    toolRef: 't1',
+    edgeStrategy: 'trochoidal',
+    trochoidalCutWidth: 8,
+    stepover: 0.2,
+    entryStrategy: 'helix',
+  }))
+  assert(missingTarget.moves.length === 0, 'one missing target must suppress all operation motion')
+  assert(missingTarget.warnings.some((warning) => warning.code === 'targetsMissingOrWrongRole'), 'expected missing-target warning')
+  console.log('trochoidal multi-target guide failure is atomic: PASSED')
+}
+
 // ---------------------------------------------------------------------------
 // V-carve: feature_first emits independent per-feature toolpath
 // ---------------------------------------------------------------------------
@@ -2884,6 +3160,14 @@ try {
   testEdgeOutsideClipsAroundNonSelectedAddFeatures()
   testEdgeOutsideRoundCornersOptIn()
   testEdgeOutsideCombinedRoundCorners()
+  testTrochoidalEdgeInsideStaysOffRetainedWall()
+  testTrochoidalEdgeOutsideStaysOffRetainedWall()
+  testTrochoidalEdgeFollowsCircularBoundary()
+  testTrochoidalEdgeValidationAndLegacyParity()
+  testTrochoidalEdgeUnsupportedClippingFailsClosed()
+  testTrochoidalEdgeEntrySafetyWarnings()
+  testTrochoidalEdgeBudgetIsSharedAcrossTargets()
+  testTrochoidalEdgeMultiTargetFailureIsAtomic()
   testVCarveVisitsNearestResolvedRegionFirst()
   testVCarveDisjointFeaturesAreMachiningOrderInvariant()
   testSurfaceCleanMultiTargetProtectsTallerTarget()

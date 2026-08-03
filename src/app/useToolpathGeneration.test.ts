@@ -140,6 +140,8 @@ function testOperationComputationEquals() {
     ['rpm', { rpm: 19000 }],
     ['pocketPattern', { pocketPattern: 'parallel' }],
     ['pocketAngle', { pocketAngle: 45 }],
+    ['edgeStrategy', { edgeStrategy: 'trochoidal' }],
+    ['trochoidalCutWidth', { trochoidalCutWidth: 6 }],
     ['entryStrategy', { entryStrategy: 'helix' }],
     ['entryRampAngle', { entryRampAngle: 8 }],
     ['entryHelixDiameterPercent', { entryHelixDiameterPercent: 60 }],

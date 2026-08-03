@@ -207,6 +207,26 @@ function testEdgeRestCreatesGeneratedRegionFilters(): void {
   )
 }
 
+function testTrochoidalEdgeRestIsRejected(): void {
+  console.log('Testing trochoidal edge rest operation is rejected...')
+  const { project, operation } = makeProject()
+  project.operations = [{
+    ...operation,
+    edgeStrategy: 'trochoidal',
+    trochoidalCutWidth: 10,
+  }]
+  useProjectStore.setState({
+    project,
+    history: { past: [], future: [], transactionStart: null },
+  })
+
+  const result = useProjectStore.getState().createRestOperation(operation.id)
+  assert(result.operationId === null, 'trochoidal source must not create a rest operation')
+  assert(result.regionIds.length === 0, 'trochoidal source must not create rest regions')
+  assert(result.warnings.some((warning) => warning.code === 'restTrochoidalUnsupported'), 'expected trochoidal rest warning')
+}
+
 testEdgeRestCreatesGeneratedRegionFilters()
+testTrochoidalEdgeRestIsRejected()
 
 console.log('createRestOperation tests passed')

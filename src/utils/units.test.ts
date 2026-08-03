@@ -177,6 +177,8 @@ const anchoredAngleDim: DimensionAnnotation = {
     stockToLeaveAxial: 5.08,
     carveDepth: 25.4,
     maxCarveDepth: 50.8,
+    edgeStrategy: 'trochoidal' as const,
+    trochoidalCutWidth: 25.4,
     peckDepth: 12.7,
     retractHeight: 76.2,
     waterlineMicroStepover: 2.54,
@@ -338,6 +340,8 @@ const anchoredAngleDim: DimensionAnnotation = {
   assert(inchConstraint.anchor_point !== undefined && approx(inchConstraint.anchor_point.x, 1), 'local constraint anchor point converts')
   assert(approx(inch.operations[0].carveDepth, 1), 'operation carve depth converts')
   assert(approx(inch.operations[0].maxCarveDepth, 2), 'operation max carve depth converts')
+  assert(inch.operations[0].edgeStrategy === 'trochoidal', 'dimensionless edge strategy survives conversion')
+  assert(approx(inch.operations[0].trochoidalCutWidth ?? 0, 1), 'trochoidal cut width converts')
   assert(approx(inch.operations[0].peckDepth ?? 0, 0.5), 'operation peck depth converts')
   assert(approx(inch.operations[0].retractHeight ?? 0, 3), 'operation retract height converts')
   assert(approx(inch.tabs[0].x, 1) && approx(inch.tabs[0].w, 0.5), 'tab lengths convert')

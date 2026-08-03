@@ -134,6 +134,14 @@ export const camEn = {
   'cam.operation.stepdown': 'Stepdown',
   'cam.operation.contourSpacing': 'Contour Spacing',
   'cam.operation.stepoverRatio': 'Stepover Ratio',
+  'cam.operation.edgeStrategy': 'Strategy',
+  'cam.operation.edgeStrategyContour': 'Contour',
+  'cam.operation.edgeStrategyTrochoidal': 'Trochoidal',
+  'cam.operation.trochoidalCutWidth': 'Trochoidal Cut Width',
+  'cam.operation.trochoidalAdvance': 'Advance / Loop (tool ratio)',
+  'cam.operation.trochoidalAdvanceDistance': 'Physical advance per loop: {distance}',
+  'cam.operation.restTrochoidalUnavailable': 'Rest machining from a trochoidal swept channel is not supported yet.',
+  'cam.operation.tabsTrochoidalUnavailable': 'Automatic tab placement is disabled until trochoidal tab clearance is validated.',
   'cam.operation.advanced': 'Advanced',
   'cam.operation.entry': 'Entry',
   'cam.operation.entryStrategy': 'Entry Strategy',
@@ -386,7 +394,7 @@ export const camEn = {
     'Edge Route Inside follows the inside edge of one or more closed subtract profiles, offset inward by the tool radius. Useful for slots, hollows, and interior profile cuts where the tool must stay inside the boundary.',
   'cam.opDesc.edgeRouteInside.keyPoint.0': 'Requires one or more closed subtract profiles',
   'cam.opDesc.edgeRouteInside.keyPoint.1': 'Tool path is offset inward by the tool radius',
-  'cam.opDesc.edgeRouteInside.keyPoint.2': 'Supports rough and finish passes',
+  'cam.opDesc.edgeRouteInside.keyPoint.2': 'Rough passes support contour or trochoidal clearing; finish passes follow the contour',
   'cam.opDesc.edgeRouteInside.keyPoint.3': 'Optional closed regions act as XY filters',
 
   // Edge route outside
@@ -395,7 +403,7 @@ export const camEn = {
     'Edge Route Outside follows the outside edge of one or more closed add or model profiles, offset outward by the tool radius. Used to profile parts out of stock, leave clean shoulders around raised features, or cut perimeters.',
   'cam.opDesc.edgeRouteOutside.keyPoint.0': 'Requires one or more closed add or model profiles',
   'cam.opDesc.edgeRouteOutside.keyPoint.1': 'Tool path is offset outward by the tool radius',
-  'cam.opDesc.edgeRouteOutside.keyPoint.2': 'Supports rough and finish passes',
+  'cam.opDesc.edgeRouteOutside.keyPoint.2': 'Rough passes support contour or trochoidal clearing; finish passes follow the contour',
   'cam.opDesc.edgeRouteOutside.keyPoint.3': 'Optional closed regions act as XY filters',
 
   // Surface clean

@@ -7,6 +7,7 @@ Toolpath generators. Each file owns one strategy. `index.ts` re-exports everythi
 - `carving.ts` — engrave / carve along a path
 - `drilling.ts` — drill-cycle generation
 - `edge.ts` — edge / profile-following cuts (outside/inside contour)
+- `trochoidalEdge.ts` — bounded closed-guide orbital path generation for trochoidal Edge roughing
 - `vcarve.ts` — V-bit carving via inset-contour offset stepping (`v_carve`, "V-Carve offset")
 - `vcarveMedial/` — geometric medial-axis v-carve (`v_carve_medial`): Voronoi-of-boundary skeleton with exact clearances, corner tips, and contact-spread curve filtering (see its `INDEX.md`). Replaced the retired `v_carve_recursive` skeleton op (issue #279); saved projects using it migrate to this on load.
 - `roughSurface.ts` — 3D rough clearing of an imported mesh
@@ -41,6 +42,7 @@ Toolpath generators. Each file owns one strategy. `index.ts` re-exports everythi
 - `feed.test.ts` — shared effectiveFeed helper: cut/plunge/lead-in/lead-out move kinds, feedScale present/absent, and plunge ignores-feedScale invariance
 - `entry.test.ts` — helix pitch/direction, region/island clearance, no-core diameter bounds, bottom flattening, ramp fallback, and plunge-feed limiting
 - `geometry.test.ts` — shared nearest-neighbour ordering and squared-XY-distance behavior
+- `trochoidalEdge.test.ts` — closed-guide continuity, periodic seam, width, direction, and move-budget coverage
 - `toolpaths.test.ts` — broad smoke tests across strategies
 - `resolverReadPath.test.ts` — resolved instance geometry and missing-definition behavior in toolpath resolution
 - `vcarveLineResolver.test.ts` — S2 closed-Line V-carve resolver tests: single Line, open-Line rejection, nested even-odd holes, disjoint Lines, mixed Subtract + Line, Subtract-only regression

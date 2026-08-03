@@ -68,6 +68,14 @@ export const warningsEn = {
   'warnings.edgeRouteWrongKind': 'Only edge-route operations can be resolved by the edge-route generator',
   'warnings.edgeRouteNoTargets': 'Edge-route operation has no feature targets',
   'warnings.edgeRouteNoValidTargets': 'No valid target features were found for this edge-route operation',
+  'warnings.edgeTrochoidalWidthTooSmall': 'Trochoidal cut width must be greater than the tool diameter',
+  'warnings.edgeTrochoidalAdvanceRange': 'Trochoidal advance per loop must be greater than 0 and no more than one tool diameter',
+  'warnings.edgeTrochoidalInvalidGuide': 'The requested trochoidal channel could not produce a continuous offset guide',
+  'warnings.edgeTrochoidalMoveBudget': 'The trochoidal path would contain too many moves; increase advance per loop or reduce cut width',
+  'warnings.edgeTrochoidalEntryBudget': 'The orbital entry would contain too many moves; increase the entry angle or reduce the number of depth levels',
+  'warnings.edgeTrochoidalRegionUnsupported': 'Trochoidal edge roughing cannot use Region filters until clipped orbital re-entry is supported',
+  'warnings.edgeTrochoidalObstacleUnsupported': 'Trochoidal edge roughing cannot run while other protected add/model features require path clipping',
+  'warnings.edgeTrochoidalPlungeEntry': 'Plunge entry requires a center-cutting tool or a pre-cleared entry hole',
   'warnings.edgeMixedDepthSpans': 'Selected outside edge targets have different effective depth spans. Combined outside routing is not supported for mixed-depth targets yet; generating separate contours may cut internal overlap. Split the operation by depth or align target tops/bottoms.',
   'warnings.edgeNoCombinedContour': 'No valid combined outer contour could be generated for the selected outside edge targets',
   'warnings.edgeFeatureNoCutDepth': '{name} leaves no cut depth after axial stock-to-leave',
@@ -97,6 +105,7 @@ export const warningsEn = {
   'warnings.tabsOutsideCutZ': '{count} nearby tabs overlap the toolpath footprint but are outside the cut Z range ({minZ} -> {maxZ}).',
   'warnings.tabsOutsideCutZList': '{count} nearby tabs overlap the toolpath footprint but are outside the cut Z range ({minZ} -> {maxZ}): {names}.',
   'warnings.tabsOutsideCutZListMore': '{count} nearby tabs overlap the toolpath footprint but are outside the cut Z range ({minZ} -> {maxZ}): {names}, and {more} more.',
+  'warnings.tabsTrochoidalUnsupported': 'Tabs are not applied to trochoidal edge roughing until orbital tab clearance is validated.',
   // surface clean / finish bands
   'warnings.surfaceNoCleanupRegion': 'No machinable parallel cleanup region for band {topZ} -> {bottomZ}',
   'warnings.surfaceNoCleanupSegments': 'No machinable parallel cleanup segments for band {topZ} -> {bottomZ}',
@@ -169,4 +178,5 @@ export const warningsEn = {
   'warnings.bookletNoToolpath': 'Toolpath could not be generated for this operation.',
   'warnings.restOperationNotFound': 'Operation not found',
   'warnings.restOnlyPocketEdgeTargets': 'Rest operations can only be created from pocket or edge-route operations with feature targets',
+  'warnings.restTrochoidalUnsupported': 'Rest machining from a trochoidal swept channel is not supported yet',
 } as const satisfies Record<string, string>

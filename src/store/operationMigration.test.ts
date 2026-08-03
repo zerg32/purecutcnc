@@ -171,6 +171,28 @@ test('no v_carve_recursive kind survives the load', () => {
   )
 })
 
+test('legacy operations default to contour edge strategy', () => {
+  const input = legacyProjectWithRecursiveOp()
+  input.operations = [{ ...recursiveOperation(), kind: 'edge_route_inside' }]
+  const project = normalizeProject(input)
+  const op = project.operations.find((candidate) => candidate.id === 'op1')
+  assert(op?.edgeStrategy === 'contour', `expected contour default, got ${op?.edgeStrategy}`)
+  assert((op?.trochoidalCutWidth ?? 0) > 0, 'expected a positive tool-derived trochoidal width default')
+})
+
+test('trochoidal edge settings survive normalization', () => {
+  const input = legacyProjectWithRecursiveOp()
+  input.operations = [{
+    ...recursiveOperation(),
+    kind: 'edge_route_inside',
+    edgeStrategy: 'trochoidal',
+    trochoidalCutWidth: 9,
+  }]
+  const operation = normalizeProject(input).operations[0]
+  assert(operation.edgeStrategy === 'trochoidal', 'expected trochoidal strategy to survive')
+  assert(operation.trochoidalCutWidth === 9, `expected width 9, got ${operation.trochoidalCutWidth}`)
+})
+
 console.log(`\noperationMigration.test.ts: ${passed} passed, ${failed} failed`)
 if (failed > 0) {
   throw new Error(`${failed} operationMigration test(s) failed`)

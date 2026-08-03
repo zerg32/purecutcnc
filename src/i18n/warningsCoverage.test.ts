@@ -38,6 +38,8 @@ const ALL_CODES = [
   'vcarveSamplingBudget', 'vcarveNoMedialAxis', 'vcarveMedialNoMoves',
   'vcarveWrongKind', 'vcarveNeedsVBit', 'contourSpacingPositive', 'vBitInvalidSlope', 'vcarveNoMoves',
   'edgeRouteWrongKind', 'edgeRouteNoTargets', 'edgeRouteNoValidTargets',
+  'edgeTrochoidalWidthTooSmall', 'edgeTrochoidalAdvanceRange', 'edgeTrochoidalInvalidGuide', 'edgeTrochoidalMoveBudget',
+  'edgeTrochoidalEntryBudget', 'edgeTrochoidalRegionUnsupported', 'edgeTrochoidalObstacleUnsupported', 'edgeTrochoidalPlungeEntry',
   'edgeMixedDepthSpans', 'edgeNoCombinedContour', 'edgeFeatureNoCutDepth', 'edgeBandNoCutDepth',
   'edgeNoContourForFeature', 'edgeNoInsideContour', 'edgeClosedProfilesOnly',
   'surface3dNeedsModel', 'surface3dNotMesh', 'surface3dLoadFailed', 'surface3dStockToLeaveTooLarge',
@@ -45,6 +47,7 @@ const ALL_CODES = [
   'surface3dFloorCollapsed', 'surface3dNoLevels',
   'tabOnlyEdgeRoute', 'tabsOverlapAmbiguous', 'tabNoIntersect', 'tabAboveStockTop', 'tabBelowStockBottom',
   'tabInvalidZRange', 'tabOutsideCutZ', 'tabsOutsideCutZ', 'tabsOutsideCutZList', 'tabsOutsideCutZListMore',
+  'tabsTrochoidalUnsupported',
   'surfaceNoCleanupRegion', 'surfaceNoCleanupSegments', 'surfaceNoOffsetContours', 'surfaceFinishBothDisabled',
   'surfaceCleanWrongKind', 'surfaceCleanNoTargets', 'surfaceCleanNoValidTargets',
   'surfaceBandNoFinishDepth', 'surfaceBandNoRoughDepth', 'surfaceNoFinishContours',
@@ -63,6 +66,7 @@ const ALL_CODES = [
   'postArcNoCapability',
   'replayNoTool', 'bookletNoTool', 'bookletNoToolpath',
   'restOperationNotFound', 'restOnlyPocketEdgeTargets',
+  'restTrochoidalUnsupported',
 ] as const satisfies readonly ToolpathWarningCode[]
 
 // Exhaustiveness both ways: the list is assignable to the union (satisfies

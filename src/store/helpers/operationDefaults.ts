@@ -324,6 +324,10 @@ export function defaultOperationForTarget(
     waterlineMaxRingsPerBand: 0,
     waterlineTipStepdown: 0,
     arcFittingEnabled: true,
+    ...(kind === 'edge_route_inside' || kind === 'edge_route_outside' ? {
+      edgeStrategy: 'contour' as const,
+      trochoidalCutWidth: convertLength(tool.diameter, tool.units, project.meta.units) * 1.5,
+    } : {}),
     ...(kind === 'drilling' ? {
       drillType: 'simple' as const,
       peckDepth: convertLength(2, 'mm', project.meta.units),

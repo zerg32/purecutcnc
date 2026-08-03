@@ -62,6 +62,14 @@ export type ToolpathWarningCode =
   | 'toolDiameterPositive'
   | 'stepdownPositive'
   | 'edgeRouteNoValidTargets'
+  | 'edgeTrochoidalWidthTooSmall'
+  | 'edgeTrochoidalAdvanceRange'
+  | 'edgeTrochoidalInvalidGuide'
+  | 'edgeTrochoidalMoveBudget'
+  | 'edgeTrochoidalEntryBudget'
+  | 'edgeTrochoidalRegionUnsupported'
+  | 'edgeTrochoidalObstacleUnsupported'
+  | 'edgeTrochoidalPlungeEntry'
   // 3D surface roughing (stepdown)
   | 'targetsNotFound'
   | 'stepoverRatioRange'
@@ -91,6 +99,7 @@ export type ToolpathWarningCode =
   | 'tabsOutsideCutZ'
   | 'tabsOutsideCutZList'
   | 'tabsOutsideCutZListMore'
+  | 'tabsTrochoidalUnsupported'
   // surface clean / finish bands
   | 'surfaceNoCleanupRegion'
   | 'surfaceNoCleanupSegments'
@@ -172,6 +181,7 @@ export type ToolpathWarningCode =
   // store rest-operation creation
   | 'restOperationNotFound'
   | 'restOnlyPocketEdgeTargets'
+  | 'restTrochoidalUnsupported'
 
 export interface ToolpathWarning {
   code: ToolpathWarningCode

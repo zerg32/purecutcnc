@@ -24,6 +24,7 @@ import { formatLength } from '../../utils/units'
 import type { Units } from '../../utils/units'
 import type { NormalizedTool, ToolpathResult } from '../toolpaths/types'
 import { effectiveFeed } from '../toolpaths/feed'
+import { normalizeToolForProject } from '../toolpaths/geometry'
 import type { OperationBookletInput, OperationBookletReport, OperationBookletRow } from './types'
 
 function operationKindLabel(kind: OperationKind): string {
@@ -231,6 +232,8 @@ function stockSizeSummary(project: Project): string {
 
 function settingRows(operation: Operation, project: Project): OperationBookletRow[] {
   const units = project.meta.units
+  const isEdge = operation.kind === 'edge_route_inside' || operation.kind === 'edge_route_outside'
+  const isTrochoidal = isEdge && operation.pass === 'rough' && operation.edgeStrategy === 'trochoidal'
   const rows: OperationBookletRow[] = [
     { label: translate('booklet.label.kind'), value: operationKindLabel(operation.kind) },
     { label: translate('booklet.label.pass'), value: operationPassLabel(operation.pass) },
@@ -251,8 +254,29 @@ function settingRows(operation: Operation, project: Project): OperationBookletRo
     rows.push({ label: translate('booklet.label.cutDirection'), value: cutDirectionLabel(operation.cutDirection ?? 'conventional') })
   }
 
-  if (operationSupportsMachiningOrder(operation.kind)) {
+  if (operationSupportsMachiningOrder(operation.kind) && !isTrochoidal) {
     rows.push({ label: translate('booklet.label.machiningOrder'), value: machiningOrderLabel(operation.machiningOrder ?? 'level_first') })
+  }
+
+  if (isEdge) {
+    rows.push({
+      label: translate('booklet.label.edgeStrategy'),
+      value: isTrochoidal
+        ? translate('booklet.value.edgeStrategyTrochoidal')
+        : translate('booklet.value.edgeStrategyContour'),
+    })
+  }
+  if (isTrochoidal) {
+    const toolRecord = operation.toolRef
+      ? project.tools.find((candidate) => candidate.id === operation.toolRef) ?? null
+      : null
+    const toolDiameter = toolRecord ? normalizeToolForProject(toolRecord, project).diameter : 0
+    const cutWidth = operation.trochoidalCutWidth ?? toolDiameter * 1.5
+    rows.push(
+      { label: translate('booklet.label.trochoidalCutWidth'), value: lengthWithUnits(cutWidth, units) },
+      { label: translate('booklet.label.trochoidalOrbitRadius'), value: lengthWithUnits(Math.max(0, (cutWidth - toolDiameter) / 2), units) },
+      { label: translate('booklet.label.trochoidalAdvance'), value: lengthWithUnits(operation.stepover * toolDiameter, units) },
+    )
   }
 
   if ((operation.roundOutsideCorners ?? false) && operationUsesRoundOutsideCorners(operation)) {

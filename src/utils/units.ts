@@ -325,6 +325,9 @@ function convertOperation(operation: Operation, from: Units, to: Units): Operati
     stockToLeaveAxial: convertLength(operation.stockToLeaveAxial, from, to),
     carveDepth: convertLength(operation.carveDepth, from, to),
     maxCarveDepth: convertLength(operation.maxCarveDepth, from, to),
+    trochoidalCutWidth: operation.trochoidalCutWidth === undefined
+      ? undefined
+      : convertLength(operation.trochoidalCutWidth, from, to),
     peckDepth: operation.peckDepth === undefined
       ? undefined
       : convertLength(operation.peckDepth, from, to),

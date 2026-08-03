@@ -243,10 +243,19 @@ export function normalizeOperation(rawOperation: Operation, project: Project, in
     : rawOperation
   const fallbackTarget = fallbackOperationTarget(project, operation.kind)
   const defaults = defaultOperationForTarget(project, operation.kind, 'rough', fallbackTarget, index)
-  const normalized = {
+  const isEdgeOperation = operation.kind === 'edge_route_inside' || operation.kind === 'edge_route_outside'
+  const normalized: Operation = {
     ...defaults,
     ...operation,
     description: operation.description ?? '',
+    edgeStrategy: isEdgeOperation
+      ? (operation.edgeStrategy === 'trochoidal' ? 'trochoidal' : 'contour')
+      : undefined,
+    trochoidalCutWidth: isEdgeOperation
+      ? (operation.trochoidalCutWidth !== undefined && Number.isFinite(operation.trochoidalCutWidth)
+        ? operation.trochoidalCutWidth
+        : defaults.trochoidalCutWidth)
+      : undefined,
     roundOutsideCorners: operation.roundOutsideCorners ?? true,
     machiningOrder: operation.machiningOrder ?? 'level_first',
     waterlineAdaptiveRefinement: operation.waterlineAdaptiveRefinement ?? true,

@@ -68,6 +68,14 @@ export const warningsDe: Record<keyof typeof warningsEn, string> = {
   'warnings.edgeRouteWrongKind': 'Nur Kontur-Operationen können vom Kontur-Generator aufgelöst werden',
   'warnings.edgeRouteNoTargets': 'Kontur-Operation hat keine Feature-Ziele',
   'warnings.edgeRouteNoValidTargets': 'Keine gültigen Ziel-Features für diese Kontur-Operation gefunden',
+  'warnings.edgeTrochoidalWidthTooSmall': 'Die trochoidale Schnittbreite muss größer als der Werkzeugdurchmesser sein',
+  'warnings.edgeTrochoidalAdvanceRange': 'Der trochoidale Vorschub pro Umlauf muss größer als 0 und höchstens ein Werkzeugdurchmesser sein',
+  'warnings.edgeTrochoidalInvalidGuide': 'Für den angeforderten trochoidalen Kanal konnte keine durchgehende Versatzbahn erzeugt werden',
+  'warnings.edgeTrochoidalMoveBudget': 'Die trochoidale Bahn hätte zu viele Bewegungen; Vorschub pro Umlauf erhöhen oder Schnittbreite verringern',
+  'warnings.edgeTrochoidalEntryBudget': 'Der orbitale Eintritt hätte zu viele Bewegungen; Eintrittswinkel erhöhen oder Anzahl der Tiefenstufen verringern',
+  'warnings.edgeTrochoidalRegionUnsupported': 'Trochoidales Kantenschruppen kann keine Bereichsfilter verwenden, solange ein sicherer orbitaler Wiedereintritt nach dem Beschneiden fehlt',
+  'warnings.edgeTrochoidalObstacleUnsupported': 'Trochoidales Kantenschruppen kann nicht ausgeführt werden, wenn andere geschützte Add-/Modell-Features eine Bahnbeschneidung erfordern',
+  'warnings.edgeTrochoidalPlungeEntry': 'Senkrechtes Eintauchen erfordert ein zentrumschneidendes Werkzeug oder eine vorgeräumte Eintrittsbohrung',
   'warnings.edgeMixedDepthSpans': 'Ausgewählte Außenkontur-Ziele haben unterschiedliche wirksame Tiefenspannen. Kombinierte Außenkontur wird für Ziele mit gemischter Tiefe noch nicht unterstützt; das Erzeugen separater Konturen kann innere Überlappungen schneiden. Teilen Sie die Operation nach Tiefe auf oder richten Sie Ober-/Unterseiten der Ziele aus.',
   'warnings.edgeNoCombinedContour': 'Für die ausgewählten Außenkontur-Ziele konnte keine gültige kombinierte Außenkontur erzeugt werden',
   'warnings.edgeFeatureNoCutDepth': '{name} lässt nach axialem Aufmaß keine Schnitttiefe',
@@ -97,6 +105,7 @@ export const warningsDe: Record<keyof typeof warningsEn, string> = {
   'warnings.tabsOutsideCutZ': '{count} nahe Haltestege überlappen die Werkzeugweg-Grundfläche, liegen aber außerhalb des Schnitt-Z-Bereichs ({minZ} -> {maxZ}).',
   'warnings.tabsOutsideCutZList': '{count} nahe Haltestege überlappen die Werkzeugweg-Grundfläche, liegen aber außerhalb des Schnitt-Z-Bereichs ({minZ} -> {maxZ}): {names}.',
   'warnings.tabsOutsideCutZListMore': '{count} nahe Haltestege überlappen die Werkzeugweg-Grundfläche, liegen aber außerhalb des Schnitt-Z-Bereichs ({minZ} -> {maxZ}): {names} und {more} weitere.',
+  'warnings.tabsTrochoidalUnsupported': 'Haltestege werden beim trochoidalen Kantenschruppen nicht angewendet, bis die orbitale Freigängigkeit validiert ist.',
   // surface clean / finish bands
   'warnings.surfaceNoCleanupRegion': 'Kein bearbeitbarer paralleler Säuberungsbereich für Band {topZ} -> {bottomZ}',
   'warnings.surfaceNoCleanupSegments': 'Keine bearbeitbaren parallelen Säuberungssegmente für Band {topZ} -> {bottomZ}',
@@ -169,4 +178,5 @@ export const warningsDe: Record<keyof typeof warningsEn, string> = {
   'warnings.bookletNoToolpath': 'Für diese Operation konnte kein Werkzeugweg erzeugt werden.',
   'warnings.restOperationNotFound': 'Operation nicht gefunden',
   'warnings.restOnlyPocketEdgeTargets': 'Restoperationen können nur aus Tasche- oder Kontur-Operationen mit Feature-Zielen erstellt werden',
+  'warnings.restTrochoidalUnsupported': 'Restbearbeitung aus einem trochoidal geräumten Kanal wird noch nicht unterstützt',
 }

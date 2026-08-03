@@ -131,6 +131,14 @@ export const camDe: Record<keyof typeof camEn, string> = {
   'cam.operation.stepdown': 'Zustellung',
   'cam.operation.contourSpacing': 'Konturabstand',
   'cam.operation.stepoverRatio': 'Bahnabstand-Verhältnis',
+  'cam.operation.edgeStrategy': 'Strategie',
+  'cam.operation.edgeStrategyContour': 'Kontur',
+  'cam.operation.edgeStrategyTrochoidal': 'Trochoidal',
+  'cam.operation.trochoidalCutWidth': 'Trochoidale Schnittbreite',
+  'cam.operation.trochoidalAdvance': 'Vorschub / Umlauf (Werkzeugverhältnis)',
+  'cam.operation.trochoidalAdvanceDistance': 'Physischer Vorschub pro Umlauf: {distance}',
+  'cam.operation.restTrochoidalUnavailable': 'Restbearbeitung aus einem trochoidal geräumten Kanal wird noch nicht unterstützt.',
+  'cam.operation.tabsTrochoidalUnavailable': 'Automatische Haltestegplatzierung ist deaktiviert, bis die trochoidale Freigängigkeit validiert ist.',
   'cam.operation.advanced': 'Erweitert',
   'cam.operation.entry': 'Eintauchen',
   'cam.operation.entryStrategy': 'Eintauchstrategie',
@@ -383,7 +391,7 @@ export const camDe: Record<keyof typeof camEn, string> = {
     'Kontur innen folgt der Innenkante eines oder mehrerer geschlossener Abzieh-Profile, nach innen um den Werkzeugradius versetzt. Nützlich für Nuten, Aushöhlungen und innere Profilschnitte, bei denen das Werkzeug innerhalb der Begrenzung bleiben muss.',
   'cam.opDesc.edgeRouteInside.keyPoint.0': 'Erfordert ein oder mehrere geschlossene Abzieh-Profile',
   'cam.opDesc.edgeRouteInside.keyPoint.1': 'Der Werkzeugweg ist nach innen um den Werkzeugradius versetzt',
-  'cam.opDesc.edgeRouteInside.keyPoint.2': 'Unterstützt Schrupp- und Schlichtdurchgänge',
+  'cam.opDesc.edgeRouteInside.keyPoint.2': 'Schruppen unterstützt Kontur- oder Trochoidalräumen; Schlichten folgt der Kontur',
   'cam.opDesc.edgeRouteInside.keyPoint.3': 'Optionale geschlossene Bereiche wirken als XY-Filter',
 
   // Edge route outside
@@ -392,7 +400,7 @@ export const camDe: Record<keyof typeof camEn, string> = {
     'Kontur außen folgt der Außenkante eines oder mehrerer geschlossener Hinzufügen- oder Modell-Profile, nach außen um den Werkzeugradius versetzt. Wird verwendet, um Teile aus dem Rohteil auszuprofilieren, saubere Schultern um erhöhte Features zu belassen oder Umrisse zu schneiden.',
   'cam.opDesc.edgeRouteOutside.keyPoint.0': 'Erfordert ein oder mehrere geschlossene Hinzufügen- oder Modell-Profile',
   'cam.opDesc.edgeRouteOutside.keyPoint.1': 'Der Werkzeugweg ist nach außen um den Werkzeugradius versetzt',
-  'cam.opDesc.edgeRouteOutside.keyPoint.2': 'Unterstützt Schrupp- und Schlichtdurchgänge',
+  'cam.opDesc.edgeRouteOutside.keyPoint.2': 'Schruppen unterstützt Kontur- oder Trochoidalräumen; Schlichten folgt der Kontur',
   'cam.opDesc.edgeRouteOutside.keyPoint.3': 'Optionale geschlossene Bereiche wirken als XY-Filter',
 
   // Surface clean

@@ -327,6 +327,36 @@ function testFeedTimeUsesScaledSlotFeed(): void {
   )
 }
 
+function testTrochoidalEdgeSettings(): void {
+  console.log('Testing trochoidal edge settings in booklet...')
+  const { project, operation, toolpath } = fixture()
+  const report = buildOperationBookletReport({
+    project,
+    operation: {
+      ...operation,
+      kind: 'edge_route_inside',
+      edgeStrategy: 'trochoidal',
+      trochoidalCutWidth: 8,
+      stepover: 0.1,
+    },
+    tool: normalizeToolForProject(project.tools[0], project),
+    toolpath,
+    generatedAt: new Date('2026-06-04T12:00:00Z'),
+  })
+
+  assert(
+    report.settingRows.some((row) => row.label === translate('booklet.label.edgeStrategy')
+      && row.value === translate('booklet.value.edgeStrategyTrochoidal')),
+    'trochoidal edge strategy should be reported',
+  )
+  assert(
+    report.settingRows.some((row) => row.label === translate('booklet.label.trochoidalCutWidth') && row.value === '8 mm'),
+    'trochoidal cut width should be reported',
+  )
+  assert(report.settingRows.some((row) => row.label === translate('booklet.label.trochoidalOrbitRadius')), 'orbit radius should be reported')
+  assert(report.settingRows.some((row) => row.label === translate('booklet.label.trochoidalAdvance')), 'advance per loop should be reported')
+}
+
 async function testGermanLabelLayout(): Promise<void> {
   console.log('Testing German booklet label layout...')
   const { project, operation, toolpath } = fixture()
@@ -396,6 +426,7 @@ async function testGermanPdfSmoke(): Promise<void> {
 testReportContent()
 testFeedTimeFallsBackToToolDefaultFeed()
 testFeedTimeUsesScaledSlotFeed()
+testTrochoidalEdgeSettings()
 testReportIncludesEnabledRoundOutsideCorners()
 testLocalizedReportContent()
 await testGermanLabelLayout()

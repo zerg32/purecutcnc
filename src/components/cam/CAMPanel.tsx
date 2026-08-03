@@ -29,6 +29,7 @@ import { OperationParameterReference } from './OperationParameterReference'
 import { DisclosureSection } from '../common/DisclosureSection'
 import type {
   DrillType,
+  EdgeStrategy,
   EntryStrategy,
   Operation,
   OperationKind,
@@ -671,6 +672,9 @@ export function CAMPanel({
   const selectedOperationTool = selectedOperation?.toolRef
     ? project.tools.find((tool) => tool.id === selectedOperation.toolRef) ?? null
     : null
+  const selectedOperationNormalizedTool = selectedOperationTool
+    ? normalizeToolForProject(selectedOperationTool, project)
+    : null
   const selectedOperationWaterlineSpacing = selectedOperation
     ? resolvedWaterlineAdaptiveSpacing(selectedOperation, selectedOperationTool, project.meta.units)
     : 0
@@ -1092,9 +1096,15 @@ export function CAMPanel({
     if (!selectedOperation) {
       return <div className="panel-empty">{camT('cam.panel.emptyOperation')}</div>
     }
+    const isEdgeOperation = selectedOperation.kind === 'edge_route_inside'
+      || selectedOperation.kind === 'edge_route_outside'
+    const isTrochoidalEdge = isEdgeOperation
+      && selectedOperation.pass === 'rough'
+      && selectedOperation.edgeStrategy === 'trochoidal'
     const supportsEntryStrategy = selectedOperation.kind === 'pocket'
       || selectedOperation.kind === 'surface_clean'
       || selectedOperation.kind === 'rough_surface'
+      || isTrochoidalEdge
     const entryStrategy = selectedOperation.entryStrategy ?? 'plunge'
     return (
       <div key={`${selectedOperation.id}-${selectedOperation.toolRef ?? ''}`} className="properties-panel cam-tool-properties cam-operation-properties">
@@ -1179,10 +1189,16 @@ export function CAMPanel({
                       <span className="cam-field-message">{targetUpdateMessage.text}</span>
                     ) : null}
                   </div>
-                  {(selectedOperation.kind === 'pocket' || selectedOperation.kind === 'edge_route_inside' || selectedOperation.kind === 'edge_route_outside') ? (
+                  {(selectedOperation.kind === 'pocket' || isEdgeOperation) ? (
                     <div className="properties-field">
                       <span>{camT('cam.operation.restMachining')}</span>
-                      <button className="feat-btn" type="button" onClick={handleCreateRestOperation}>
+                      <button
+                        className="feat-btn"
+                        type="button"
+                        onClick={handleCreateRestOperation}
+                        disabled={isTrochoidalEdge}
+                        title={isTrochoidalEdge ? camT('cam.operation.restTrochoidalUnavailable') : undefined}
+                      >
                         {camT('cam.operation.createRestOp')}
                       </button>
                       {operationActionMessage?.operationId === selectedOperation.id ? (
@@ -1204,10 +1220,16 @@ export function CAMPanel({
                       <span className="cam-field-message">{bookletExportMessage.text}</span>
                     ) : null}
                   </div>
-                  {(selectedOperation.kind === 'edge_route_inside' || selectedOperation.kind === 'edge_route_outside') ? (
+                  {isEdgeOperation ? (
                     <div className="properties-field">
                       <span>{camT('cam.operation.tabs')}</span>
-                      <button className="feat-btn" type="button" onClick={handleAutoPlaceTabs}>
+                      <button
+                        className="feat-btn"
+                        type="button"
+                        onClick={handleAutoPlaceTabs}
+                        disabled={isTrochoidalEdge}
+                        title={isTrochoidalEdge ? camT('cam.operation.tabsTrochoidalUnavailable') : undefined}
+                      >
                         {camT('cam.operation.autoPlaceTabs')}
                       </button>
                     </div>
@@ -1253,7 +1275,7 @@ export function CAMPanel({
                             ...(selectedOperation.kind !== 'finish_surface_cleanup'
                               ? { stepdown: toolInProjectUnits.defaultStepdown }
                               : {}),
-                            stepover: toolInProjectUnits.defaultStepover,
+                            ...(isTrochoidalEdge ? {} : { stepover: toolInProjectUnits.defaultStepover }),
                             rpm: toolInProjectUnits.defaultRpm,
                             ...(isVCarve && toolInProjectUnits.maxCutDepth > 0 ? {
                               maxCarveDepth: toolInProjectUnits.maxCutDepth,
@@ -1295,6 +1317,61 @@ export function CAMPanel({
                       <OperationParameterReference kind="stepdown" />
                     </label>
                   ) : null}
+                  {isEdgeOperation && selectedOperation.pass === 'rough' ? (
+                    <label className="properties-field">
+                      <span>{camT('cam.operation.edgeStrategy')}</span>
+                      <Select<EdgeStrategy>
+                        value={selectedOperation.edgeStrategy ?? 'contour'}
+                        options={[
+                          { value: 'contour', label: camT('cam.operation.edgeStrategyContour') },
+                          { value: 'trochoidal', label: camT('cam.operation.edgeStrategyTrochoidal') },
+                        ]}
+                        onChange={(value) => updateOperation(selectedOperation.id, {
+                          edgeStrategy: value,
+                          ...(value === 'trochoidal' ? {
+                            stepover: 0.1,
+                            trochoidalCutWidth: selectedOperation.trochoidalCutWidth
+                              ?? (selectedOperationNormalizedTool ? selectedOperationNormalizedTool.diameter * 1.5 : 0),
+                            entryStrategy: selectedOperation.entryStrategy ?? 'helix',
+                          } : {}),
+                        })}
+                      />
+                      <OperationParameterReference kind="pattern" variant={selectedOperation.edgeStrategy ?? 'contour'} />
+                    </label>
+                  ) : null}
+                  {isTrochoidalEdge ? (
+                    <>
+                      <label className="properties-field">
+                        <span>{camT('cam.operation.trochoidalCutWidth')}</span>
+                        <DraftLengthInput
+                          value={selectedOperation.trochoidalCutWidth ?? (selectedOperationNormalizedTool?.diameter ?? 0) * 1.5}
+                          units={project.meta.units}
+                          min={0.0001}
+                          onCommit={(value) => updateOperation(selectedOperation.id, { trochoidalCutWidth: value })}
+                        />
+                        <OperationParameterReference kind="stockRadial" />
+                      </label>
+                      <label className="properties-field">
+                        <span>{camT('cam.operation.trochoidalAdvance')}</span>
+                        <DraftNumberInput
+                          value={selectedOperation.stepover}
+                          min={0.001}
+                          max={1}
+                          onCommit={(value) => updateOperation(selectedOperation.id, {
+                            stepover: Math.min(1, Math.max(0.001, value)),
+                          })}
+                        />
+                        <OperationParameterReference kind="stepover" />
+                      </label>
+                      {selectedOperationNormalizedTool ? (
+                        <div className="cam-field-note">
+                          {camT('cam.operation.trochoidalAdvanceDistance', {
+                            distance: formatLength(selectedOperation.stepover * selectedOperationNormalizedTool.diameter, project.meta.units),
+                          })}
+                        </div>
+                      ) : null}
+                    </>
+                  ) : null}
                   {selectedOperation.kind !== 'follow_line'
                     && selectedOperation.kind !== 'drilling'
                     && selectedOperation.kind !== 'v_carve_medial'
@@ -1323,11 +1400,16 @@ export function CAMPanel({
                         <span>{camT('cam.operation.entryStrategy')}</span>
                         <Select<EntryStrategy>
                           value={entryStrategy}
-                          options={[
-                            { value: 'plunge', label: camT('cam.operation.entryPlunge') },
-                            { value: 'helix', label: camT('cam.operation.entryHelix') },
-                            { value: 'ramp', label: camT('cam.operation.entryRamp') },
-                          ]}
+                          options={isTrochoidalEdge
+                            ? [
+                              { value: 'plunge', label: camT('cam.operation.entryPlunge') },
+                              { value: 'helix', label: camT('cam.operation.entryHelix') },
+                            ]
+                            : [
+                              { value: 'plunge', label: camT('cam.operation.entryPlunge') },
+                              { value: 'helix', label: camT('cam.operation.entryHelix') },
+                              { value: 'ramp', label: camT('cam.operation.entryRamp') },
+                            ]}
                           onChange={(value) => updateOperation(selectedOperation.id, { entryStrategy: value })}
                         />
                         <OperationParameterReference kind="entryStrategy" variant={entryStrategy} />
@@ -1346,7 +1428,7 @@ export function CAMPanel({
                           <OperationParameterReference kind="entryRampAngle" />
                         </label>
                       ) : null}
-                      {entryStrategy === 'helix' ? (
+                      {entryStrategy === 'helix' && !isTrochoidalEdge ? (
                         <label className="properties-field">
                           <span>{camT('cam.operation.entryHelixDiameter')}</span>
                           <DraftNumberInput
@@ -1440,7 +1522,7 @@ export function CAMPanel({
                   ) : null}
                   {(selectedOperation.kind === 'pocket'
                     || selectedOperation.kind === 'edge_route_inside'
-                    || selectedOperation.kind === 'edge_route_outside') ? (
+                    || selectedOperation.kind === 'edge_route_outside') && !isTrochoidalEdge ? (
                     <label className="properties-field">
                       <span>{camT('cam.operation.machiningOrder')}</span>
                       <Select

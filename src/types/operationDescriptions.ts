@@ -78,7 +78,7 @@ export const operationDescriptions: Record<OperationKind, OperationDescription> 
     keyPoints: [
       'Requires one or more closed subtract profiles',
       'Tool path is offset inward by the tool radius',
-      'Supports rough and finish passes',
+      'Rough passes support contour or trochoidal channel clearing; finish passes follow the contour',
       'Optional closed regions act as XY filters',
     ],
     exampleImageName: 'edge-route-inside-example.png',
@@ -91,7 +91,7 @@ export const operationDescriptions: Record<OperationKind, OperationDescription> 
     keyPoints: [
       'Requires one or more closed add or model profiles',
       'Tool path is offset outward by the tool radius',
-      'Supports rough and finish passes',
+      'Rough passes support contour or trochoidal channel clearing; finish passes follow the contour',
       'Optional closed regions act as XY filters',
     ],
     exampleImageName: 'edge-route-outside-example.png',
