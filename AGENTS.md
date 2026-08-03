@@ -335,3 +335,16 @@ The native file format is `.camj`. Core types are in `src/types/project.ts`:
   visibility/lock/name, constraints, and Z bounds.
 - **ResolvedSketchFeature** — derived world-space runtime view used by geometry,
   rendering, editing, CAM, and export reads; never serialize it into format 3.0.
+
+
+## Fork-Only Workflow Override
+
+When the working branch will only be pushed to `zerg32/purecutcnc`, and the user
+explicitly requests fork-only work:
+
+- GitHub issues, Project board updates, approval gates, and pull requests are optional.
+- Work must remain on a non-default branch.
+- Do not modify or push to `PureCutCNC/purecutcnc`.
+- Build and verification requirements still apply.
+- Committing or pushing requires explicit user direction.
+- Do not create any GitHub issues without user explicit approval.
