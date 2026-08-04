@@ -128,6 +128,9 @@ function testOpenGuideDoesNotCloseAcrossGap(): void {
   assert(approx(result.points[0].x, 1), 'open guide must start on the entry orbit')
   assert(approx(result.points[result.points.length - 1].x, 21), 'open guide must finish on the exit orbit')
   assert(!approx(result.points[0].x, result.points[result.points.length - 1].x), 'open guide must not close across its gap')
+  const exitLoop = result.points.slice(-37)
+  const exitCenterX = exitLoop.reduce((sum, point) => sum + point.x, 0) / exitLoop.length
+  assert(approx(exitCenterX, 20, 0.03), 'open guide must complete a full clearing orbit at its endpoint')
 }
 
 testClosedPeriodicPath()

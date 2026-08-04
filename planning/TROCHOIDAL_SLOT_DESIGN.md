@@ -233,33 +233,32 @@ Trochoidal Edge roughing supports tabs by preserving the entire cutter-expanded
 tab volume across the boundary-facing channel. Tabs must never be silently
 ignored.
 
-fragments outside the cutter-expanded tab footprint. At each tab the tool must
-finish the current fragment, retract to safe Z, rapid across the tab, descend
-vertically only through air to the feature top, and establish a new stationary
-helical entry cavity at a validated setback point before advancing along the
-next fragment. It must not plunge straight into uncleared material after a tab.
-Each affected depth-level guide is split into ordered open fragments outside the
-cutter-expanded tab footprint. At each tab the tool finishes the current
-fragment, retracts to safe Z, rapids across the tab, descends vertically only
-through air to the feature top, and establishes a new stationary helical entry
-cavity at a validated setback point before advancing along the next fragment.
-It does not plunge straight into uncleared material after a tab.
-fragments outside the cutter-expanded tab footprint. At each tab the tool must
-finish the current fragment, retract to safe Z, rapid across the tab, descend
-vertically only through air to the feature top, and establish a new stationary
-helical entry cavity at a validated setback point before advancing along the
-next fragment. It must not plunge straight into uncleared material after a tab.
+Each affected depth-level guide is split into ordered open fragments. On the
+first level that crosses a tab top, the tool finishes the deep fragment, lifts
+at the shared endpoint to `tab.z_top`, cuts only the local tab interval, and
+helically re-enters the next deep fragment. On subsequent deeper levels the tab
+top is already clear, so the tool retracts to safe Z, rapids across the tab, and
+establishes a new stationary helical entry cavity after it. It does not plunge
+straight into uncleared material after a tab.
+
+Every open fragment completes a stationary exit-clearing orbit at its final
+guide point before lifting or retracting. This prevents the swept channel from
+tapering short of the fragment endpoint and keeps exported motion coverage
+consistent with the preview.
 
 Tabs need not span the full contour or material thickness. Their XY footprint
 removes only the intersecting portion of the guide, including the cutter and
 orbit-radius expansion; unaffected portions remain machinable fragments. Depth
-levels at or above `tab.z_top` may use the uninterrupted guide. Once a level is
-below `tab.z_top`, that tab remains a protected obstacle for every deeper level.
-A standard vertical endmill must not pass underneath a tab even when the tool
-tip is below `tab.z_bottom`, because the cutter body would still intersect the
-preserved tab volume. The first stepdown that crosses `tab.z_top` therefore
-switches to fragmented generation and uses the same retract, rapid, and helical
-re-entry sequence as subsequent protected levels.
+levels at or above `tab.z_top` may use the uninterrupted guide. If the normal
+stepdown schedule skips `tab.z_top`, the first deeper pass incorporates local
+trochoidal fragments over only the affected tab intervals at that Z; it must not
+schedule a separate full contour at the tab height. Once a level is below
+`tab.z_top`, that tab remains a protected obstacle for every deeper level. A standard vertical
+endmill must not pass underneath a tab even when the tool tip is below
+`tab.z_bottom`, because the cutter body would still intersect the preserved tab
+volume. The first stepdown that crosses `tab.z_top` therefore switches to
+fragmented generation and uses the same retract, rapid, and helical re-entry
+sequence as subsequent protected levels.
 
 Tabbed Trochoidal generation therefore requires Helix entry. A Plunge entry
 selection, a fragment too short for the entry cavity, or any re-entry whose

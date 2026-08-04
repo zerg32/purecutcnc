@@ -36,6 +36,18 @@ export interface SplitTrochoidalGuide {
   clipped: boolean
 }
 
+export interface TrochoidalLevelFragment {
+  points: Point[]
+  z: number
+  kind: 'depth' | 'tab-top'
+}
+
+export interface TrochoidalLevelFragments {
+  fragments: TrochoidalLevelFragment[]
+  clipped: boolean
+  blocked: boolean
+}
+
 function samePoint(a: Point, b: Point): boolean {
   return Math.abs(a.x - b.x) <= GEOMETRY_EPSILON
     && Math.abs(a.y - b.y) <= GEOMETRY_EPSILON
@@ -76,27 +88,6 @@ export function buildTrochoidalTabPaths(
   }
 }
 
-export function relevantTrochoidalTabTopLevels(
-  project: Project,
-  contour: Point[],
-  topZ: number,
-  bottomZ: number,
-  guideExpansion: number,
-): number[] {
-  const descending = bottomZ < topZ
-  const minZ = Math.min(topZ, bottomZ)
-  const maxZ = Math.max(topZ, bottomZ)
-  const levels = project.tabs
-    .filter((tab) => tab.z_top > tab.z_bottom)
-    .filter((tab) => tab.z_top > minZ + GEOMETRY_EPSILON && tab.z_top < maxZ - GEOMETRY_EPSILON)
-    .filter((tab) => splitClosedTrochoidalGuide(
-      contour,
-      expandedTabPaths([tab], guideExpansion),
-    ).clipped)
-    .map((tab) => tab.z_top)
-  return [...new Set(levels)].sort((left, right) => descending ? right - left : left - right)
-}
-
 function segmentIntersectionT(from: Point, to: Point, a: Point, b: Point): number | null {
   const rx = to.x - from.x
   const ry = to.y - from.y
@@ -129,20 +120,23 @@ function pointOutsidePaths(point: Point, paths: ClipperPath[]): boolean {
   return paths.every((path) => pointInPolygon(scaled, path) === 0)
 }
 
-export function splitClosedTrochoidalGuide(
-  contour: Point[],
-  forbiddenPaths: ClipperPath[],
-): SplitTrochoidalGuide {
-  if (forbiddenPaths.length === 0) return { fragments: [contour], clipped: false }
+function pointInsidePaths(point: Point, paths: ClipperPath[]): boolean {
+  return !pointOutsidePaths(point, paths)
+}
 
+function splitClosedGuideByPredicate(
+  contour: Point[],
+  boundaryPaths: ClipperPath[],
+  keep: (point: Point) => boolean,
+): { fragments: Point[][]; rejected: boolean } {
   const points = contour.length > 1 && samePoint(contour[0], contour[contour.length - 1])
     ? contour.slice(0, -1)
     : contour
-  if (points.length < 3) return { fragments: [], clipped: true }
+  if (points.length < 3) return { fragments: [], rejected: true }
 
   const fragments: Point[][] = []
   let current: Point[] = []
-  let clipped = false
+  let rejected = false
   const flush = () => {
     if (current.length >= 2) fragments.push(current)
     current = []
@@ -152,7 +146,7 @@ export function splitClosedTrochoidalGuide(
     const from = points[index]
     const to = points[(index + 1) % points.length]
     const breakpoints = new Set<number>([0, 1])
-    for (const path of forbiddenPaths) {
+    for (const path of boundaryPaths) {
       for (let edgeIndex = 0; edgeIndex < path.length; edgeIndex += 1) {
         const a = { x: path[edgeIndex].X / DEFAULT_CLIPPER_SCALE, y: path[edgeIndex].Y / DEFAULT_CLIPPER_SCALE }
         const bPoint = path[(edgeIndex + 1) % path.length]
@@ -169,8 +163,8 @@ export function splitClosedTrochoidalGuide(
       if (end - start <= GEOMETRY_EPSILON) continue
       const startPoint = pointAt(from, to, start)
       const endPoint = pointAt(from, to, end)
-      if (!pointOutsidePaths(pointAt(from, to, (start + end) / 2), forbiddenPaths)) {
-        clipped = true
+      if (!keep(pointAt(from, to, (start + end) / 2))) {
+        rejected = true
         flush()
         continue
       }
@@ -183,10 +177,110 @@ export function splitClosedTrochoidalGuide(
   }
   flush()
 
-  if (!clipped) return { fragments: [contour], clipped: false }
   if (fragments.length > 1 && samePoint(fragments[fragments.length - 1].at(-1)!, fragments[0][0])) {
     fragments[0] = [...fragments[fragments.length - 1], ...fragments[0].slice(1)]
     fragments.pop()
   }
-  return { fragments, clipped: true }
+  return { fragments, rejected }
+}
+
+export function buildTrochoidalLevelFragments(
+  project: Project,
+  contour: Point[],
+  z: number,
+  previousZ: number,
+  guideExpansion: number,
+): TrochoidalLevelFragments {
+  const activeTabs = project.tabs
+    .filter((tab) => tab.z_top > tab.z_bottom && z < tab.z_top - GEOMETRY_EPSILON)
+    .map((tab) => ({ tab, paths: expandedTabPaths([tab], guideExpansion) }))
+  if (activeTabs.length === 0) {
+    return { fragments: [{ points: contour, z, kind: 'depth' }], clipped: false, blocked: false }
+  }
+
+  const boundaryPaths = activeTabs.flatMap((entry) => entry.paths)
+  const points = contour.length > 1 && samePoint(contour[0], contour[contour.length - 1])
+    ? contour.slice(0, -1)
+    : contour
+  if (points.length < 3) return { fragments: [], clipped: true, blocked: true }
+
+  type PieceKey = 'depth' | 'skip' | `top:${number}`
+  const pieces: Array<{ key: PieceKey; points: Point[] }> = []
+  let currentKey: PieceKey | null = null
+  let current: Point[] = []
+  let clipped = false
+  const flush = () => {
+    if (currentKey && currentKey !== 'skip' && current.length >= 2) {
+      pieces.push({ key: currentKey, points: current })
+    }
+    currentKey = null
+    current = []
+  }
+
+  const classify = (point: Point): PieceKey => {
+    const covering = activeTabs.filter((entry) => pointInsidePaths(point, entry.paths))
+    if (covering.length === 0) return 'depth'
+    clipped = true
+    const top = Math.max(...covering.map((entry) => entry.tab.z_top))
+    return top < previousZ - GEOMETRY_EPSILON ? `top:${top}` : 'skip'
+  }
+
+  for (let index = 0; index < points.length; index += 1) {
+    const from = points[index]
+    const to = points[(index + 1) % points.length]
+    const breakpoints = new Set<number>([0, 1])
+    for (const path of boundaryPaths) {
+      for (let edgeIndex = 0; edgeIndex < path.length; edgeIndex += 1) {
+        const a = { x: path[edgeIndex].X / DEFAULT_CLIPPER_SCALE, y: path[edgeIndex].Y / DEFAULT_CLIPPER_SCALE }
+        const bPoint = path[(edgeIndex + 1) % path.length]
+        const b = { x: bPoint.X / DEFAULT_CLIPPER_SCALE, y: bPoint.Y / DEFAULT_CLIPPER_SCALE }
+        const t = segmentIntersectionT(from, to, a, b)
+        if (t !== null) breakpoints.add(Number(t.toFixed(12)))
+      }
+    }
+
+    const sorted = [...breakpoints].sort((left, right) => left - right)
+    for (let intervalIndex = 0; intervalIndex < sorted.length - 1; intervalIndex += 1) {
+      const start = sorted[intervalIndex]
+      const end = sorted[intervalIndex + 1]
+      if (end - start <= GEOMETRY_EPSILON) continue
+      const key = classify(pointAt(from, to, (start + end) / 2))
+      const startPoint = pointAt(from, to, start)
+      const endPoint = pointAt(from, to, end)
+      if (key !== currentKey || (current.length > 0 && !samePoint(current[current.length - 1], startPoint))) {
+        flush()
+        currentKey = key
+        current = [startPoint]
+      }
+      current.push(endPoint)
+    }
+  }
+  flush()
+
+  const firstDepth = pieces.findIndex((piece) => piece.key === 'depth')
+  if (firstDepth > 0) pieces.push(...pieces.splice(0, firstDepth))
+
+  const fragments = pieces.map((piece): TrochoidalLevelFragment => piece.key === 'depth'
+    ? { points: piece.points, z, kind: 'depth' }
+    : { points: piece.points, z: Number(piece.key.slice(4)), kind: 'tab-top' })
+  return {
+    fragments,
+    clipped,
+    blocked: clipped && !fragments.some((fragment) => fragment.kind === 'depth'),
+  }
+}
+
+export function splitClosedTrochoidalGuide(
+  contour: Point[],
+  forbiddenPaths: ClipperPath[],
+): SplitTrochoidalGuide {
+  if (forbiddenPaths.length === 0) return { fragments: [contour], clipped: false }
+  const split = splitClosedGuideByPredicate(
+    contour,
+    forbiddenPaths,
+    (point) => pointOutsidePaths(point, forbiddenPaths),
+  )
+  return split.rejected
+    ? { fragments: split.fragments, clipped: true }
+    : { fragments: [contour], clipped: false }
 }

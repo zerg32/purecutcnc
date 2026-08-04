@@ -1867,6 +1867,10 @@ function testTrochoidalEdgeTabsUseSafeHelicalReentry(): void {
   assert(upperCuts.length > 0 && lowerCuts.length > 0, 'expected cuts above and below the tab top')
   assert(upperCuts.some((move) => move.to.x > 10 && move.to.x < 16 && move.to.y < 0), 'level above tab must keep the continuous guide')
   assert(tabTopCuts.some((move) => move.to.x > 10 && move.to.x < 16 && move.to.y < 0), 'tab-top level must clear material above the tab')
+  assert(tabTopCuts.length < upperCuts.length, 'inserted tab-top cutting must stay local instead of repeating the full contour')
+  const tabTopMoveIndex = result.moves.findIndex((move) => move.kind === 'cut' && move.from.z === -3 && move.to.z === -3)
+  assert(result.moves.some((move, index) => index < tabTopMoveIndex && move.kind === 'cut' && move.from.z === -4 && move.to.z === -4), 'deep cutting must reach the tab before lifting to its top')
+  assert(result.moves.some((move, index) => index > tabTopMoveIndex && move.kind === 'cut' && move.from.z === -4 && move.to.z === -4), 'deep cutting must helically re-enter and continue after the tab')
   const cutterRadius = tool.diameter / 2
   assert(lowerCuts.every((move) => (
     move.to.x <= project.tabs[0].x - cutterRadius
@@ -1878,6 +1882,12 @@ function testTrochoidalEdgeTabsUseSafeHelicalReentry(): void {
   assert(result.moves.filter((move) => move.kind === 'plunge' && move.to.z === 0).length >= 3, 'each protected depth fragment must descend from safe Z to the feature top')
   assert(result.moves.some((move) => move.kind === 'cut' && move.from.z > move.to.z && move.to.z < -3), 'tab fragment must use a descending helical re-entry')
   assert(lowerCuts.some((move) => move.to.z === -6), 'tab must remain protected below its z_bottom')
+  const splitLevelCuts = result.moves.filter((move) => move.kind === 'cut' && move.from.z === -4 && move.to.z === -4)
+  assert(splitLevelCuts.length > 0, 'expected a split contour at the tab depth')
+  assert(Math.hypot(
+    splitLevelCuts[0].from.x - splitLevelCuts[splitLevelCuts.length - 1].to.x,
+    splitLevelCuts[0].from.y - splitLevelCuts[splitLevelCuts.length - 1].to.y,
+  ) <= 1e-9, 'split contour must close its final G-code move at the exact layer start')
 
   const plunge = generateEdgeRouteToolpath(project, { ...operation, entryStrategy: 'plunge' })
   assert(plunge.moves.length === 0, 'tabbed trochoidal plunge entry must fail closed')

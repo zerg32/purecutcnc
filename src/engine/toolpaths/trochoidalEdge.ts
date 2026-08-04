@@ -160,7 +160,8 @@ export function buildTrochoidalContour(
     TROCHOIDAL_OPERATION_POINT_BUDGET,
     options.maxPoints ?? TROCHOIDAL_OPERATION_POINT_BUDGET,
   )
-  if (movingSteps + stepsPerLoop + 1 > maxPoints) {
+  const stationarySteps = stepsPerLoop * (closed ? 1 : 2)
+  if (movingSteps + stationarySteps + 1 > maxPoints) {
     return { points: [], entryCenter: null, loopCount, actualAdvance, error: 'move-budget' }
   }
 
@@ -203,6 +204,24 @@ export function buildTrochoidalContour(
     }
     const phase = options.angularDirection * 2 * Math.PI * step / stepsPerLoop
     points.push(orbitPoint(center, frame.tangent, frame.normal, options.orbitRadius, phase))
+  }
+
+  if (!closed) {
+    const exitCenter = samplePosition(path, path.length)
+    const exitFrame = sampleFrame(path, path.length, frameLookaround)
+    if (!exitFrame) {
+      return { points: [], entryCenter: null, loopCount, actualAdvance, error: 'invalid-guide' }
+    }
+    for (let step = 1; step <= stepsPerLoop; step += 1) {
+      const phase = options.angularDirection * 2 * Math.PI * step / stepsPerLoop
+      points.push(orbitPoint(
+        exitCenter,
+        exitFrame.tangent,
+        exitFrame.normal,
+        options.orbitRadius,
+        phase,
+      ))
+    }
   }
 
   if (closed) points[points.length - 1] = { ...points[0] }
