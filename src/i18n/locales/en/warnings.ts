@@ -76,6 +76,8 @@ export const warningsEn = {
   'warnings.edgeTrochoidalRegionUnsupported': 'Trochoidal edge roughing cannot use Region filters until clipped orbital re-entry is supported',
   'warnings.edgeTrochoidalObstacleUnsupported': 'Trochoidal edge roughing cannot run while other protected add/model features require path clipping',
   'warnings.edgeTrochoidalPlungeEntry': 'Plunge entry requires a center-cutting tool or a pre-cleared entry hole',
+  'warnings.edgeTrochoidalTabsRequireHelix': 'Tabbed trochoidal roughing requires Helix entry for safe re-entry after each tab',
+  'warnings.edgeTrochoidalTabUnsafe': 'A tab leaves no safe trochoidal fragment or helical re-entry cavity; adjust the tab or cut settings',
   'warnings.edgeMixedDepthSpans': 'Selected outside edge targets have different effective depth spans. Combined outside routing is not supported for mixed-depth targets yet; generating separate contours may cut internal overlap. Split the operation by depth or align target tops/bottoms.',
   'warnings.edgeNoCombinedContour': 'No valid combined outer contour could be generated for the selected outside edge targets',
   'warnings.edgeFeatureNoCutDepth': '{name} leaves no cut depth after axial stock-to-leave',
@@ -105,7 +107,6 @@ export const warningsEn = {
   'warnings.tabsOutsideCutZ': '{count} nearby tabs overlap the toolpath footprint but are outside the cut Z range ({minZ} -> {maxZ}).',
   'warnings.tabsOutsideCutZList': '{count} nearby tabs overlap the toolpath footprint but are outside the cut Z range ({minZ} -> {maxZ}): {names}.',
   'warnings.tabsOutsideCutZListMore': '{count} nearby tabs overlap the toolpath footprint but are outside the cut Z range ({minZ} -> {maxZ}): {names}, and {more} more.',
-  'warnings.tabsTrochoidalUnsupported': 'Tabs are not applied to trochoidal edge roughing until orbital tab clearance is validated.',
   // surface clean / finish bands
   'warnings.surfaceNoCleanupRegion': 'No machinable parallel cleanup region for band {topZ} -> {bottomZ}',
   'warnings.surfaceNoCleanupSegments': 'No machinable parallel cleanup segments for band {topZ} -> {bottomZ}',

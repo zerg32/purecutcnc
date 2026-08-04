@@ -39,6 +39,7 @@ import { significantSilhouettePaths } from './silhouette'
 import { resolvedProjectFeatures } from '../../store/helpers/resolveFeatures'
 import { helixAngularDirection, plungeLimitedFeedScale } from './entry'
 import { buildTrochoidalContour, TROCHOIDAL_OPERATION_POINT_BUDGET } from './trochoidalEdge'
+import { buildTrochoidalTabPaths, relevantTrochoidalTabTopLevels, splitClosedTrochoidalGuide } from './trochoidalTabs'
 
 const MAX_ROUND_JOIN_ARC_TOLERANCE = DEFAULT_CLIPPER_SCALE * 0.01
 const ROUND_JOIN_ARC_TOLERANCE_RATIO = 0.01
@@ -126,6 +127,15 @@ function toClosedCutMoves(points: Point[], z: number): ToolpathMove[] {
   }
 
   return moves
+}
+
+function toOpenCutMoves(points: Point[], z: number): ToolpathMove[] {
+  if (points.length < 2) return []
+  return points.slice(1).map((point, index) => ({
+    kind: 'cut' as const,
+    from: { x: points[index].x, y: points[index].y, z },
+    to: { x: point.x, y: point.y, z },
+  }))
 }
 
 function pushRapidAndPlunge(
@@ -395,6 +405,9 @@ function hasFatalTrochoidalWarning(warnings: ToolpathWarning[]): boolean {
     warning.code === 'edgeTrochoidalInvalidGuide'
     || warning.code === 'edgeTrochoidalMoveBudget'
     || warning.code === 'edgeTrochoidalEntryBudget'
+    || warning.code === 'edgeTrochoidalTabsRequireHelix'
+    || warning.code === 'edgeTrochoidalTabUnsafe'
+    || warning.code === 'tabInvalidZRange'
     || warning.code === 'edgeTrochoidalObstacleUnsupported'
     || warning.code === 'edgeNoInsideContour'
     || warning.code === 'edgeNoCombinedContour'
@@ -473,8 +486,8 @@ function appendTrochoidalEntry(
 }
 
 function trochoidalEntryMoveCount(
-  levels: number[],
-  topZ: number,
+  fromZ: number,
+  targetZ: number,
   orbitRadius: number,
   operation: Operation,
 ): number {
@@ -482,16 +495,15 @@ function trochoidalEntryMoveCount(
   const angle = Math.min(45, Math.max(0.1, operation.entryRampAngle ?? 5))
   const pitch = 2 * Math.PI * orbitRadius * Math.tan(angle * Math.PI / 180)
   if (!(pitch > 0)) return MAX_TROCHOIDAL_ENTRY_MOVES + 1
+  if (targetZ >= fromZ) return 0
+  return Math.max(1, Math.ceil((fromZ - targetZ) / pitch)) * TROCHOIDAL_ENTRY_STEPS_PER_REVOLUTION
+}
 
-  let count = 0
-  let fromZ = topZ
-  for (const z of levels) {
-    if (z < fromZ) {
-      count += Math.max(1, Math.ceil((fromZ - z) / pitch)) * TROCHOIDAL_ENTRY_STEPS_PER_REVOLUTION
-    }
-    fromZ = z
-  }
-  return count
+interface PreparedTrochoidalPath {
+  built: ReturnType<typeof buildTrochoidalContour>
+  z: number
+  entryStartZ: number
+  closed: boolean
 }
 
 function appendTrochoidalContoursAtLevels(
@@ -502,6 +514,7 @@ function appendTrochoidalContoursAtLevels(
   topZ: number,
   safeZ: number,
   operation: Operation,
+  project: Project,
   toolDiameter: number,
   cutSide: 'internal' | 'external',
   warnings: ToolpathWarning[],
@@ -513,83 +526,131 @@ function appendTrochoidalContoursAtLevels(
   const orbitRadius = (cutWidth - toolDiameter) / 2
   const advance = operation.stepover * toolDiameter
   const angularDirection = helixAngularDirection(operation.cutDirection ?? 'conventional', cutSide)
-  const entryMovesPerContour = trochoidalEntryMoveCount(levels, topZ, orbitRadius, operation)
-  const totalEntryMoves = entryMovesPerContour * contours.length
-  if (entryMovesPerContour > MAX_TROCHOIDAL_ENTRY_MOVES
-    || totalEntryMoves >= budget.remainingPoints) {
-    warnings.push({ code: 'edgeTrochoidalEntryBudget' })
-    return currentPosition
-  }
-  const pointBudget = budget.remainingPoints - totalEntryMoves
-  const builtContours = contours.map((contour) => buildTrochoidalContour(contour, {
-    orbitRadius,
-    advance,
-    toolDiameter,
-    angularDirection,
-    maxPoints: Math.max(
-      1,
-      Math.floor(pointBudget / Math.max(1, levels.length * contours.length)),
-    ),
-  }))
+  const guideExpansion = cutWidth / 2 + toolDiameter * TROCHOIDAL_GUIDE_SAFETY_FRACTION
+  const prepared: PreparedTrochoidalPath[] = []
+  let remainingPoints = budget.remainingPoints
 
-  const failed = builtContours.find((built) => built.error || built.points.length < 2 || !built.entryCenter)
-  if (failed) {
-    warnings.push({
-      code: failed.error === 'move-budget' ? 'edgeTrochoidalMoveBudget' : 'edgeTrochoidalInvalidGuide',
-    })
-    return currentPosition
-  }
-  if (builtContours.some((built) => !trochoidalPathIsSafe(built.points, isSegmentSafe))) {
-    warnings.push({ code: unsafeWarningCode })
-    return currentPosition
-  }
-  const generatedPointCount = builtContours.reduce((sum, built) => sum + built.points.length * levels.length, 0)
-  const consumedPoints = totalEntryMoves + generatedPointCount + contours.length * levels.length * 3
-  if (consumedPoints > budget.remainingPoints) {
-    warnings.push({ code: 'edgeTrochoidalMoveBudget' })
-    return currentPosition
-  }
-  budget.remainingPoints -= consumedPoints
-
-  let nextPosition = currentPosition
-  for (let contourIndex = 0; contourIndex < builtContours.length; contourIndex += 1) {
-    const built = builtContours[contourIndex]
-    const entry = built.points[0]
-    let entryStartZ = topZ
-    for (const z of levels) {
-      const sameEntry = nextPosition
-        && Math.abs(nextPosition.x - entry.x) <= 1e-9
-        && Math.abs(nextPosition.y - entry.y) <= 1e-9
-      if (!sameEntry) {
-        nextPosition = retractToSafe(moves, nextPosition, safeZ)
-        const rapidFrom = nextPosition ?? { x: entry.x, y: entry.y, z: safeZ }
-        const rapidTo = { x: entry.x, y: entry.y, z: safeZ }
-        if (!nextPosition || rapidFrom.x !== rapidTo.x || rapidFrom.y !== rapidTo.y) {
-          moves.push({ kind: 'rapid', from: rapidFrom, to: rapidTo })
-        }
-        nextPosition = rapidTo
-        if (entryStartZ < safeZ) {
-          const surfacePoint = { x: entry.x, y: entry.y, z: entryStartZ }
-          moves.push({ kind: 'plunge', from: nextPosition, to: surfacePoint })
-          nextPosition = surfacePoint
-        }
+  for (const contour of contours) {
+    const tabTopLevels = relevantTrochoidalTabTopLevels(
+      project,
+      contour,
+      topZ,
+      levels.at(-1) ?? topZ,
+      guideExpansion,
+    )
+    const contourLevels = [...levels, ...tabTopLevels]
+      .sort((left, right) => topZ > (levels.at(-1) ?? topZ) ? right - left : left - right)
+      .filter((z, index, sorted) => index === 0 || Math.abs(z - sorted[index - 1]) > 1e-9)
+    let previousClosedZ = topZ
+    for (const z of contourLevels) {
+      const tabPaths = buildTrochoidalTabPaths(project, z, guideExpansion, toolDiameter / 2)
+      const invalidTab = tabPaths.invalidTabs.find((entry) => (
+        splitClosedTrochoidalGuide(contour, entry.guideForbidden).clipped
+      ))
+      if (invalidTab) {
+        warnings.push({
+          code: 'tabInvalidZRange',
+          params: {
+            name: invalidTab.tab.name,
+            zBottom: invalidTab.tab.z_bottom.toFixed(3),
+            zTop: invalidTab.tab.z_top.toFixed(3),
+          },
+        })
+        return currentPosition
+      }
+      const split = splitClosedTrochoidalGuide(contour, tabPaths.guideForbidden)
+      if (split.clipped && (operation.entryStrategy ?? 'plunge') !== 'helix') {
+        warnings.push({ code: 'edgeTrochoidalTabsRequireHelix' })
+        return currentPosition
+      }
+      if (split.clipped && split.fragments.length === 0) {
+        warnings.push({ code: 'edgeTrochoidalTabUnsafe' })
+        return currentPosition
       }
 
-      nextPosition = appendTrochoidalEntry(
-        moves,
-        nextPosition as ToolpathPoint,
-        entry,
-        built.entryCenter as Point,
-        z,
-        orbitRadius,
-        operation,
-        cutSide,
-      )
-      const cutMoves = toClosedCutMoves(built.points, z)
-      for (const move of cutMoves) moves.push(move)
-      nextPosition = cutMoves.at(-1)?.to ?? nextPosition
-      entryStartZ = z
+      for (const fragment of split.fragments) {
+        const entryStartZ = split.clipped ? topZ : previousClosedZ
+        const entryMoves = trochoidalEntryMoveCount(entryStartZ, z, orbitRadius, operation)
+        if (entryMoves > MAX_TROCHOIDAL_ENTRY_MOVES || entryMoves + 3 >= remainingPoints) {
+          warnings.push({ code: 'edgeTrochoidalEntryBudget' })
+          return currentPosition
+        }
+        const built = buildTrochoidalContour(fragment, {
+          orbitRadius,
+          advance,
+          toolDiameter,
+          angularDirection,
+          closed: !split.clipped,
+          maxPoints: remainingPoints - entryMoves - 3,
+        })
+        if (built.error || built.points.length < 2 || !built.entryCenter) {
+          warnings.push({
+            code: built.error === 'move-budget'
+              ? 'edgeTrochoidalMoveBudget'
+              : split.clipped ? 'edgeTrochoidalTabUnsafe' : 'edgeTrochoidalInvalidGuide',
+          })
+          return currentPosition
+        }
+        if (!trochoidalPathIsSafe(built.points, isSegmentSafe)) {
+          warnings.push({ code: unsafeWarningCode })
+          return currentPosition
+        }
+        if (split.clipped && !trochoidalPathIsSafe(
+          built.points,
+          (from, to) => segmentOutsideForbiddenPaths(from, to, tabPaths.cutterForbidden),
+        )) {
+          warnings.push({ code: 'edgeTrochoidalTabUnsafe' })
+          return currentPosition
+        }
+
+        const consumedPoints = entryMoves + built.points.length + 3
+        if (consumedPoints > remainingPoints) {
+          warnings.push({ code: 'edgeTrochoidalMoveBudget' })
+          return currentPosition
+        }
+        remainingPoints -= consumedPoints
+        prepared.push({ built, z, entryStartZ, closed: !split.clipped })
+      }
+      previousClosedZ = split.clipped ? topZ : z
     }
+  }
+  budget.remainingPoints = remainingPoints
+
+  let nextPosition = currentPosition
+  for (const path of prepared) {
+    const { built, z, entryStartZ, closed } = path
+    const entry = built.points[0]
+    const sameEntry = closed && nextPosition
+      && Math.abs(nextPosition.x - entry.x) <= 1e-9
+      && Math.abs(nextPosition.y - entry.y) <= 1e-9
+    if (!sameEntry) {
+      nextPosition = retractToSafe(moves, nextPosition, safeZ)
+      const rapidFrom = nextPosition ?? { x: entry.x, y: entry.y, z: safeZ }
+      const rapidTo = { x: entry.x, y: entry.y, z: safeZ }
+      if (!nextPosition || rapidFrom.x !== rapidTo.x || rapidFrom.y !== rapidTo.y) {
+        moves.push({ kind: 'rapid', from: rapidFrom, to: rapidTo })
+      }
+      nextPosition = rapidTo
+      if (entryStartZ < safeZ) {
+        const surfacePoint = { x: entry.x, y: entry.y, z: entryStartZ }
+        moves.push({ kind: 'plunge', from: nextPosition, to: surfacePoint })
+        nextPosition = surfacePoint
+      }
+    }
+
+    nextPosition = appendTrochoidalEntry(
+      moves,
+      nextPosition as ToolpathPoint,
+      entry,
+      built.entryCenter as Point,
+      z,
+      orbitRadius,
+      operation,
+      cutSide,
+    )
+    const cutMoves = closed ? toClosedCutMoves(built.points, z) : toOpenCutMoves(built.points, z)
+    for (const move of cutMoves) moves.push(move)
+    nextPosition = cutMoves.at(-1)?.to ?? nextPosition
   }
   return nextPosition
 }
@@ -716,14 +777,6 @@ function generateEdgeRouteToolpathSingle(project: Project, operation: Operation)
   const safeZ = getOperationSafeZ(project)
   const radialLeave = Math.max(0, operation.stockToLeaveRadial)
   const trochoidalCutWidth = operation.trochoidalCutWidth ?? tool.diameter * 1.5
-  if (isTrochoidal && project.tabs.length > 0) {
-    return {
-      operationId: operation.id,
-      moves: [],
-      warnings: [...warnings, { code: 'tabsTrochoidalUnsupported' }],
-      bounds: null,
-    }
-  }
   if (isTrochoidal && splitTargets.regionFeatures.length > 0) {
     return {
       operationId: operation.id,
@@ -816,6 +869,7 @@ function generateEdgeRouteToolpathSingle(project: Project, operation: Operation)
           band.topZ,
           safeZ,
           operation,
+          project,
           tool.diameter,
           'internal',
           warnings,
@@ -888,10 +942,12 @@ function generateEdgeRouteToolpathSingle(project: Project, operation: Operation)
       span: resolveFeatureZSpan(project, feature),
     }))
 
-  function trochoidalObstaclePathsForLevels(levels: number[]): ClipperPath[] {
+  function trochoidalObstaclePathsForSpan(topZ: number, bottomZ: number): ClipperPath[] {
     if (!isTrochoidal) return []
+    const minZ = Math.min(topZ, bottomZ)
+    const maxZ = Math.max(topZ, bottomZ)
     const activePaths = allAdditiveObstacles
-      .filter(({ span }) => levels.some((z) => z <= span.max && z >= span.min))
+      .filter(({ span }) => span.max >= minZ && span.min <= maxZ)
       .flatMap(({ paths }) => paths)
     return offsetPaths(
       activePaths,
@@ -957,7 +1013,10 @@ function generateEdgeRouteToolpathSingle(project: Project, operation: Operation)
             ClipperLib.JoinType.jtRound,
           )
           : []
-        const trochoidalObstaclePaths = trochoidalObstaclePathsForLevels(levels)
+        const trochoidalObstaclePaths = trochoidalObstaclePathsForSpan(
+          referenceTarget.topZ,
+          referenceTarget.bottomZ,
+        )
 
         currentPosition = isTrochoidal
           ? appendTrochoidalContoursAtLevels(
@@ -968,6 +1027,7 @@ function generateEdgeRouteToolpathSingle(project: Project, operation: Operation)
             referenceTarget.topZ,
             safeZ,
             operation,
+            project,
             tool.diameter,
             'external',
             warnings,
@@ -1005,7 +1065,7 @@ function generateEdgeRouteToolpathSingle(project: Project, operation: Operation)
           ClipperLib.JoinType.jtRound,
         )
         : []
-      const trochoidalObstaclePaths = trochoidalObstaclePathsForLevels(levels)
+      const trochoidalObstaclePaths = trochoidalObstaclePathsForSpan(target.topZ, target.bottomZ)
 
       currentPosition = isTrochoidal
         ? appendTrochoidalContoursAtLevels(
@@ -1016,6 +1076,7 @@ function generateEdgeRouteToolpathSingle(project: Project, operation: Operation)
           target.topZ,
           safeZ,
           operation,
+          project,
           tool.diameter,
           'external',
           warnings,

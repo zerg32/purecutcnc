@@ -27,6 +27,7 @@ export interface TrochoidalContourOptions {
   advance: number
   toolDiameter: number
   angularDirection: 1 | -1
+  closed?: boolean
   maxPoints?: number
 }
 
@@ -42,6 +43,7 @@ interface ArcLengthPath {
   points: Point[]
   cumulative: number[]
   length: number
+  closed: boolean
 }
 
 function samePoint(a: Point, b: Point): boolean {
@@ -49,26 +51,27 @@ function samePoint(a: Point, b: Point): boolean {
     && Math.abs(a.y - b.y) <= GEOMETRY_EPSILON
 }
 
-function normalizeClosedContour(contour: Point[]): Point[] {
+function normalizeContour(contour: Point[], closed: boolean): Point[] {
   const points: Point[] = []
   for (const point of contour) {
     if (points.length === 0 || !samePoint(points[points.length - 1], point)) {
       points.push({ x: point.x, y: point.y })
     }
   }
-  if (points.length > 1 && samePoint(points[0], points[points.length - 1])) {
+  if (closed && points.length > 1 && samePoint(points[0], points[points.length - 1])) {
     points.pop()
   }
   return points
 }
 
-function buildArcLengthPath(contour: Point[]): ArcLengthPath | null {
-  const points = normalizeClosedContour(contour)
-  if (points.length < 3) return null
+function buildArcLengthPath(contour: Point[], closed: boolean): ArcLengthPath | null {
+  const points = normalizeContour(contour, closed)
+  if (points.length < (closed ? 3 : 2)) return null
 
   const cumulative = [0]
   let length = 0
-  for (let index = 0; index < points.length; index += 1) {
+  const segmentCount = closed ? points.length : points.length - 1
+  for (let index = 0; index < segmentCount; index += 1) {
     const from = points[index]
     const to = points[(index + 1) % points.length]
     const segmentLength = Math.hypot(to.x - from.x, to.y - from.y)
@@ -77,10 +80,10 @@ function buildArcLengthPath(contour: Point[]): ArcLengthPath | null {
     cumulative.push(length)
   }
 
-  if (!(length > GEOMETRY_EPSILON) || cumulative.length !== points.length + 1) {
+  if (!(length > GEOMETRY_EPSILON) || cumulative.length !== segmentCount + 1) {
     return null
   }
-  return { points, cumulative, length }
+  return { points, cumulative, length, closed }
 }
 
 function wrappedDistance(distance: number, length: number): number {
@@ -89,7 +92,12 @@ function wrappedDistance(distance: number, length: number): number {
 }
 
 function samplePosition(path: ArcLengthPath, distance: number): Point {
-  const target = wrappedDistance(distance, path.length)
+  const target = path.closed
+    ? wrappedDistance(distance, path.length)
+    : Math.max(0, Math.min(path.length, distance))
+  if (!path.closed && target >= path.length) {
+    return { ...path.points[path.points.length - 1] }
+  }
   let low = 0
   let high = path.points.length - 1
   while (low < high) {
@@ -134,7 +142,8 @@ export function buildTrochoidalContour(
   contour: Point[],
   options: TrochoidalContourOptions,
 ): TrochoidalContourResult {
-  const path = buildArcLengthPath(contour)
+  const closed = options.closed ?? true
+  const path = buildArcLengthPath(contour, closed)
   if (!path || !(options.orbitRadius > 0) || !(options.advance > 0) || !(options.toolDiameter > 0)) {
     return { points: [], entryCenter: null, loopCount: 0, actualAdvance: 0, error: 'invalid-guide' }
   }
@@ -196,6 +205,6 @@ export function buildTrochoidalContour(
     points.push(orbitPoint(center, frame.tangent, frame.normal, options.orbitRadius, phase))
   }
 
-  points[points.length - 1] = { ...points[0] }
+  if (closed) points[points.length - 1] = { ...points[0] }
   return { points, entryCenter, loopCount, actualAdvance }
 }

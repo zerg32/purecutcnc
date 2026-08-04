@@ -1239,8 +1239,6 @@ export function CAMPanel({
                         className="feat-btn"
                         type="button"
                         onClick={handleAutoPlaceTabs}
-                        disabled={isTrochoidalEdge}
-                        title={isTrochoidalEdge ? camT('cam.operation.tabsTrochoidalUnavailable') : undefined}
                       >
                         {camT('cam.operation.autoPlaceTabs')}
                       </button>

@@ -76,6 +76,8 @@ export const warningsDe: Record<keyof typeof warningsEn, string> = {
   'warnings.edgeTrochoidalRegionUnsupported': 'Trochoidales Kantenschruppen kann keine Bereichsfilter verwenden, solange ein sicherer orbitaler Wiedereintritt nach dem Beschneiden fehlt',
   'warnings.edgeTrochoidalObstacleUnsupported': 'Trochoidales Kantenschruppen kann nicht ausgeführt werden, wenn andere geschützte Add-/Modell-Features eine Bahnbeschneidung erfordern',
   'warnings.edgeTrochoidalPlungeEntry': 'Senkrechtes Eintauchen erfordert ein zentrumschneidendes Werkzeug oder eine vorgeräumte Eintrittsbohrung',
+  'warnings.edgeTrochoidalTabsRequireHelix': 'Trochoidales Schruppen mit Haltestegen erfordert einen Helix-Eintritt für den sicheren Wiedereintritt nach jedem Haltesteg',
+  'warnings.edgeTrochoidalTabUnsafe': 'Ein Haltesteg lässt kein sicheres trochoidales Fragment oder keine sichere Helix-Eintrittstasche zu; Haltesteg oder Schnittparameter anpassen',
   'warnings.edgeMixedDepthSpans': 'Ausgewählte Außenkontur-Ziele haben unterschiedliche wirksame Tiefenspannen. Kombinierte Außenkontur wird für Ziele mit gemischter Tiefe noch nicht unterstützt; das Erzeugen separater Konturen kann innere Überlappungen schneiden. Teilen Sie die Operation nach Tiefe auf oder richten Sie Ober-/Unterseiten der Ziele aus.',
   'warnings.edgeNoCombinedContour': 'Für die ausgewählten Außenkontur-Ziele konnte keine gültige kombinierte Außenkontur erzeugt werden',
   'warnings.edgeFeatureNoCutDepth': '{name} lässt nach axialem Aufmaß keine Schnitttiefe',
@@ -105,7 +107,6 @@ export const warningsDe: Record<keyof typeof warningsEn, string> = {
   'warnings.tabsOutsideCutZ': '{count} nahe Haltestege überlappen die Werkzeugweg-Grundfläche, liegen aber außerhalb des Schnitt-Z-Bereichs ({minZ} -> {maxZ}).',
   'warnings.tabsOutsideCutZList': '{count} nahe Haltestege überlappen die Werkzeugweg-Grundfläche, liegen aber außerhalb des Schnitt-Z-Bereichs ({minZ} -> {maxZ}): {names}.',
   'warnings.tabsOutsideCutZListMore': '{count} nahe Haltestege überlappen die Werkzeugweg-Grundfläche, liegen aber außerhalb des Schnitt-Z-Bereichs ({minZ} -> {maxZ}): {names} und {more} weitere.',
-  'warnings.tabsTrochoidalUnsupported': 'Haltestege werden beim trochoidalen Kantenschruppen nicht angewendet, bis die orbitale Freigängigkeit validiert ist.',
   // surface clean / finish bands
   'warnings.surfaceNoCleanupRegion': 'Kein bearbeitbarer paralleler Säuberungsbereich für Band {topZ} -> {bottomZ}',
   'warnings.surfaceNoCleanupSegments': 'Keine bearbeitbaren parallelen Säuberungssegmente für Band {topZ} -> {bottomZ}',

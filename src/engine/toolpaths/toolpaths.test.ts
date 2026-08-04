@@ -1819,8 +1819,8 @@ function testTrochoidalEdgeUnsupportedClippingFailsClosed() {
     id: 'tab1', name: 'Tab 1', x: 0, y: 0, w: 5, h: 5, z_top: -1, z_bottom: -2, visible: true,
   }]
   const tabResult = generateEdgeRouteToolpath(regionProject, baseInside)
-  assert(tabResult.moves.length === 0, 'trochoidal path with tabs must emit no motion')
-  assert(tabResult.warnings.some((warning) => warning.code === 'tabsTrochoidalUnsupported'), 'expected tab warning')
+  assert(tabResult.moves.length > 0, 'trochoidal path with a safe tab must emit motion')
+  assert(!tabResult.warnings.some((warning) => warning.code.startsWith('edgeTrochoidalTab')), 'expected safe tab fragmentation')
 
   const outsideA = makeAddFeature('a', 0, 0, 20, 20, 0, -2)
   const outsideB = makeAddFeature('b', 22, 0, 20, 20, 0, -2)
@@ -1837,6 +1837,83 @@ function testTrochoidalEdgeUnsupportedClippingFailsClosed() {
   assert(obstacleResult.moves.length === 0, 'obstacle-clipped trochoidal path must emit no motion')
   assert(obstacleResult.warnings.some((warning) => warning.code === 'edgeTrochoidalObstacleUnsupported'), 'expected obstacle warning')
   console.log('trochoidal edge unsupported clipping fails closed: PASSED')
+}
+
+function testTrochoidalEdgeTabsUseSafeHelicalReentry(): void {
+  console.log('Testing trochoidal tabs use depth-aware helical re-entry...')
+  const tool = makeFlatEndmill('t1', 4)
+  const target = makeAddFeature('target', 0, 0, 30, 20, 0, -6)
+  const project = baseProject([tool], [target])
+  project.tabs = [{
+    id: 'tab1', name: 'Partial tab', x: 10, y: -6, w: 6, h: 8, z_top: -3, z_bottom: -4, visible: true,
+  }]
+  const operation = makePocketOp({
+    kind: 'edge_route_outside',
+    target: { source: 'features', featureIds: ['target'] },
+    toolRef: 't1',
+    edgeStrategy: 'trochoidal',
+    trochoidalCutWidth: 8,
+    stepover: 0.2,
+    stepdown: 2,
+    entryStrategy: 'helix',
+  })
+
+  const result = generateEdgeRouteToolpath(project, operation)
+  assert(result.moves.length > 0, 'tabbed trochoidal operation must emit motion')
+  assert(!result.warnings.some((warning) => warning.code.startsWith('edgeTrochoidalTab')), 'safe tab must not emit a tab warning')
+  const upperCuts = result.moves.filter((move) => move.kind === 'cut' && move.to.z === -2)
+  const tabTopCuts = result.moves.filter((move) => move.kind === 'cut' && move.to.z === -3)
+  const lowerCuts = result.moves.filter((move) => move.kind === 'cut' && (move.to.z === -4 || move.to.z === -6))
+  assert(upperCuts.length > 0 && lowerCuts.length > 0, 'expected cuts above and below the tab top')
+  assert(upperCuts.some((move) => move.to.x > 10 && move.to.x < 16 && move.to.y < 0), 'level above tab must keep the continuous guide')
+  assert(tabTopCuts.some((move) => move.to.x > 10 && move.to.x < 16 && move.to.y < 0), 'tab-top level must clear material above the tab')
+  const cutterRadius = tool.diameter / 2
+  assert(lowerCuts.every((move) => (
+    move.to.x <= project.tabs[0].x - cutterRadius
+      || move.to.x >= project.tabs[0].x + project.tabs[0].w + cutterRadius
+      || move.to.y <= project.tabs[0].y - cutterRadius
+      || move.to.y >= project.tabs[0].y + project.tabs[0].h + cutterRadius
+  )), 'cuts below tab top must avoid the cutter-expanded tab footprint')
+  assert(result.moves.filter((move) => move.kind === 'plunge').every((move) => move.to.z >= 0), 'tab re-entry must not plunge below the feature top')
+  assert(result.moves.filter((move) => move.kind === 'plunge' && move.to.z === 0).length >= 3, 'each protected depth fragment must descend from safe Z to the feature top')
+  assert(result.moves.some((move) => move.kind === 'cut' && move.from.z > move.to.z && move.to.z < -3), 'tab fragment must use a descending helical re-entry')
+  assert(lowerCuts.some((move) => move.to.z === -6), 'tab must remain protected below its z_bottom')
+
+  const plunge = generateEdgeRouteToolpath(project, { ...operation, entryStrategy: 'plunge' })
+  assert(plunge.moves.length === 0, 'tabbed trochoidal plunge entry must fail closed')
+  assert(plunge.warnings.some((warning) => warning.code === 'edgeTrochoidalTabsRequireHelix'), 'expected tab Helix requirement warning')
+
+  const unrelatedProject = baseProject([tool], [target])
+  unrelatedProject.tabs = [{
+    id: 'far-tab', name: 'Far tab', x: 100, y: 100, w: 5, h: 5, z_top: 0, z_bottom: -4, visible: true,
+  }]
+  const unrelated = generateEdgeRouteToolpath(unrelatedProject, { ...operation, entryStrategy: 'plunge' })
+  assert(unrelated.moves.length > 0, 'an unrelated tab must not block trochoidal generation')
+  assert(!unrelated.warnings.some((warning) => warning.code === 'edgeTrochoidalTabsRequireHelix'), 'unrelated tab must not require Helix entry')
+
+  const blockedProject = baseProject([tool], [target])
+  blockedProject.tabs = [{
+    id: 'blocking-tab', name: 'Blocking tab', x: -20, y: -20, w: 70, h: 60, z_top: 0, z_bottom: -6, visible: true,
+  }]
+  const blocked = generateEdgeRouteToolpath(blockedProject, operation)
+  assert(blocked.moves.length === 0, 'a tab consuming the full guide must fail closed')
+  assert(blocked.warnings.some((warning) => warning.code === 'edgeTrochoidalTabUnsafe'), 'expected unsafe tab warning')
+
+  const invalidProject = baseProject([tool], [target])
+  invalidProject.tabs = [{
+    id: 'invalid-tab', name: 'Invalid tab', x: 10, y: -6, w: 6, h: 8, z_top: -5, z_bottom: -1, visible: true,
+  }]
+  const invalid = generateEdgeRouteToolpath(invalidProject, operation)
+  assert(invalid.moves.length === 0, 'an intersecting reversed-Z tab must fail closed')
+  assert(invalid.warnings.some((warning) => warning.code === 'tabInvalidZRange'), 'expected invalid tab Z warning')
+
+  const insertedLevelObstacle = makeAddFeature('inserted-obstacle', 10, -8, 6, 4, -2.5, -3.5)
+  const obstacleProject = baseProject([tool], [target, insertedLevelObstacle])
+  obstacleProject.tabs = project.tabs
+  const obstacleResult = generateEdgeRouteToolpath(obstacleProject, operation)
+  assert(obstacleResult.moves.length === 0, 'an obstacle active only around the inserted tab-top level must fail closed')
+  assert(obstacleResult.warnings.some((warning) => warning.code === 'edgeTrochoidalObstacleUnsupported'), 'expected inserted-level obstacle warning')
+  console.log('trochoidal tab helical re-entry: PASSED')
 }
 
 function testTrochoidalEdgeEntrySafetyWarnings(): void {
@@ -3165,6 +3242,7 @@ try {
   testTrochoidalEdgeFollowsCircularBoundary()
   testTrochoidalEdgeValidationAndLegacyParity()
   testTrochoidalEdgeUnsupportedClippingFailsClosed()
+  testTrochoidalEdgeTabsUseSafeHelicalReentry()
   testTrochoidalEdgeEntrySafetyWarnings()
   testTrochoidalEdgeBudgetIsSharedAcrossTargets()
   testTrochoidalEdgeMultiTargetFailureIsAtomic()

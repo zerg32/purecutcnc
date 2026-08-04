@@ -229,10 +229,44 @@ cavity for every retained fragment.
 
 ### Tabs
 
-Trochoidal Edge operations with any tabs currently reject generation with no
-motion. Support remains deferred until tests prove that the entire tab volume
-survives across the boundary-facing portion of the channel and that Z
-transitions remain inside the channel. Tabs must never be silently ignored.
+Trochoidal Edge roughing supports tabs by preserving the entire cutter-expanded
+tab volume across the boundary-facing channel. Tabs must never be silently
+ignored.
+
+fragments outside the cutter-expanded tab footprint. At each tab the tool must
+finish the current fragment, retract to safe Z, rapid across the tab, descend
+vertically only through air to the feature top, and establish a new stationary
+helical entry cavity at a validated setback point before advancing along the
+next fragment. It must not plunge straight into uncleared material after a tab.
+Each affected depth-level guide is split into ordered open fragments outside the
+cutter-expanded tab footprint. At each tab the tool finishes the current
+fragment, retracts to safe Z, rapids across the tab, descends vertically only
+through air to the feature top, and establishes a new stationary helical entry
+cavity at a validated setback point before advancing along the next fragment.
+It does not plunge straight into uncleared material after a tab.
+fragments outside the cutter-expanded tab footprint. At each tab the tool must
+finish the current fragment, retract to safe Z, rapid across the tab, descend
+vertically only through air to the feature top, and establish a new stationary
+helical entry cavity at a validated setback point before advancing along the
+next fragment. It must not plunge straight into uncleared material after a tab.
+
+Tabs need not span the full contour or material thickness. Their XY footprint
+removes only the intersecting portion of the guide, including the cutter and
+orbit-radius expansion; unaffected portions remain machinable fragments. Depth
+levels at or above `tab.z_top` may use the uninterrupted guide. Once a level is
+below `tab.z_top`, that tab remains a protected obstacle for every deeper level.
+A standard vertical endmill must not pass underneath a tab even when the tool
+tip is below `tab.z_bottom`, because the cutter body would still intersect the
+preserved tab volume. The first stepdown that crosses `tab.z_top` therefore
+switches to fragmented generation and uses the same retract, rapid, and helical
+re-entry sequence as subsequent protected levels.
+
+Tabbed Trochoidal generation therefore requires Helix entry. A Plunge entry
+selection, a fragment too short for the entry cavity, or any re-entry whose
+swept cutter intersects the tab, retained boundary, or another protected volume
+must fail closed with a structured warning and no operation motion. The extra
+retractions, rapids, entry helices, and fragment moves count against the shared
+operation move budget.
 
 ### Rest Machining
 
@@ -274,7 +308,7 @@ Add structured warnings for:
 - local curvature too tight for the orbit;
 - swept cutter crossing the retained boundary;
 - obstacle or Region clipping breaking safe continuity;
-- tabs not supported by the validated implementation;
+- tabbed paths using Plunge entry or lacking a safe helical re-entry cavity;
 - sampling or loop budget exceeded;
 - non-ramping entry requiring a center-cutting tool; and
 - no generated motion.
@@ -292,7 +326,7 @@ Unsafe or unsupported geometry produces no motion.
 3. Reuse Clipper scaling and existing Edge offset helpers rather than adding a
    second polygon-offset implementation.
 4. Apply clamp processing at the established pipeline boundary; fail closed for
-   Region, obstacle, and tab cases until continuous orbital re-entry is supported.
+   Region and obstacle clipping, and fragment tabbed guides before generation.
 5. Export pure geometry helpers only when tests or another engine consumer need
    them.
 
@@ -354,6 +388,9 @@ and entry mode.
 - Assert tight inside corners and collapsed offsets fail safely.
 - Assert obstacles, Region masks, clamps, and tabs cannot create an unsafe
   direct link.
+- Assert partial-span tabs remove only local guide intervals, levels above a
+  partial-height tab remain continuous, and every level below `tab.z_top`
+  preserves the tab without attempting an underpass.
 - Assert sampling and move budgets remain bounded on large imported profiles.
 
 ### Compatibility And Integration
@@ -389,5 +426,4 @@ and entry mode.
 - Pocket integration or arbitrary adaptive clearing;
 - stock-aware exact engagement-angle control;
 - automatic changes to retained design corners;
-- rest machining from a trochoidal swept channel; and
-- tabs if the existing tab pipeline cannot initially preserve them safely.
+- rest machining from a trochoidal swept channel.

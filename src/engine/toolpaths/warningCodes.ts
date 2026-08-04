@@ -70,6 +70,8 @@ export type ToolpathWarningCode =
   | 'edgeTrochoidalRegionUnsupported'
   | 'edgeTrochoidalObstacleUnsupported'
   | 'edgeTrochoidalPlungeEntry'
+  | 'edgeTrochoidalTabsRequireHelix'
+  | 'edgeTrochoidalTabUnsafe'
   // 3D surface roughing (stepdown)
   | 'targetsNotFound'
   | 'stepoverRatioRange'
@@ -99,7 +101,6 @@ export type ToolpathWarningCode =
   | 'tabsOutsideCutZ'
   | 'tabsOutsideCutZList'
   | 'tabsOutsideCutZListMore'
-  | 'tabsTrochoidalUnsupported'
   // surface clean / finish bands
   | 'surfaceNoCleanupRegion'
   | 'surfaceNoCleanupSegments'

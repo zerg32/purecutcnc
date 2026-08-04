@@ -98,7 +98,7 @@ test.describe('CAM operation browser smoke', () => {
     await expect(app.page.getByText('Entry', { exact: true })).toBeVisible()
     await expect(app.page.getByText('Entry Strategy', { exact: true }).locator('..').locator('.ui-select__label')).toHaveText('Helix')
     await expect(app.page.getByRole('button', { name: 'Create rest operation', exact: true })).toBeDisabled()
-    await expect(app.page.getByRole('button', { name: 'Auto place tabs', exact: true })).toBeDisabled()
+    await expect(app.page.getByRole('button', { name: 'Auto place tabs', exact: true })).toBeEnabled()
     await expect(app.page.getByRole('alert')).toContainText('The trochoidal path would contain too many moves')
 
     const project = await getProject(app.page)

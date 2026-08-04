@@ -115,10 +115,26 @@ function testInvalidInputsAndBudget(): void {
   assert(budget.points.length === 0, 'budget failure must not emit a partial path')
 }
 
+function testOpenGuideDoesNotCloseAcrossGap(): void {
+  const result = buildTrochoidalContour([{ x: 0, y: 0 }, { x: 20, y: 0 }], {
+    orbitRadius: 1,
+    advance: 2,
+    toolDiameter: 4,
+    angularDirection: 1,
+    closed: false,
+  })
+  assert(result.error === undefined, `unexpected open-guide error ${result.error}`)
+  assert(approx(result.entryCenter?.x ?? -1, 0), 'open guide entry must stay at its first endpoint')
+  assert(approx(result.points[0].x, 1), 'open guide must start on the entry orbit')
+  assert(approx(result.points[result.points.length - 1].x, 21), 'open guide must finish on the exit orbit')
+  assert(!approx(result.points[0].x, result.points[result.points.length - 1].x), 'open guide must not close across its gap')
+}
+
 testClosedPeriodicPath()
 testOrbitRadiusAndDirection()
 testDeterminism()
 testCircularGuideClosesWithoutSeam()
 testInvalidInputsAndBudget()
+testOpenGuideDoesNotCloseAcrossGap()
 
 console.log('trochoidal edge tests passed.')
