@@ -500,6 +500,7 @@ export function createFeatureGeometrySlice(
         project: authoritativeProject,
         selection: {
           ...s.selection,
+          selectedTabIds: [],
           activeControl: null,
         },
         history: {
@@ -617,6 +618,7 @@ export function createFeatureGeometrySlice(
           ...s.selection,
           selectedFeatureId: featureId,
           selectedFeatureIds: [featureId],
+          selectedTabIds: [],
           selectedNode: { type: 'feature', featureId },
           activeControl: null,
         },
@@ -674,6 +676,7 @@ export function createFeatureGeometrySlice(
         project: authoritativeProject,
         selection: {
           ...s.selection,
+          selectedTabIds: [],
           activeControl: null,
         },
         history: {
@@ -730,6 +733,7 @@ export function createFeatureGeometrySlice(
         project: authoritativeProject,
         selection: {
           ...s.selection,
+          selectedTabIds: [],
           activeControl: null,
         },
         history: {
@@ -780,6 +784,7 @@ export function createFeatureGeometrySlice(
         project: authoritativeProject,
         selection: {
           ...s.selection,
+          selectedTabIds: [],
           activeControl: null,
         },
         history: {

@@ -20,6 +20,7 @@ import { ExpandedPanelContext } from '../layout/expandedPanelContext'
 import { Select } from '../Select'
 import { DisclosureSection } from '../common/DisclosureSection'
 import { ZRangeSlider } from './ZRangeSlider'
+import { ModelOrientationSection } from './ModelOrientationSection'
 import { defaultStock, getStockBounds, profileExceedsStock, profileHasSelfIntersection } from '../../types/project'
 import { useProjectStore } from '../../store/projectStore'
 import { getDefinitionId, getInstanceIdsForDefinition } from '../../store/helpers/featureDefinitions'
@@ -170,56 +171,55 @@ function DraftNumberInput({
  * 30 panel renders both before and after converting them. With it, 0.
  */
 export const PropertiesPanel = memo(function PropertiesPanel() {
-  const {
-    project,
-    selection,
-    addFeatureFolder,
-    startAddTabPlacement,
-    startAddClampPlacement,
-    assignFeaturesToFolder,
-    deleteTab,
-    deleteClamp,
-    deleteFeatureFolder,
-    toggleFolderGrouped,
-    setProjectName,
-    setShowFeatureInfo,
-    setProjectClearances,
-    setProjectMachine,
-    setOrigin,
-    startPlaceOrigin,
-    loadBackdropImage,
-    backdropImageLoading,
-    setBackdropImageLoading,
-    updateBackdrop,
-    deleteBackdrop,
-    startMoveBackdrop,
-    startResizeBackdrop,
-    startRotateBackdrop,
-    setGrid,
-    setStock,
-    setStockSourceFeature,
-    updateTab,
-    updateTabs,
-    updateClamp,
-    updateFeatureFolder,
-    updateFeature,
-    updateFeatures,
-    deleteFeature,
-    deleteFeatures,
-    enterSketchEdit,
-    enterStockSketchEdit,
-    enterTabEdit,
-    enterClampEdit,
-    deleteConstraint,
-    makeUnique,
-    expandTextFeature,
-  } = useProjectStore()
+  const project = useProjectStore((s) => s.project)
+  const selection = useProjectStore((s) => s.selection)
+  const addFeatureFolder = useProjectStore((s) => s.addFeatureFolder)
+  const startAddTabPlacement = useProjectStore((s) => s.startAddTabPlacement)
+  const startAddClampPlacement = useProjectStore((s) => s.startAddClampPlacement)
+  const assignFeaturesToFolder = useProjectStore((s) => s.assignFeaturesToFolder)
+  const deleteTab = useProjectStore((s) => s.deleteTab)
+  const deleteTabs = useProjectStore((s) => s.deleteTabs)
+  const deleteClamp = useProjectStore((s) => s.deleteClamp)
+  const deleteFeatureFolder = useProjectStore((s) => s.deleteFeatureFolder)
+  const toggleFolderGrouped = useProjectStore((s) => s.toggleFolderGrouped)
+  const setProjectName = useProjectStore((s) => s.setProjectName)
+  const setShowFeatureInfo = useProjectStore((s) => s.setShowFeatureInfo)
+  const setProjectClearances = useProjectStore((s) => s.setProjectClearances)
+  const setProjectMachine = useProjectStore((s) => s.setProjectMachine)
+  const { library: machineLibrary } = useMachineLibrary()
+  const setOrigin = useProjectStore((s) => s.setOrigin)
+  const startPlaceOrigin = useProjectStore((s) => s.startPlaceOrigin)
+  const loadBackdropImage = useProjectStore((s) => s.loadBackdropImage)
+  const backdropImageLoading = useProjectStore((s) => s.backdropImageLoading)
+  const setBackdropImageLoading = useProjectStore((s) => s.setBackdropImageLoading)
+  const updateBackdrop = useProjectStore((s) => s.updateBackdrop)
+  const deleteBackdrop = useProjectStore((s) => s.deleteBackdrop)
+  const startMoveBackdrop = useProjectStore((s) => s.startMoveBackdrop)
+  const startResizeBackdrop = useProjectStore((s) => s.startResizeBackdrop)
+  const startRotateBackdrop = useProjectStore((s) => s.startRotateBackdrop)
+  const setGrid = useProjectStore((s) => s.setGrid)
+  const setStock = useProjectStore((s) => s.setStock)
+  const setStockSourceFeature = useProjectStore((s) => s.setStockSourceFeature)
+  const updateTab = useProjectStore((s) => s.updateTab)
+  const updateTabs = useProjectStore((s) => s.updateTabs)
+  const updateClamp = useProjectStore((s) => s.updateClamp)
+  const updateFeatureFolder = useProjectStore((s) => s.updateFeatureFolder)
+  const updateFeature = useProjectStore((s) => s.updateFeature)
+  const updateFeatures = useProjectStore((s) => s.updateFeatures)
+  const deleteFeature = useProjectStore((s) => s.deleteFeature)
+  const deleteFeatures = useProjectStore((s) => s.deleteFeatures)
+  const enterSketchEdit = useProjectStore((s) => s.enterSketchEdit)
+  const enterStockSketchEdit = useProjectStore((s) => s.enterStockSketchEdit)
+  const enterTabEdit = useProjectStore((s) => s.enterTabEdit)
+  const enterClampEdit = useProjectStore((s) => s.enterClampEdit)
+  const deleteConstraint = useProjectStore((s) => s.deleteConstraint)
+  const makeUnique = useProjectStore((s) => s.makeUnique)
+  const expandTextFeature = useProjectStore((s) => s.expandTextFeature)
   const features = useMemo(() => resolvedProjectFeatures(project), [project])
   const { t } = useI18n()
   const backdropFileInputRef = useRef<HTMLInputElement>(null)
   const expandedPanelCtx = useContext(ExpandedPanelContext)
   const requestUnitConversion = useRequestUnitConversion()
-  const { library: machineLibrary } = useMachineLibrary()
   const closeExpanded = useCallback(
     () => expandedPanelCtx?.closeExpandedPanel(),
     [expandedPanelCtx],
@@ -244,13 +244,22 @@ export const PropertiesPanel = memo(function PropertiesPanel() {
     selectedNode?.type === 'clamp'
       ? project.clamps.find((clamp) => clamp.id === selectedNode.clampId) ?? null
       : null
-  const selectedTab =
-    selection.selectedTabIds.length === 1
-      ? project.tabs.find((tab) => tab.id === selection.selectedTabIds[0]) ?? null
-      : selectedNode?.type === 'tab'
-        ? project.tabs.find((tab) => tab.id === selectedNode.tabId) ?? null
-        : null
-  const allSelectedTabs = project.tabs.filter((tab) => selection.selectedTabIds.includes(tab.id))
+  const selectedTabs = project.tabs.filter((tab) => selection.selectedTabIds.includes(tab.id))
+  const selectedTab = selectedTabs.length === 1 ? selectedTabs[0] : null
+  const commonTabSize = selectedTabs.length > 0
+    && selectedTabs.every((tab) => tab.w === tab.h && tab.w === selectedTabs[0].w)
+      ? selectedTabs[0].w
+      : null
+  const commonTabShape = selectedTabs.length > 0
+    && selectedTabs.every((tab) => (tab.shape ?? 'rect') === (selectedTabs[0].shape ?? 'rect'))
+      ? selectedTabs[0].shape ?? 'rect'
+      : '__mixed__'
+  const commonTabZTop = selectedTabs.length > 0 && selectedTabs.every((tab) => tab.z_top === selectedTabs[0].z_top)
+    ? selectedTabs[0].z_top
+    : null
+  const commonTabZBottom = selectedTabs.length > 0 && selectedTabs.every((tab) => tab.z_bottom === selectedTabs[0].z_bottom)
+    ? selectedTabs[0].z_bottom
+    : null
   const allSelectedFeatures = features.filter((feature) => selectedFeatureIds.includes(feature.id))
   const commonSelectedFolderId =
     allSelectedFeatures.length > 0 &&
@@ -1088,79 +1097,73 @@ export const PropertiesPanel = memo(function PropertiesPanel() {
     )
   }
 
-  if (allSelectedTabs.length > 1) {
-    const commonSize = allSelectedTabs.every((tab) => tab.w === allSelectedTabs[0].w) ? allSelectedTabs[0].w : null
-    const commonZTop = allSelectedTabs.every((tab) => tab.z_top === allSelectedTabs[0].z_top) ? allSelectedTabs[0].z_top : null
-    const commonZBottom = allSelectedTabs.every((tab) => tab.z_bottom === allSelectedTabs[0].z_bottom) ? allSelectedTabs[0].z_bottom : null
-    const commonShape = allSelectedTabs.every((tab) => (tab.shape ?? 'rect') === (allSelectedTabs[0].shape ?? 'rect')) ? (allSelectedTabs[0].shape ?? 'rect') : null
-
+  if (selectedTabs.length > 1) {
+    const tabIds = selectedTabs.map((tab) => tab.id)
+    const minTabSize = convertLength(0.1, 'mm', units)
     return (
       <div className="properties-panel">
         <div className="properties-group">
           <label className="properties-field">
-            <span>Selection</span>
-            <DraftTextInput value={`${allSelectedTabs.length} Tabs`} disabled />
+            <span>{t('featureTree.properties.selection')}</span>
+            <DraftTextInput value={t('featureTree.properties.tabsSelected', { count: selectedTabs.length })} disabled />
           </label>
           <label className="properties-field">
-            <span>Size</span>
+            <span>{t('featureTree.properties.tabSize')}</span>
             <DraftNumberInput
-              value={commonSize}
-              placeholder="Mixed values"
+              key={`tabs-size-${tabIds.join('-')}-${commonTabSize ?? 'mixed'}`}
+              value={commonTabSize}
+              placeholder={t('featureTree.properties.mixed')}
               units={units}
-              min={0.1}
-              onCommit={(next) => {
-                for (const tab of allSelectedTabs) {
-                  const cx = tab.x + tab.w / 2
-                  const cy = tab.y + tab.h / 2
-                  updateTab(tab.id, {
-                    w: next, h: next,
-                    x: cx - next / 2,
-                    y: cy - next / 2,
-                  })
+              min={minTabSize}
+              onCommit={(size) => updateTabs(selectedTabs.map((tab) => ({
+                id: tab.id,
+                patch: { x: tab.x + (tab.w - size) / 2, y: tab.y + (tab.h - size) / 2, w: size, h: size },
+              })))}
+            />
+          </label>
+          <label className="properties-field">
+            <span>{t('featureTree.properties.tabShape')}</span>
+            <Select
+              value={commonTabShape}
+              options={[
+                ...(commonTabShape === '__mixed__' ? [{ value: '__mixed__', label: t('featureTree.properties.mixed') }] : []),
+                { value: 'rect', label: t('featureTree.properties.tabShapeRect') },
+                { value: 'smooth', label: t('featureTree.properties.tabShapeSmooth') },
+              ]}
+              onChange={(shape) => {
+                if (shape === 'rect' || shape === 'smooth') {
+                  updateTabs(tabIds.map((id) => ({ id, patch: { shape } })))
                 }
               }}
             />
           </label>
           <label className="properties-field">
-            <span>Z Top</span>
+            <span>{t('featureTree.properties.zTop')}</span>
             <DraftNumberInput
-              value={commonZTop}
-              placeholder="Mixed values"
+              key={`tabs-ztop-${tabIds.join('-')}-${commonTabZTop ?? 'mixed'}`}
+              value={commonTabZTop}
+              placeholder={t('featureTree.properties.mixed')}
               units={units}
-              min={0}
-              onCommit={(next) => updateTabs(allSelectedTabs.map((t) => t.id), { z_top: next })}
+              min={Math.max(...selectedTabs.map((tab) => tab.z_bottom))}
+              onCommit={(z_top) => updateTabs(tabIds.map((id) => ({ id, patch: { z_top } })))}
             />
           </label>
           <label className="properties-field">
-            <span>Z Bottom</span>
+            <span>{t('featureTree.properties.zBottom')}</span>
             <DraftNumberInput
-              value={commonZBottom}
-              placeholder="Mixed values"
+              key={`tabs-zbottom-${tabIds.join('-')}-${commonTabZBottom ?? 'mixed'}`}
+              value={commonTabZBottom}
+              placeholder={t('featureTree.properties.mixed')}
               units={units}
               min={0}
-              onCommit={(next) => updateTabs(allSelectedTabs.map((t) => t.id), { z_bottom: next })}
-            />
-          </label>
-          <label className="properties-field">
-            <span>Shape</span>
-            <Select
-              value={commonShape ?? 'rect'}
-              options={[
-                { value: 'rect', label: commonShape === null ? 'Mixed' : 'Rectangle' },
-                { value: 'smooth', label: 'Smooth' },
-              ]}
-              onChange={(value) => updateTabs(allSelectedTabs.map((t) => t.id), { shape: value as 'rect' | 'smooth' })}
+              max={Math.min(...selectedTabs.map((tab) => tab.z_top))}
+              onCommit={(z_bottom) => updateTabs(tabIds.map((id) => ({ id, patch: { z_bottom } })))}
             />
           </label>
         </div>
         <div className="properties-actions">
-          <button className="feat-btn feat-btn--delete" type="button" onClick={() => {
-            for (const tab of allSelectedTabs) {
-              deleteTab(tab.id)
-            }
-            closeExpanded()
-          }}>
-            Delete Selected
+          <button className="feat-btn feat-btn--delete" type="button" onClick={() => { deleteTabs(tabIds); closeExpanded() }}>
+            {t('featureTree.properties.actions.deleteSelectedTabs')}
           </button>
         </div>
       </div>
@@ -1168,6 +1171,8 @@ export const PropertiesPanel = memo(function PropertiesPanel() {
   }
 
   if (selectedTab) {
+    const tabSize = selectedTab.w === selectedTab.h ? selectedTab.w : null
+    const minTabSize = convertLength(0.1, 'mm', units)
     return (
       <div className="properties-panel">
         <div className="properties-group">
@@ -1177,6 +1182,33 @@ export const PropertiesPanel = memo(function PropertiesPanel() {
               key={`tab-name-${selectedTab.id}-${selectedTab.name}`}
               value={selectedTab.name}
               onCommit={(next) => updateTab(selectedTab.id, { name: next })}
+            />
+          </label>
+          <label className="properties-field">
+            <span>{t('featureTree.properties.tabSize')}</span>
+            <DraftNumberInput
+              key={`tab-size-${selectedTab.id}-${tabSize ?? 'mixed'}`}
+              value={tabSize}
+              placeholder={t('featureTree.properties.mixed')}
+              units={units}
+              min={minTabSize}
+              onCommit={(size) => updateTab(selectedTab.id, {
+                x: selectedTab.x + (selectedTab.w - size) / 2,
+                y: selectedTab.y + (selectedTab.h - size) / 2,
+                w: size,
+                h: size,
+              })}
+            />
+          </label>
+          <label className="properties-field">
+            <span>{t('featureTree.properties.tabShape')}</span>
+            <Select
+              value={selectedTab.shape ?? 'rect'}
+              options={[
+                { value: 'rect', label: t('featureTree.properties.tabShapeRect') },
+                { value: 'smooth', label: t('featureTree.properties.tabShapeSmooth') },
+              ]}
+              onChange={(shape) => updateTab(selectedTab.id, { shape })}
             />
           </label>
           <label className="properties-field">
@@ -1199,35 +1231,6 @@ export const PropertiesPanel = memo(function PropertiesPanel() {
               min={0}
               validate={(next) => next <= selectedTab.z_top}
               onCommit={(next) => updateTab(selectedTab.id, { z_bottom: next })}
-            />
-          </label>
-          <label className="properties-field">
-            <span>Size</span>
-            <DraftNumberInput
-              key={`tab-size-${selectedTab.id}-${selectedTab.w}`}
-              value={selectedTab.w}
-              units={units}
-              min={0.1}
-              onCommit={(next) => {
-                const cx = selectedTab.x + selectedTab.w / 2
-                const cy = selectedTab.y + selectedTab.h / 2
-                updateTab(selectedTab.id, {
-                  w: next, h: next,
-                  x: cx - next / 2,
-                  y: cy - next / 2,
-                })
-              }}
-            />
-          </label>
-          <label className="properties-field">
-            <span>Shape</span>
-            <Select
-              value={selectedTab.shape ?? 'rect'}
-              options={[
-                { value: 'rect', label: 'Rectangle' },
-                { value: 'smooth', label: 'Smooth' },
-              ]}
-              onChange={(value) => updateTab(selectedTab.id, { shape: value as 'rect' | 'smooth' })}
             />
           </label>
           <label className="properties-check">
@@ -1602,6 +1605,16 @@ export const PropertiesPanel = memo(function PropertiesPanel() {
             </div>
           ) : null}
         </DisclosureSection>
+        {selectedFeature.operation === 'model' && selectedFeature.stl?.meshAssetId ? (
+          <ModelOrientationSection
+            featureId={selectedFeature.id}
+            orientation={selectedFeature.stl.orientation}
+            zTop={zTop}
+            zBottom={zBottom}
+            units={units}
+            linkedInstanceCount={linkedInstanceCount}
+          />
+        ) : null}
         <DisclosureSection title={t('featureTree.properties.instance')} storageKey="feature-instance">
           <label className="properties-field">
             <span>{t('featureTree.properties.name')}</span>

@@ -280,6 +280,28 @@ export interface PersistedImportedMesh {
   bounds: PersistedImportedMeshBounds
 }
 
+/**
+ * Post-import 3D orientation of an imported model, in degrees.
+ *
+ * Applied to the definition-local mesh **X first, then Y, then Z** about the
+ * model's own axes — i.e. the matrix is `Rz · Ry · Rx`. Degrees (not a
+ * quaternion) because the dominant case is 90° snaps, which round-trip exactly
+ * and stay readable in the `.camj`. Absent means identity, so every project
+ * saved before this field existed loads unchanged.
+ *
+ * Lives on the definition (`FeatureDefinition.stl`) because the derived
+ * silhouette, profile, and top-view image are definition-level; see
+ * ARCHITECTURE §4.
+ */
+export interface ModelOrientation {
+  /** Rotation about the model X axis, degrees. Applied first. */
+  rx: number
+  /** Rotation about the model Y axis, degrees. Applied second. */
+  ry: number
+  /** Rotation about the model Z axis, degrees. Applied last. */
+  rz: number
+}
+
 export interface STLFeatureData {
   /** Imported model file format. Missing means legacy STL. */
   format?: ImportedModelSourceFormat
@@ -292,6 +314,8 @@ export interface STLFeatureData {
   fileData?: string // base64
   scale: number
   axisSwap?: 'none' | 'yz' | 'xz' | 'xy'
+  /** Post-import 3D orientation. Absent = identity (import orientation). */
+  orientation?: ModelOrientation
   /** Legacy imported silhouette PNG. New imports store only topViewDataUrl. */
   silhouetteDataUrl?: string
   /** Project-coordinate projected model silhouette paths. The first/largest path is mirrored in sketch.profile for legacy tools. */
@@ -451,10 +475,13 @@ export type OperationKind =
   | 'drilling'
 
 export type OperationPass = 'rough' | 'finish'
+
+export type EdgeStrategy = 'contour' | 'trochoidal'
 export type PocketPattern = 'offset' | 'parallel' | 'waterline'
 export type CutDirection = 'conventional' | 'climb'
 export type DrillType = 'simple' | 'peck' | 'dwell' | 'chip_breaking' | 'helical'
 export type MachiningOrder = 'level_first' | 'feature_first'
+export type EntryStrategy = 'plunge' | 'helix' | 'ramp'
 
 export type OperationTarget =
   | { source: 'features'; featureIds: string[] }
@@ -478,6 +505,15 @@ export interface Operation {
   rpm: number
   pocketPattern: PocketPattern
   pocketAngle: number
+  /** Edge-route roughing strategy. Missing values are legacy contour operations. */
+  edgeStrategy?: EdgeStrategy
+  /** Trochoidal channel width in the project's length units. */
+  trochoidalCutWidth?: number
+  /** Trochoidal guide advance as a ratio of cutter diameter. */
+  trochoidalAdvance?: number
+  entryStrategy?: EntryStrategy
+  entryRampAngle?: number
+  entryHelixDiameterPercent?: number
   /** Feed percentage (1-100) applied to fully engaged (slotting) pocket cuts:
    *  each section's innermost offset loop, ring segments crossing uncleared
    *  pinch corridors, the parallel boundary pass and first fill line, and the
@@ -496,11 +532,6 @@ export interface Operation {
   peckDepth?: number
   dwellTime?: number
   retractHeight?: number
-  helixDiameter?: number
-  helixPitch?: number
-  rampEntry?: boolean
-  rampAngle?: number
-  rampType?: 'zigzag' | 'spiral'
   debugShowRejectedCorners?: boolean
   waterlineAdaptiveRefinement?: boolean
   waterlineMicroStepover?: number
@@ -512,6 +543,22 @@ export interface Operation {
    *  export-only preference — it does not affect the displayed or simulated
    *  toolpath. */
   arcFittingEnabled?: boolean
+}
+
+/**
+ * True for an Edge Route operation that generates trochoidal orbits rather than
+ * a plain offset contour.
+ *
+ * This is the single definition. The predicate gates generation, the tab pass in
+ * `useToolpathGeneration`, the booklet's setting rows, and the CAM panel's field
+ * visibility — and those must agree exactly, so none of them may re-spell it.
+ * Note the `pass` term: a finish pass is always a contour, even if a stale
+ * `edgeStrategy` survives on the operation from an earlier rough pass.
+ */
+export function isTrochoidalEdgeRoughing(operation: Operation): boolean {
+  return operation.pass === 'rough'
+    && (operation.kind === 'edge_route_inside' || operation.kind === 'edge_route_outside')
+    && operation.edgeStrategy === 'trochoidal'
 }
 
 // ============================================================
@@ -545,8 +592,9 @@ export interface Tab {
   h: number
   z_top: number
   z_bottom: number
-  visible: boolean
+  /** Missing values are legacy rectangular tabs. */
   shape?: 'rect' | 'smooth'
+  visible: boolean
 }
 
 // ============================================================

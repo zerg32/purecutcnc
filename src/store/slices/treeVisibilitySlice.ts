@@ -188,6 +188,7 @@ export function createTreeVisibilitySlice(
           ...s.selection,
           selectedFeatureId: primaryId,
           selectedFeatureIds: ids,
+          selectedTabIds: [],
           selectedNode: primaryId ? { type: 'feature', featureId: primaryId } : null,
           mode: 'feature',
           activeControl: null,

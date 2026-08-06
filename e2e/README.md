@@ -15,6 +15,13 @@ discovers all `e2e/*.spec.ts` files. The fixture auto-navigates to the
 app, waits for the canvas, and fails the test on **any** `console.error`
 or uncaught page error.
 
+From an isolated worktree, use a different port and an owned server so the
+browser cannot silently exercise another checkout:
+
+```bash
+PURECUT_E2E_ISOLATED=1 PURECUT_E2E_PORT=1431 npm run test:e2e
+```
+
 ## CI gate
 
 Pull requests run three logical E2E lanes on separate runners. Each runner
@@ -26,7 +33,7 @@ load inside a runner:
 |------|---------|-------|
 | Settings | `npm run test:e2e:settings` | appearance, units, languages, language manager, theme manager |
 | Project input | `npm run test:e2e:project-input` | feature references, import geometry, creation targets |
-| Workflow UI | `npm run test:e2e:workflow-ui` | CAM operations, G-code export, motion debug, overlap selection, viewport views |
+| Workflow UI | `npm run test:e2e:workflow-ui` | CAM operations, G-code export, motion debug, overlap selection, tab editing, viewport views |
 
 The aggregate `e2e` check succeeds only when every lane succeeds, preserving
 the required PR gate. Each failed lane uploads its own Playwright report and
@@ -52,8 +59,10 @@ Current smoke targets:
 - `creationTargets.smoke.spec.ts` — dedicated Line creation target wiring, active drawing badge, and landscape-tablet availability.
 - `gcodeExport.smoke.spec.ts` — Export G-code dialog operation checklist: per-operation entry point, default set, none-selected disabled state.
 - `importGeometry.smoke.spec.ts` — real-user import flow: dialog open/close, button state, file upload via hidden input, SVG/DXF mode selection with classification summary verification (Auto/Paths/Solid regions), real Import button, project-role verification through existing `getProject` seam, and landscape tablet layout. Synthetic inline fixtures only.
+- `modelOrientation.smoke.spec.ts` — post-import 3D orientation for imported models (issue #241): real STL import, 90° quick-rotate committing a rigid Z band and a re-projected silhouette, non-deforming lift, and reset to import orientation.
 - `machineLibrary.smoke.spec.ts` — application machine library (issue #403): My Machines persistence across projects and restarts, one-snapshot embedding on selection, the non-blocking update warning (keep vs. explicit update), and library deletion leaving a project's embedded machine usable.
 - `overlapFeatureSelection.smoke.spec.ts` — direct selection for clear outline clicks, ambiguous-overlap picker wiring, candidate hover/focus previews, non-topmost selection, boxed scroll behavior, next-action dismissal, and landscape-tablet availability.
+- `tabEditing.smoke.spec.ts` — smooth/rectangular tab controls, centered size changes, tree modifier multi-selection, bulk editing, and bulk deletion.
 
 ## Adding a test
 

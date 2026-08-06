@@ -133,9 +133,7 @@ export function NewProjectDialog({ onClose, onCreated }: NewProjectDialogProps) 
   }, [onClose])
 
   useEffect(() => {
-    queueMicrotask(() => {
-      setProjectName(suggestedProjectName(templateKind, project, fileTemplate))
-    })
+    setProjectName(suggestedProjectName(templateKind, project, fileTemplate))
   }, [fileTemplate, project, templateKind])
 
   const templateSummary = useMemo(() => {

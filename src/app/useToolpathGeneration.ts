@@ -17,6 +17,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   applyClampWarnings,
+  applyEdgeRouteTabs,
   applyTabsToEdgeRoute,
   applyTabWarnings,
   generateDrillingToolpath,
@@ -75,6 +76,12 @@ export function operationComputationEquals(a: Operation, b: Operation): boolean 
     && a.rpm === b.rpm
     && a.pocketPattern === b.pocketPattern
     && a.pocketAngle === b.pocketAngle
+    && a.edgeStrategy === b.edgeStrategy
+    && a.trochoidalCutWidth === b.trochoidalCutWidth
+    && a.trochoidalAdvance === b.trochoidalAdvance
+    && a.entryStrategy === b.entryStrategy
+    && a.entryRampAngle === b.entryRampAngle
+    && a.entryHelixDiameterPercent === b.entryHelixDiameterPercent
     && a.pocketSlotFeedPercent === b.pocketSlotFeedPercent
     && a.roundOutsideCorners === b.roundOutsideCorners
     && a.stockToLeaveRadial === b.stockToLeaveRadial
@@ -96,9 +103,6 @@ export function operationComputationEquals(a: Operation, b: Operation): boolean 
     && a.waterlineRefinementThreshold === b.waterlineRefinementThreshold
     && a.waterlineMaxRingsPerBand === b.waterlineMaxRingsPerBand
     && a.waterlineTipStepdown === b.waterlineTipStepdown
-    && a.rampEntry === b.rampEntry
-    && a.rampAngle === b.rampAngle
-    && a.rampType === b.rampType
   )
 }
 
@@ -229,18 +233,23 @@ export function useToolpathGeneration(project: Project, selectedOperation: Opera
       } else if (operation.kind === 'v_carve_medial') {
         result = applyClampWarnings(project, optimizeAndCapture(generateVCarveMedialToolpath(project, operation)), operation)
       } else if (operation.kind === 'edge_route_inside' || operation.kind === 'edge_route_outside') {
-        const tabAware = applyTabsToEdgeRoute(project, operation, generateEdgeRouteToolpath(project, operation))
-        result = applyClampWarnings(project, optimizeAndCapture(applyTabWarnings(project, operation, tabAware)), operation)
+        // Warnings first: applyTabWarnings judges each tab against the cut Z range, and
+        // applyTabsToEdgeRoute raises that range to the tab tops. Run it on the adjusted
+        // moves and every applied tab reports as lying outside the range it just created.
+        const warned = applyTabWarnings(project, operation, generateEdgeRouteToolpath(project, operation))
+        // applyEdgeRouteTabs, not applyTabsToEdgeRoute: trochoidal roughing owns
+        // its own tab motion and must not be tabbed twice. See its docstring.
+        result = applyClampWarnings(project, optimizeAndCapture(applyEdgeRouteTabs(project, operation, warned)), operation)
       } else if (operation.kind === 'surface_clean') {
         result = applyClampWarnings(project, optimizeAndCapture(applyTabWarnings(project, operation, generateSurfaceCleanToolpath(project, operation))), operation)
       } else if (operation.kind === 'rough_surface') {
         result = applyClampWarnings(project, optimizeAndCapture(applyTabWarnings(project, operation, generateRoughSurfaceToolpath(project, operation))), operation)
       } else if (operation.kind === 'finish_surface') {
-        const tabAware = applyTabsToEdgeRoute(project, operation, generateFinishSurfaceToolpath(project, operation))
-        result = applyClampWarnings(project, optimizeAndCapture(applyTabWarnings(project, operation, tabAware)), operation)
+        const warned = applyTabWarnings(project, operation, generateFinishSurfaceToolpath(project, operation))
+        result = applyClampWarnings(project, optimizeAndCapture(applyTabsToEdgeRoute(project, operation, warned)), operation)
       } else if (operation.kind === 'finish_surface_cleanup') {
-        const tabAware = applyTabsToEdgeRoute(project, operation, generateFinishSurfaceCleanupToolpath(project, operation))
-        result = applyClampWarnings(project, optimizeAndCapture(applyTabWarnings(project, operation, tabAware)), operation)
+        const warned = applyTabWarnings(project, operation, generateFinishSurfaceCleanupToolpath(project, operation))
+        result = applyClampWarnings(project, optimizeAndCapture(applyTabsToEdgeRoute(project, operation, warned)), operation)
       } else if (operation.kind === 'follow_line') {
         result = applyClampWarnings(project, optimizeAndCapture(generateFollowLineToolpath(project, operation)), operation)
       } else if (operation.kind === 'drilling') {
@@ -296,15 +305,27 @@ export function useToolpathGeneration(project: Project, selectedOperation: Opera
     return ids
   }, [selectedOperation, project.operations])
 
+  // Derived during render by checking cache validity — the spinner shows on
+  // the very first render after a parameter change, not one frame late.
+  // toolpathMap is included as a dependency so the memo recomputes when the
+  // async pipeline finishes and updates the map (which also updates the cache).
   const generatingOperationIds = useMemo(() => {
     const ids = new Set<string>()
     for (const id of neededOperationIds) {
-      if (!toolpathMap.has(id)) {
+      const op = project.operations.find((o) => o.id === id)
+      if (!op) continue
+      const entry = toolpathCacheRef.current.get(id)
+      if (!entry || !isCacheHit(entry, op, project)) {
         ids.add(id)
       }
     }
     return ids
-  }, [neededOperationIds, toolpathMap])
+  // toolpathMap is load-bearing, not unnecessary: the memo reads cache state via
+  // toolpathCacheRef (a ref the rule can't see) which is updated in lockstep with
+  // toolpathMap when the async pipeline finishes. Dropping it would leave the
+  // generating spinner stuck on. `project` does not change when generation completes.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [neededOperationIds, project, toolpathMap])
 
   // Async toolpath pipeline: resolves cached results immediately, defers
   // uncached operations one-per-frame with a paint gap in between so the

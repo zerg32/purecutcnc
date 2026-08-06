@@ -128,6 +128,7 @@ export const featureTreeDe: Record<keyof typeof featureTreeEn, string> = {
 
   // ── TreeRow: other buttons ──
   'featureTree.treeRow.selectAllInFolder': 'Alle Features im Ordner auswählen',
+  'featureTree.treeRow.selectAllTabs': 'Alle sichtbaren Haltestege auswählen',
   'featureTree.treeRow.group': 'Features gruppieren',
   'featureTree.treeRow.ungroup': 'Gruppierung der Features aufheben',
   'featureTree.treeRow.editSketch': 'Skizze bearbeiten',
@@ -156,6 +157,12 @@ export const featureTreeDe: Record<keyof typeof featureTreeEn, string> = {
   'featureTree.properties.features': 'Features',
   'featureTree.properties.clamps': 'Spannzwingen',
   'featureTree.properties.tabs': 'Haltestege',
+  'featureTree.properties.tabsSelected': '{count} Haltestege ausgewählt',
+  'featureTree.properties.tabSize': 'Größe',
+  'featureTree.properties.tabShape': 'Form',
+  'featureTree.properties.tabShapeRect': 'Rechteck',
+  'featureTree.properties.tabShapeSmooth': 'Glatt',
+  'featureTree.properties.mixed': 'Gemischt',
   'featureTree.properties.operation': 'Operation',
   'featureTree.properties.selection': 'Auswahl',
   'featureTree.properties.editSketch': 'Skizze bearbeiten',
@@ -253,6 +260,22 @@ export const featureTreeDe: Record<keyof typeof featureTreeEn, string> = {
   'featureTree.properties.operation.model': 'Modell',
   'featureTree.properties.operation.modelLockedTooltip': 'Modell-Features sind importierte 3D-Objekte und können den Operationstyp nicht ändern',
 
+  // ── Properties: imported model 3D orientation ──
+  'featureTree.properties.model.orientation': '3D-Ausrichtung',
+  'featureTree.properties.model.rotateX': 'X drehen',
+  'featureTree.properties.model.rotateY': 'Y drehen',
+  'featureTree.properties.model.rotateZ': 'Z drehen',
+  'featureTree.properties.model.rotateMinus90': 'Diese Achse eine Vierteldrehung zurück drehen',
+  'featureTree.properties.model.rotatePlus90': 'Diese Achse eine Vierteldrehung vor drehen',
+  'featureTree.properties.model.lift': 'Anheben',
+  'featureTree.properties.model.liftTooltip': 'Höhe der Modellunterseite. Verschiebt das gesamte Modell nach oben oder unten, ohne seine Größe zu ändern.',
+  'featureTree.properties.model.heightHint': 'Modellhöhe: {height}',
+  'featureTree.properties.model.linkedHint.one': 'Die Ausrichtung gehört zur gemeinsamen Form, daher dreht sich {count} Kopie mit.',
+  'featureTree.properties.model.linkedHint.other': 'Die Ausrichtung gehört zur gemeinsamen Form, daher drehen sich alle {count} Kopien gemeinsam. Mit „Eindeutig machen“ lässt sich eine Kopie einzeln ausrichten.',
+  'featureTree.properties.model.busy': 'Modell wird neu ausgerichtet …',
+  'featureTree.properties.model.rotateFailed': 'Dieses Modell konnte nicht gedreht werden. Sein Netz fehlt möglicherweise oder ist ungültig.',
+  'featureTree.properties.model.resetOrientation': 'Auf Importausrichtung zurücksetzen',
+
   // ── Properties: mask mode ──
   'featureTree.properties.maskMode': 'Maskenmodus',
   'featureTree.properties.maskMode.include': 'Einschließen',
@@ -312,6 +335,7 @@ export const featureTreeDe: Record<keyof typeof featureTreeEn, string> = {
   'featureTree.properties.actions.deleteFolder': 'Ordner löschen',
   'featureTree.properties.actions.deleteClamp': 'Spannzwinge löschen',
   'featureTree.properties.actions.deleteTab': 'Haltesteg löschen',
+  'featureTree.properties.actions.deleteSelectedTabs': 'Ausgewählte Haltestege löschen',
 
   // ── Context menu: top-level items ──
   'featureTree.contextMenu.makeUnique': 'Eindeutig machen',

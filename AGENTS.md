@@ -1,7 +1,5 @@
 # AGENTS.md — PureCutCNC
 
-> **User override:** [`AGENTS.user.md`](AGENTS.user.md) contains per-user instructions that take precedence over this file.
-
 ## What This Is
 
 PureCutCNC is a browser-based 2.5D CAD/CAM application for CNC hobbyists. It collapses CAD sketching and CAM operation definition into a single workflow. Built with Vite + React + TypeScript, state managed by Zustand, with a Tauri wrapper for desktop builds. Read [`PROJECT.md`](PROJECT.md) for the product contract and safety boundaries.
@@ -20,16 +18,151 @@ If the `codebase-memory-mcp` server is connected, prefer its graph tools (`searc
 
 ## Workflow: Issue → Plan → Approve → Implement → PR
 
-**Every task follows this loop. No exceptions — even a one-line bug fix gets an issue and a short plan.** The plan can be tiny if the task is tiny; the point is that intent is written down, agreed, and traceable. Tasks are tracked on the GitHub Project board ([PureCutCNC project #1](https://github.com/orgs/PureCutCNC/projects/1)), **not** in checked-in plan files.
+**Every task follows this loop, and every task gets an issue.** The only steps a change may skip are 2 and 3 (Plan and Approve), and only when the **Fast lane** below says so — nothing else here is optional. The plan can be tiny if the task is tiny; the point is that intent is written down, agreed, and traceable. Tasks are tracked on the GitHub Project board ([PureCutCNC project #1](https://github.com/orgs/PureCutCNC/projects/1)), **not** in checked-in plan files.
 
 1. **Issue.** Open a GitHub issue for the work (`gh issue create`). Add it to the Project board, set the area label and Size, and set Status to `Backlog` (or `Ready` once planned).
-2. **Plan.** Before changing any code, write the plan **in the issue** — in the body, or a follow-up comment if it grows. Do not create a `planning/*_Plan.md` file; the issue is the plan's home.
-3. **Approve.** Share the issue with the user and **wait for an explicit "approved" (or equivalent) signal**. Do not start implementation before approval. If the user asks for changes, edit the issue and re-confirm. On approval, set Status to `Ready`.
+2. **Plan.** Before changing any code, write the plan **in the issue** — in the body, or a follow-up comment if it grows. Do not create a `planning/*_Plan.md` file; the issue is the plan's home. **Fast lane: skipped — check below before you write a plan.**
+3. **Approve.** Share the issue with the user and **wait for an explicit "approved" (or equivalent) signal**. Do not start implementation before approval. If the user asks for changes, edit the issue and re-confirm. On approval, set Status to `Ready`. **Fast lane: skipped — do not ask.**
 4. **Implement.** Branch (`<type>/issue-<NN>-<slug>`), set the board Status to `In progress`, and implement against the plan in the issue. If the plan changes mid-flight, edit the issue so it stays the source of truth.
 5. **PR when done.** When work is complete and the build is green, open the PR with `Closes #NN` in the description. Move Status to `In review`. The PR is created at the **end** as the delivery — it is not where the plan lives.
 6. **Merge.** Merging auto-closes the issue and moves the card to `Done`.
 
 Abandoned work: close the issue with a short reason; the board moves it to `Done`/closed. No file cleanup needed.
+
+### Fast lane (waives steps 2–3 only)
+
+A change that provably cannot affect machine output, saved projects, or the gates themselves may skip **Plan** and **Approve**. Nothing else changes: still an issue first (the branch name needs its number), still a branch, still green `npm run build`, still a PR with `Closes #NN`, still the board. Every rule in **Build & Verify**, **Git & Branching**, and **Coding Standards** applies unchanged — license header, no `any`, unit tests for engine fixes, e2e when rendered DOM / menu wiring / dialog behavior changes.
+
+Eligibility is mechanical, never a judgment call. The two halves are answerable at different times.
+
+**Before you write anything — protected paths.** You already know which files you will edit. If any is protected, it is the full lane; decided, no script needed. However small the diff: machine output and safety (`src/engine/toolpaths/**`, `src/engine/gcode/**`, `src/machine/**`, `src/utils/units.ts`), the `.camj` format and its migrations (`src/types/project.ts`, `src/store/helpers/projectFormat.ts`, `src/import/camj.ts`), the frozen `ProjectStore` contract (`src/store/types.ts`), and the process/gate machinery itself (`AGENTS.md`, `PROJECT.md`, `ARCHITECTURE.md`, `.github/**`, `.claude/**`, the gate scripts under `scripts/`, `package.json`, `tsconfig*.json`, `eslint.config.js`). [`scripts/check-fast-lane.sh`](scripts/check-fast-lane.sh) owns the authoritative list — add to it whenever a new gate lands.
+
+**After implementing, before you commit — size.** This needs a real diff, so it cannot be answered earlier. The script re-checks the paths too, so a file set that grew mid-implementation is still caught here:
+
+```bash
+npm run check:fast-lane
+```
+
+It measures against `git merge-base origin/main HEAD` and passes at ≤ 3 changed files and ≤ 25 changed lines (added + deleted). Test files (`**/*.test.ts(x)`, `e2e/**`) are exempt from both counts — never trim a test to fit the budget. Generated output (`public/icons.svg`, `package-lock.json`) is counted; if regenerating it blows the budget, take the full lane.
+
+Green → skip Plan and Approve. Red → full lane: write the plan into the issue and wait for approval.
+
+**Do not ask whether you may use the fast lane.** A green check is the authorization. Asking reintroduces exactly the round-trip the lane exists to remove.
+
+**Label the PR `fast-lane`.** The `fast-lane-guard` CI job ([`.github/workflows/fast-lane-guard.yml`](.github/workflows/fast-lane-guard.yml)) re-runs the check on every labeled PR, so a labeled PR that does not meet the criteria cannot merge.
+
+**Growing past the criteria converts the change to the full lane.** The check failing is the decision, not the author's read of it: stop before the next commit, write the plan into the issue, wait for explicit approval, drop the label. Never split a change across PRs to stay under the budget.
+
+**Audit, monthly.** Every merged PR since the last audit must have either the `fast-lane` label or an approval on its issue predating the branch's first commit — a PR with neither is a process escape.
+
+```bash
+gh pr list --state merged --limit 50 --json number,title,labels,mergedAt
+```
+
+Re-run the eligibility check against each labeled PR's merge base. If fast-lane PRs exceed a third of the window, the criteria are being stretched — tighten them.
+
+## The Backlog Contract
+
+The workflow above governs how work *enters*. This section governs how it
+*leaves* — because without it the tracker fills with unranked cards faster than
+they can ever be worked. It has happened twice: a root `TODO.md` grew until it
+was migrated wholesale into 27 issues (#185–#211) in one sitting, and those sat
+unranked for nine weeks. Converting a list into cards does not convert it into
+decisions.
+
+Five rules. Four are enforced by
+[`.github/workflows/backlog-hygiene.yml`](.github/workflows/backlog-hygiene.yml)
+(logic in [`scripts/backlog-hygiene.ts`](scripts/backlog-hygiene.ts)), so they
+hold whether or not anyone is paying attention.
+
+### R1 — Every open issue carries a Priority
+
+Priority is GitHub's **native organization issue field**, not a project field.
+It lives on the issue itself, so it shows on the issue page, survives outside
+the board, and is filterable straight from the issues list. The project board
+projects the same field, so the board and the issue can never disagree.
+
+| Priority | Meaning | Cap |
+| --- | --- | --- |
+| `Urgent` | Broken, blocking, or actively in progress | 5 |
+| `High` | Committed to the current release cycle | 10 |
+| `Medium` | Real and accepted, but unscheduled | uncapped; decays |
+| `Low` | Kept only while someone is actively arguing for it | uncapped; decays |
+
+`Medium` and `Low` both decay. There is deliberately no permanent "Someday"
+tier — that bucket is where backlogs go to rot. Anything that cannot be argued
+to at least `Medium` today should be closed today; closed is not deleted, and
+closed issues stay searchable and reopenable forever.
+
+The caps are the point, not decoration: more than five `Urgent` means nothing is
+urgent, more than ten `High` means nothing is committed. Anything without a
+Priority is labelled `needs-priority` automatically.
+
+### R2 — Decay: 60 days quiet, 14 days' notice, then closed
+
+An open issue that is **not** `Urgent` or `High` — i.e. `Medium`, `Low`, or
+unprioritized — and has had **no activity for 60 days** gets a `stale` label and
+a comment. If nothing happens in the next **14 days**, it is closed as *not
+planned*. Any comment, edit, label, or priority change resets the clock.
+
+Keeping something alive costs one sentence. That is the design: the sentence
+*is* the act of valuing it.
+
+Never decays — external reports (R3), `Urgent`/`High`, anything with an
+assignee, anything past `Backlog` on the board, and `pinned`.
+
+The bet this rule makes is that **closing a speculative item costs nothing,
+because the ones that matter come back with better evidence than the original
+filing**. That is not a hope; it is the observed behaviour of this tracker.
+#196's polish list contained `[ ] Non-rectangular tabs`, untouched from
+2026-06-25. On 2026-08-02 an outside user filed #414 — smooth tabs — with a
+working branch and a screenshot.
+
+### R3 — External reports are marked automatically and never decay
+
+Any issue opened by someone whose `author_association` is not
+`OWNER`/`MEMBER`/`COLLABORATOR` is labelled `external-report` on arrival.
+
+This is the most valuable rule here because it requires no discipline at all.
+Roughly 6% of this repo's issues come from outside, they are the highest-signal
+ones, and before this label they were visually identical to our own speculation.
+The digest tracks any that have gone 14 days without a reply.
+
+### R4 — One weekly digest that cannot itself become clutter
+
+The workflow **rewrites the body** of the single issue labelled
+`backlog-digest`; it never comments, so it never grows. It reports counts per
+Priority, cap breaches, unranked issues, external reports awaiting a reply, and
+— importantly — **what will go stale in the next 14 days**, so a rescue is
+always possible before the warning, not after.
+
+### R5 — Intake: do not file speculative scope as an issue
+
+Open an issue only for work that is:
+
+1. a defect, or
+2. externally requested, or
+3. something you intend to start this cycle.
+
+Ideas that are none of these do not get a card. This is the only rule with no
+mechanical enforcement — R2 is its backstop. Speculative issues filed anyway
+decay in 74 days without anyone lifting a finger.
+
+### Operating notes
+
+- Both the 60/14 windows and the caps are constants at the top of
+  `scripts/backlog-hygiene.ts`. Change them there, not by hand-editing issues.
+- The script **defaults to a dry run**. `npx tsx scripts/backlog-hygiene.ts`
+  prints exactly what would change; `--apply` mutates.
+- The run needs no special token. Priority is read from the native issue field,
+  which the default Actions `GITHUB_TOKEN` can see. Board `Status` is optional
+  enrichment worth one extra decay exemption ("someone is already on it"); if
+  the token cannot read Projects v2 the script logs that and continues.
+- Carried over from the #374 audit, which was itself buried before it could be
+  acted on: **when a finding cites code, cite symbol names plus the commit SHA
+  it was verified against, and treat line numbers as a hint.** Every single
+  `file:line` reference in that audit had gone stale, and two files had moved
+  directory.
 
 ## Build & Verify
 

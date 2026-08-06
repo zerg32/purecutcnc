@@ -80,9 +80,8 @@ export function sanitizeSelection(project: Project, selection: SelectionState): 
     selection.selectedFeatureId && selectedFeatureIds.includes(selection.selectedFeatureId)
       ? selection.selectedFeatureId
       : selectedFeatureIds.at(-1) ?? null
-
-  const selectedTabIds = selection.selectedTabIds.filter((tabId) =>
-    project.tabs.some((tab) => tab.id === tabId)
+  const selectedTabIds = (selection.selectedTabIds ?? []).filter((tabId, index, ids) =>
+    ids.indexOf(tabId) === index && project.tabs.some((tab) => tab.id === tabId)
   )
 
   if (selectedNode?.type === 'feature') {
@@ -154,7 +153,8 @@ export function sanitizeSelection(project: Project, selection: SelectionState): 
   return {
     ...selection,
     mode:
-      selectedFeatureIds.length === 1 && selection.selectedNode?.type === 'feature'
+      (selectedFeatureIds.length === 1 && selection.selectedNode?.type === 'feature') ||
+      (selectedTabIds.length === 1 && selection.selectedNode?.type === 'tab')
         ? selection.mode
         : 'feature',
     selectedFeatureId,
@@ -586,6 +586,7 @@ export function createSelectionSlice(
           ...s.selection,
           selectedFeatureId: null,
           selectedFeatureIds: [],
+          selectedTabIds: [],
           selectedNode: { type: 'construction_root' },
           mode: 'feature',
           activeControl: null,

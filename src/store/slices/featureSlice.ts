@@ -155,6 +155,7 @@ export function createFeatureSlice(
             ...s.selection,
             selectedFeatureId: null,
             selectedFeatureIds: [],
+            selectedTabIds: [],
             selectedNode: { type: 'folder', folderId: nextId },
             mode: 'feature',
             activeControl: null,
@@ -209,11 +210,14 @@ export function createFeatureSlice(
           )),
           meta: { ...s.project.meta, modified: new Date().toISOString() },
         })
+        const deletedSelectedFolder = s.selection.selectedNode?.type === 'folder'
+          && s.selection.selectedNode.folderId === id
         return {
           project: nextProject,
           selection: {
             ...s.selection,
-            selectedNode: s.selection.selectedNode?.type === 'folder' && s.selection.selectedNode.folderId === id
+            selectedTabIds: deletedSelectedFolder ? [] : s.selection.selectedTabIds,
+            selectedNode: deletedSelectedFolder
               ? { type: 'features_root' }
               : s.selection.selectedNode,
             selectedFeatureId: s.selection.selectedFeatureId,
@@ -427,6 +431,7 @@ export function createFeatureSlice(
             ...s.selection,
             selectedFeatureId: selectedIds[selectedIds.length - 1],
             selectedFeatureIds: [...selectedIds],
+            selectedTabIds: [],
             selectedNode: { type: 'folder', folderId: nextId },
             mode: 'feature',
             activeControl: null,
@@ -565,6 +570,7 @@ export function createFeatureSlice(
             ...s.selection,
             selectedFeatureId: safeInstance.id,
             selectedFeatureIds: [safeInstance.id],
+            selectedTabIds: [],
             selectedNode: { type: 'feature' as const, featureId: safeInstance.id },
             mode: 'feature' as const,
             activeControl: null,
@@ -708,6 +714,7 @@ export function createFeatureSlice(
             ...s.selection,
             selectedFeatureId: nextPrimaryId,
             selectedFeatureIds: remainingSelectedIds,
+            selectedTabIds: [],
             selectedNode: nextPrimaryId ? { type: 'feature', featureId: nextPrimaryId } : null,
             mode: nextPrimaryId && remainingSelectedIds.length === 1 ? s.selection.mode : 'feature',
             activeControl: nextPrimaryId && remainingSelectedIds.length === 1 ? s.selection.activeControl : null,
@@ -793,6 +800,7 @@ export function createFeatureSlice(
             ...s.selection,
             selectedFeatureId: primaryId,
             selectedFeatureIds: createdIds,
+            selectedTabIds: [],
             selectedNode: primaryId ? { type: 'feature', featureId: primaryId } : null,
             mode: 'feature',
             activeControl: null,
@@ -868,6 +876,7 @@ export function createFeatureSlice(
             ...s.selection,
             selectedFeatureId: primaryId,
             selectedFeatureIds: createdIds,
+            selectedTabIds: [],
             selectedNode: primaryId ? { type: 'feature', featureId: primaryId } : null,
             mode: 'feature',
             activeControl: null,
@@ -918,6 +927,7 @@ export function createFeatureSlice(
             ...s.selection,
             selectedFeatureId: primaryId,
             selectedFeatureIds: createdIds,
+            selectedTabIds: [],
             selectedNode: primaryId ? { type: 'feature', featureId: primaryId } : null,
             mode: 'feature',
             activeControl: null,
@@ -1222,6 +1232,7 @@ export function createFeatureSlice(
             ...s.selection,
             selectedFeatureId: null,
             selectedFeatureIds: [],
+            selectedTabIds: [],
             selectedNode: null,
             mode: 'feature',
             activeControl: null,

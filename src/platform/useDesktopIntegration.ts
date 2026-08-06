@@ -18,7 +18,6 @@ import { useEffect, useRef } from 'react'
 import type { MutableRefObject } from 'react'
 import { useProjectStore } from '../store/projectStore'
 import { platform } from './index'
-import { basenameFromPath } from './path'
 import { checkDesktopUpdate, loadChannel, saveChannel } from '../utils/updateCheck'
 import {
   copySelectedFeatures,
@@ -168,7 +167,7 @@ export function useDesktopIntegration({ onExportGcode, onPrintDesign, onShowAbou
 
   useEffect(() => {
     const baseName = filePath
-      ? basenameFromPath(filePath).replace(/\.camj$/, '') || projectName
+      ? (filePath.split('/').pop()?.replace(/\.camj$/, '') ?? projectName)
       : projectName
     const title = dirty
       ? `\u2022 ${baseName} \u2014 PureCutCNC`

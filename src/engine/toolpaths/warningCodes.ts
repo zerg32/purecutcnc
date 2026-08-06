@@ -32,6 +32,10 @@ export type ToolpathWarningCode =
   | 'resolverNoBands'
   // shared helpers
   | 'cutDepthExceedsToolMax'
+  // clearing-operation entry strategies
+  | 'entryStrategyFallback'
+  | 'entryDisabledByRegionMask'
+  | 'entryHelixDiameterClamped'
   // developer diagnostics (debugToolpath) — untranslated passthrough
   | 'debug'
   // shared generator preconditions
@@ -58,6 +62,22 @@ export type ToolpathWarningCode =
   | 'toolDiameterPositive'
   | 'stepdownPositive'
   | 'edgeRouteNoValidTargets'
+  // trochoidal edge route
+  | 'edgeTrochoidalWidthTooSmall'
+  | 'edgeTrochoidalWidthNarrow'
+  | 'edgeTrochoidalWidthLeavesCore'
+  | 'edgeTrochoidalAdvanceRange'
+  | 'edgeTrochoidalParametersInvalid'
+  | 'edgeTrochoidalEntryStrategyUnsupported'
+  | 'edgeTrochoidalRegionUnsupported'
+  | 'edgeTrochoidalInvalidGuide'
+  | 'edgeTrochoidalMoveBudget'
+  | 'edgeTrochoidalEntryBudget'
+  | 'edgeTrochoidalTabsRequireHelix'
+  | 'edgeTrochoidalTabUnsafe'
+  | 'edgeTrochoidalSkippedSpan'
+  | 'edgeTrochoidalNoSurvivingSpan'
+  | 'edgeTrochoidalSafetyCheck'
   // 3D surface roughing (stepdown)
   | 'targetsNotFound'
   | 'stepoverRatioRange'
@@ -87,6 +107,7 @@ export type ToolpathWarningCode =
   | 'tabsOutsideCutZ'
   | 'tabsOutsideCutZList'
   | 'tabsOutsideCutZListMore'
+  | 'tabsBlockFinalDepth'
   // surface clean / finish bands
   | 'surfaceNoCleanupRegion'
   | 'surfaceNoCleanupSegments'
@@ -108,6 +129,10 @@ export type ToolpathWarningCode =
   | 'drillPeckDepthPositive'
   | 'drillNotDrillBit'
   | 'drillTargetsNotCircles'
+  | 'drillHelicalToolUnsupported'
+  | 'drillHelicalBoreTooSmall'
+  | 'drillHelicalBoreTooLarge'
+  | 'drillHelicalBoreUnmachinable'
   // carving (follow-line)
   | 'carveDepthClamped'
   | 'carveNotEnoughGeometry'
@@ -157,6 +182,7 @@ export type ToolpathWarningCode =
   | 'postNoCoolantCommands'
   | 'postCannedCycleUnsupported'
   | 'postArcNoCapability'
+  | 'postArcFallbackLinear'
   // simulation replay / booklet report
   | 'replayNoTool'
   | 'bookletNoTool'
@@ -164,6 +190,7 @@ export type ToolpathWarningCode =
   // store rest-operation creation
   | 'restOperationNotFound'
   | 'restOnlyPocketEdgeTargets'
+  | 'restTrochoidalUnsupported'
 
 export interface ToolpathWarning {
   code: ToolpathWarningCode

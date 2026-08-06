@@ -27,13 +27,13 @@
  * Run with: npx tsx src/engine/toolpaths/camOperationSmoke.test.ts
  */
 
-import type { DrillType, Operation, Project, SketchFeature, Tool } from '../../types/project'
+import type { DrillType, Operation, Project, Segment, SketchFeature, Tool } from '../../types/project'
 import { circleProfile, defaultTool, newProject, rectProfile } from '../../types/project'
 import { projectWithFeatures } from '../../test/projectFixtures'
 import { runPostProcessor } from '../gcode/postprocessor'
 import { validateMachineDefinition } from '../gcode/types'
 import type { MachineDefinition } from '../gcode/types'
-import { normalizeToolForProject } from './geometry'
+import { getOperationClearance, getOperationSafeZ, normalizeToolForProject } from './geometry'
 import type { ToolpathResult } from './types'
 import { generatePocketToolpath } from './pocket'
 import { generateDrillingToolpath } from './drilling'
@@ -357,21 +357,104 @@ test('pocket waterline pattern: generates non-empty toolpath + posts', () => {
   assert(gcode.length > 0, 'waterline pocket should produce non-empty G-code')
 })
 
+test('pocket helix entry: emits descending lead-in moves and posts', () => {
+  const tool = makeFlatEndmill('t1', 4)
+  const feat = makeRectFeature('a', 0, 0, 20, 20, 0, -4)
+  const project = baseProject([tool], [feat])
+  const op = makePocketOp({
+    kind: 'pocket',
+    target: { source: 'features', featureIds: ['a'] },
+    toolRef: 't1',
+    entryStrategy: 'helix',
+    entryRampAngle: 5,
+    entryHelixDiameterPercent: 80,
+  })
+
+  const result = generatePocketToolpath(project, op)
+  const descendingLeadIns = result.moves.filter((move) =>
+    move.kind === 'lead_in' && move.to.z < move.from.z - 1e-9)
+  assert(descendingLeadIns.length > 0, 'helix entry should emit descending lead-in moves')
+  // Levels below the first descend to the previous cut Z plus clearance before
+  // the helix starts, so air-descent plunges are expected. A plunge *fallback*
+  // is the one that reaches cut depth itself, so it is always the move
+  // immediately before the first cut; a helix hands off with a lead-in.
+  const plungedIntoCut = result.moves.some((move, index) =>
+    move.kind === 'plunge' && result.moves[index + 1]?.kind === 'cut')
+  assert(!plungedIntoCut, 'open pocket should not need plunge fallback')
+
+  const gcode = postToolpath(project, op, result)
+  assert(gcode.length > 0, 'helix-entry pocket should produce non-empty G-code')
+})
+
+test('pocket helix entry starts above the previous cut level, not at safe Z', () => {
+  const tool = makeFlatEndmill('t1', 4)
+  const feat = makeRectFeature('a', 0, 0, 20, 20, 0, -4)
+  const project = baseProject([tool], [feat])
+  const op = makePocketOp({
+    kind: 'pocket',
+    target: { source: 'features', featureIds: ['a'] },
+    toolRef: 't1',
+    entryStrategy: 'helix',
+    entryRampAngle: 5,
+    entryHelixDiameterPercent: 80,
+  })
+
+  const result = generatePocketToolpath(project, op)
+  const safeZ = getOperationSafeZ(project)
+  const clearance = getOperationClearance(project)
+  assert(result.stepLevels.length > 1, 'fixture must step down more than once')
+
+  // The descent that precedes a helix is the only plunge in this toolpath.
+  const airDescents = result.moves.filter((move, index) =>
+    move.kind === 'plunge' && result.moves[index + 1]?.kind === 'lead_in')
+  assert(airDescents.length > 0, 'levels below the first should descend before the helix')
+
+  // Every one of them must stop one clearance above a level that is already
+  // cut, never at safe Z (the air-cutting case) and never at or below the
+  // level it is about to cut.
+  const cutLevels = [...result.stepLevels].sort((a, b) => b - a)
+  for (const descent of airDescents) {
+    assert(descent.from.z === safeZ, 'descent should begin at the global safe Z')
+    assert(descent.to.z < safeZ - 1e-9, 'descent should end below safe Z')
+    const matchesPreviousLevel = cutLevels.some((level) => approx(descent.to.z, level + clearance))
+    assert(matchesPreviousLevel, 'descent should stop one clearance above a cut level')
+  }
+
+  // XY travel still happens at safe Z: nothing rapids while buried.
+  const buriedRapids = result.moves.filter((move) =>
+    move.kind === 'rapid'
+    && (move.from.x !== move.to.x || move.from.y !== move.to.y)
+    && (move.from.z < safeZ - 1e-9 || move.to.z < safeZ - 1e-9))
+  assert(buriedRapids.length === 0, 'XY rapids must stay at safe Z')
+})
+
+test('pocket default entry remains byte-identical to explicit plunge', () => {
+  const tool = makeFlatEndmill('t1', 4)
+  const feat = makeRectFeature('a', 0, 0, 20, 20, 0, -4)
+  const project = baseProject([tool], [feat])
+  const base = makePocketOp({
+    kind: 'pocket',
+    target: { source: 'features', featureIds: ['a'] },
+    toolRef: 't1',
+  })
+  const implicit = generatePocketToolpath(project, base)
+  const explicit = generatePocketToolpath(project, { ...base, entryStrategy: 'plunge' })
+  assert(JSON.stringify(implicit) === JSON.stringify(explicit), 'unset and explicit plunge toolpaths must match')
+})
+
 // =====================================================================
 // 2. DRILLING — drill-type differentiation
 // =====================================================================
 
 console.log('\nDrilling drill-type differentiation')
 
-function drillingFixture(drillType: DrillType, peckDepth?: number, helixOverrides?: {
-  helixDiameter?: number
-  helixPitch?: number
-}): {
+function drillingFixture(drillType: DrillType, peckDepth?: number): {
   project: Project
   operation: Operation
 } {
-  const tool = makeDrill('t1', 3)
-  const circle = makeCircleFeature('c1', 20, 20, 5, 0, -6)
+  const toolType = drillType === 'helical' ? makeFlatEndmill('t1', 3) : makeDrill('t1', 3)
+  const tool = toolType
+  const circle = makeCircleFeature('c1', 20, 20, 2.5, 0, -6)
   const project = baseProject([tool], [circle])
   const op = makePocketOp({
     kind: 'drilling',
@@ -380,7 +463,6 @@ function drillingFixture(drillType: DrillType, peckDepth?: number, helixOverride
     stepdown: 2,
     drillType,
     peckDepth,
-    ...helixOverrides,
   })
   return { project, operation: op }
 }
@@ -454,48 +536,541 @@ test('drilling chip_breaking: multiple plunges with small retracts', () => {
   assert(gcode.length > 0, 'chip_breaking should produce non-empty G-code')
 })
 
-test('drilling helical: G1 helical interpolation path + rapid retract', () => {
-  const { project, operation } = drillingFixture('helical', undefined, { helixDiameter: 6, helixPitch: 2 })
+test('drilling helical: spiral lead_in descent, bottom flatten, no canned cycle', () => {
+  const { project, operation } = drillingFixture('helical')
   const result = generateDrillingToolpath(project, operation)
   assert(result.moves.length > 0, 'helical drilling should produce moves')
 
-  // Helical path uses G1 cut moves, not a single plunge
-  const cuts = result.moves.filter((m) => m.kind === 'cut')
-  assert(cuts.length >= 32, `helical drilling should have >= 32 cut segments, got ${cuts.length}`)
+  // Helical uses lead_in moves (not plunge) for the spiral descent
+  const leadIns = result.moves.filter((m) => m.kind === 'lead_in')
+  assert(leadIns.length > 0, 'helical drilling should use lead_in moves')
 
-  // No plunge should be emitted (helical path reaches bottomZ exactly with these params)
+  // Must descend incrementally: not a single straight plunge
   const plunges = result.moves.filter((m) => m.kind === 'plunge')
   assert(plunges.length === 0, `helical drilling should have 0 plunges, got ${plunges.length}`)
 
-  // First cut move should start at helix radius from centre (not at centre)
-  const firstCut = cuts[0]
-  const helixRadius = (6 - 3) / 2 // (helixDiameter - tool.diameter) / 2 = desired hole radius
-  const centreX = 20
-  const centreY = 20
-  assert(
-    Math.abs(Math.hypot(firstCut.from.x - centreX, firstCut.from.y - centreY) - helixRadius) < 1e-6,
-    `first cut should start at helix radius ${helixRadius} from centre, got distance ${Math.hypot(firstCut.from.x - centreX, firstCut.from.y - centreY)}`,
-  )
+  // Bounded true-bore: the cutter-centre orbit must equal H−T at every lead-in point.
+  // holeRadius=2.5, toolDiameter=3 → toolRadius=1.5 → boreRadius=1.0
+  const expectedBoreRadius = 2.5 - 1.5
+  const cx = 20, cy = 20
+  for (const move of leadIns) {
+    for (const pt of [move.from, move.to]) {
+      const dist = Math.hypot(pt.x - cx, pt.y - cy)
+      // Rapids to centre (dist ≈ 0) are the travel moves — skip them
+      if (move.kind !== 'lead_in') continue
+      assert(approx(dist, expectedBoreRadius, 0.01),
+        `bore radius ${dist.toFixed(4)} should equal H−T=${expectedBoreRadius}`)
+    }
+  }
 
-  // Helix should descend Z incrementally across segments
-  const firstZCuts = cuts.slice(0, 5)
-  const zChanges = firstZCuts.map((m) => m.to.z - m.from.z)
-  assert(zChanges.every((dz) => dz < 0), 'helical cuts should descend in Z')
-  assert(zChanges.every((dz) => dz > -1), 'Z drop per segment should be small (< 1 unit)')
+  // At least some moves should be below top Z (actual descent)
+  const belowTop = result.moves.filter((m) => m.to.z < 0)
+  assert(belowTop.length > 0, 'helical moves should descend below top Z')
 
-  // Last move should be a rapid retract to safe-Z
-  const lastMove = result.moves[result.moves.length - 1]
-  assert(lastMove.kind === 'rapid', 'last move should be a rapid retract')
+  // Final position should be at safeZ (retract)
   const safeZ = project.stock.thickness + project.meta.operationClearanceZ
-  assert(
-    approx(lastMove.to.z, safeZ),
-    `final retract should go to safeZ=${safeZ}, got ${lastMove.to.z}`,
-  )
+  const finalMove = result.moves[result.moves.length - 1]
+  assert(approx(finalMove.to.z, safeZ), `final move should retract to safeZ=${safeZ}, got ${finalMove.to.z}`)
+
+  // No drillCycles emitted — moves are expanded G1
+  assert(!result.drillCycles || result.drillCycles.length === 0, 'helical drilling should have no drillCycles')
+
+  // No drillNotDrillBit warning for flat_endmill
+  const warning = result.warnings.find((w) => w.code === 'drillNotDrillBit')
+  assert(!warning, 'helical with flat_endmill should not produce drillNotDrillBit')
 
   const gcode = postToolpath(project, operation, result)
   assert(gcode.length > 0, 'helical drilling should produce non-empty G-code')
-  assert(gcode.includes('G1'), 'helical G-code should contain G1 moves')
-  assert(!gcode.includes('G81'), 'helical G-code should not contain G81 canned cycle')
+  // G-code must not contain canned cycles (G81/G82/G83/G73)
+  assert(!/G8[123]/.test(gcode), 'helical G-code should not contain canned cycle codes')
+  assert(!/G73/.test(gcode), 'helical G-code should not contain G73')
+})
+
+test('drilling helical: unsupported tool falls back with warning', () => {
+  // Use a drill tool instead of flat_endmill
+  const drill = makeDrill('t1', 3)
+  const circle = makeCircleFeature('c1', 20, 20, 5, 0, -6)
+  const project = baseProject([drill], [circle])
+  const op = makePocketOp({
+    kind: 'drilling',
+    target: { source: 'features', featureIds: ['c1'] },
+    toolRef: 't1',
+    stepdown: 2,
+    drillType: 'helical',
+  })
+  const result = generateDrillingToolpath(project, op)
+  assert(result.moves.length > 0, 'fallback should produce moves')
+
+  // Should warn about unsupported tool
+  const toolWarning = result.warnings.find((w) => w.code === 'drillHelicalToolUnsupported')
+  assert(!!toolWarning, 'helical with drill should produce drillHelicalToolUnsupported warning')
+
+  // Should fall back to simple plunge (drillCycles with simple type)
+  assert(result.drillCycles !== undefined && result.drillCycles.length > 0, 'fallback should have drillCycles')
+  if (result.drillCycles) {
+    assert(result.drillCycles[0].drillType === 'simple', 'fallback drillCycle should be simple')
+  }
+
+  const gcode = postToolpath(project, op, result)
+  assert(gcode.length > 0, 'fallback should produce non-empty G-code')
+})
+
+test('drilling helical: v_bit falls back with warning', () => {
+  const vBit = makeVBit('t1')
+  const circle = makeCircleFeature('c1', 20, 20, 5, 0, -6)
+  const project = baseProject([vBit], [circle])
+  const op = makePocketOp({
+    kind: 'drilling',
+    target: { source: 'features', featureIds: ['c1'] },
+    toolRef: 't1',
+    stepdown: 2,
+    drillType: 'helical',
+  })
+  const result = generateDrillingToolpath(project, op)
+  const toolWarning = result.warnings.find((w) => w.code === 'drillHelicalToolUnsupported')
+  assert(!!toolWarning, 'helical with v_bit should produce drillHelicalToolUnsupported warning')
+  assert(result.drillCycles !== undefined && result.drillCycles.length > 0, 'v_bit fallback should have drillCycles')
+})
+
+test('drilling helical: ball_endmill falls back with warning', () => {
+  const base = defaultTool('mm', 1)
+  const ballEndmill: Tool = {
+    ...base,
+    id: 't1',
+    name: 'Ball endmill',
+    type: 'ball_endmill',
+    diameter: 4,
+    defaultStepdown: 2,
+    defaultStepover: 0.4,
+  }
+  const circle = makeCircleFeature('c1', 20, 20, 5, 0, -6)
+  const project = baseProject([ballEndmill], [circle])
+  const op = makePocketOp({
+    kind: 'drilling',
+    target: { source: 'features', featureIds: ['c1'] },
+    toolRef: 't1',
+    stepdown: 2,
+    drillType: 'helical',
+  })
+  const result = generateDrillingToolpath(project, op)
+  const toolWarning = result.warnings.find((w) => w.code === 'drillHelicalToolUnsupported')
+  assert(!!toolWarning, 'helical with ball_endmill should produce drillHelicalToolUnsupported warning')
+  assert(result.drillCycles !== undefined && result.drillCycles.length > 0, 'ball_endmill fallback should have drillCycles')
+})
+
+test('drilling helical: legacy four-arc circle profile produces same result as native circle', () => {
+  // Build a circle via four 90° arcs matching a native circle with r=2.5
+  // (hole diameter 5, tool diameter 3 → eligible: 3 < 5 ≤ 6)
+  const r = 2.5
+  const cx = 20
+  const cy = 20
+  const fourArcSegments: Segment[] = [
+    { type: 'arc', to: { x: cx, y: cy + r }, center: { x: cx, y: cy }, clockwise: true },
+    { type: 'arc', to: { x: cx - r, y: cy }, center: { x: cx, y: cy }, clockwise: true },
+    { type: 'arc', to: { x: cx, y: cy - r }, center: { x: cx, y: cy }, clockwise: true },
+    { type: 'arc', to: { x: cx + r, y: cy }, center: { x: cx, y: cy }, clockwise: true },
+  ]
+  const fourArcFeature: SketchFeature = {
+    id: 'c1',
+    name: 'FourArcHole',
+    kind: 'circle',
+    folderId: null,
+    sketch: {
+      profile: { start: { x: cx + r, y: cy }, segments: fourArcSegments, closed: true },
+      origin: { x: 0, y: 0 },
+      orientationAngle: 0,
+      dimensions: [],
+      constraints: [],
+    },
+    operation: 'subtract',
+    z_top: 0,
+    z_bottom: -6,
+    visible: true,
+    locked: false,
+  }
+  const nativeFeature = makeCircleFeature('c1', cx, cy, r, 0, -6)
+  const tool = makeFlatEndmill('t1', 3)
+
+  const nativeProj = baseProject([tool], [nativeFeature])
+  const fourArcProj = baseProject([tool], [fourArcFeature])
+
+  const nativeOp = makePocketOp({
+    kind: 'drilling',
+    target: { source: 'features', featureIds: ['c1'] },
+    toolRef: 't1',
+    stepdown: 2,
+    drillType: 'helical',
+    entryRampAngle: 5,
+    entryHelixDiameterPercent: 80,
+  })
+  const fourArcOp = { ...nativeOp }
+
+  const nativeResult = generateDrillingToolpath(nativeProj, nativeOp)
+  const fourArcResult = generateDrillingToolpath(fourArcProj, fourArcOp)
+
+  assert(nativeResult.moves.length > 0, 'native circle should produce moves')
+  assert(fourArcResult.moves.length > 0, 'four-arc circle should produce moves')
+
+  // Both should produce lead_in moves (helical), not plunge
+  const nativeLeadIns = nativeResult.moves.filter((m) => m.kind === 'lead_in')
+  const fourArcLeadIns = fourArcResult.moves.filter((m) => m.kind === 'lead_in')
+  assert(nativeLeadIns.length > 0, 'native circle should have lead_in moves')
+  assert(fourArcLeadIns.length > 0, 'four-arc circle should have lead_in moves')
+
+  // The move count should be identical for identical geometry
+  assert(nativeResult.moves.length === fourArcResult.moves.length,
+    `four-arc moves (${fourArcResult.moves.length}) should match native (${nativeResult.moves.length})`)
+  assert(!nativeResult.drillCycles || nativeResult.drillCycles.length === 0, 'native should have no drillCycles')
+  assert(!fourArcResult.drillCycles || fourArcResult.drillCycles.length === 0, 'four-arc should have no drillCycles')
+})
+
+test('drilling helical: malformed four-arc geometry falls back to plunge', () => {
+  // Four arcs with DIFFERENT centers — does not form a proper circle
+  const cx = 20
+  const cy = 20
+  const r = 5
+  const malformedSegments: Segment[] = [
+    { type: 'arc', to: { x: cx, y: cy + r }, center: { x: cx, y: cy }, clockwise: true },
+    { type: 'arc', to: { x: cx - r, y: cy }, center: { x: cx + 1, y: cy + 1 }, clockwise: true }, // different centre
+    { type: 'arc', to: { x: cx, y: cy - r }, center: { x: cx, y: cy }, clockwise: true },
+    { type: 'arc', to: { x: cx + r, y: cy }, center: { x: cx, y: cy }, clockwise: true },
+  ]
+  const malformedFeature: SketchFeature = {
+    id: 'c1',
+    name: 'BadCircle',
+    kind: 'circle',
+    folderId: null,
+    sketch: {
+      profile: { start: { x: cx + r, y: cy }, segments: malformedSegments, closed: true },
+      origin: { x: 0, y: 0 },
+      orientationAngle: 0,
+      dimensions: [],
+      constraints: [],
+    },
+    operation: 'subtract',
+    z_top: 0,
+    z_bottom: -6,
+    visible: true,
+    locked: false,
+  }
+  const tool = makeFlatEndmill('t1', 3)
+  const project = baseProject([tool], [malformedFeature])
+  const op = makePocketOp({
+    kind: 'drilling',
+    target: { source: 'features', featureIds: ['c1'] },
+    toolRef: 't1',
+    stepdown: 2,
+    drillType: 'helical',
+  })
+  const result = generateDrillingToolpath(project, op)
+
+  // Should fall back: getCircleCenter returns null for malformed 4-arc
+  // → precomputeDrillTargets skips it → drillNoValidCircles
+  // Actually wait: getCircleCenter shares the same validation now.
+  // A malformed 4-arc circle returns null center → precompute skips it
+  assert(result.warnings.some((w) => w.code === 'drillNoValidCircles' || w.code === 'drillNoCenter'),
+    'malformed 4-arc should produce a diagnostic warning')
+})
+
+test('drilling helical: partial four-arc (not closed) is rejected', () => {
+  const r = 5
+  const cx = 20
+  const cy = 20
+  // Three 90° arcs that don't close back to start → 270° partial circle
+  const partialSegments: Segment[] = [
+    { type: 'arc', to: { x: cx, y: cy + r }, center: { x: cx, y: cy }, clockwise: true },
+    { type: 'arc', to: { x: cx - r, y: cy }, center: { x: cx, y: cy }, clockwise: true },
+    { type: 'arc', to: { x: cx, y: cy - r }, center: { x: cx, y: cy }, clockwise: true },
+    // Fourth arc goes back to a wrong point, not profile.start
+    { type: 'arc', to: { x: cx, y: cy - r }, center: { x: cx, y: cy }, clockwise: true },
+  ]
+  const partialFeature: SketchFeature = {
+    id: 'c1', name: 'PartialCircle', kind: 'circle', folderId: null,
+    sketch: { profile: { start: { x: cx + r, y: cy }, segments: partialSegments, closed: true },
+      origin: { x: 0, y: 0 }, orientationAngle: 0, dimensions: [], constraints: [] },
+    operation: 'subtract', z_top: 0, z_bottom: -6, visible: true, locked: false,
+  }
+  const tool = makeFlatEndmill('t1', 3)
+  const project = baseProject([tool], [partialFeature])
+  const op = makePocketOp({
+    kind: 'drilling', target: { source: 'features', featureIds: ['c1'] },
+    toolRef: 't1', stepdown: 2, drillType: 'helical',
+  })
+  const result = generateDrillingToolpath(project, op)
+  assert(result.warnings.some((w) => w.code === 'drillNoValidCircles' || w.code === 'drillNoCenter'),
+    'partial four-arc (not closing to start) should be rejected')
+})
+
+test('drilling helical: mixed-direction four-arc is rejected', () => {
+  const r = 5
+  const cx = 20
+  const cy = 20
+  const mixedSegments: Segment[] = [
+    { type: 'arc', to: { x: cx, y: cy + r }, center: { x: cx, y: cy }, clockwise: true },
+    { type: 'arc', to: { x: cx - r, y: cy }, center: { x: cx, y: cy }, clockwise: false }, // opposite direction
+    { type: 'arc', to: { x: cx, y: cy - r }, center: { x: cx, y: cy }, clockwise: true },
+    { type: 'arc', to: { x: cx + r, y: cy }, center: { x: cx, y: cy }, clockwise: true },
+  ]
+  const mixedFeature: SketchFeature = {
+    id: 'c1', name: 'MixedDir', kind: 'circle', folderId: null,
+    sketch: { profile: { start: { x: cx + r, y: cy }, segments: mixedSegments, closed: true },
+      origin: { x: 0, y: 0 }, orientationAngle: 0, dimensions: [], constraints: [] },
+    operation: 'subtract', z_top: 0, z_bottom: -6, visible: true, locked: false,
+  }
+  const tool = makeFlatEndmill('t1', 3)
+  const project = baseProject([tool], [mixedFeature])
+  const op = makePocketOp({
+    kind: 'drilling', target: { source: 'features', featureIds: ['c1'] },
+    toolRef: 't1', stepdown: 2, drillType: 'helical',
+  })
+  const result = generateDrillingToolpath(project, op)
+  assert(result.warnings.some((w) => w.code === 'drillNoValidCircles' || w.code === 'drillNoCenter'),
+    'mixed-direction four-arc should be rejected')
+})
+
+test('drilling helical: oversized-sweep four-arc is rejected', () => {
+  const r = 5
+  const cx = 20
+  const cy = 20
+  // Four arcs each sweeping 180° (clockwise, same center/direction/radius)
+  // — they double-cover the circle but don't form a simple single-turn path.
+  const oversweepSegments: Segment[] = [
+    { type: 'arc', to: { x: cx - r, y: cy }, center: { x: cx, y: cy }, clockwise: true },
+    { type: 'arc', to: { x: cx + r, y: cy }, center: { x: cx, y: cy }, clockwise: true },
+    { type: 'arc', to: { x: cx - r, y: cy }, center: { x: cx, y: cy }, clockwise: true },
+    { type: 'arc', to: { x: cx + r, y: cy }, center: { x: cx, y: cy }, clockwise: true },
+  ]
+  const oversweepFeature: SketchFeature = {
+    id: 'c1', name: 'OversweepCircle', kind: 'circle', folderId: null,
+    sketch: { profile: { start: { x: cx + r, y: cy }, segments: oversweepSegments, closed: true },
+      origin: { x: 0, y: 0 }, orientationAngle: 0, dimensions: [], constraints: [] },
+    operation: 'subtract', z_top: 0, z_bottom: -6, visible: true, locked: false,
+  }
+  const tool = makeFlatEndmill('t1', 3)
+  const project = baseProject([tool], [oversweepFeature])
+  const op = makePocketOp({
+    kind: 'drilling', target: { source: 'features', featureIds: ['c1'] },
+    toolRef: 't1', stepdown: 2, drillType: 'helical',
+  })
+  const result = generateDrillingToolpath(project, op)
+  assert(result.warnings.some((w) => w.code === 'drillNoValidCircles' || w.code === 'drillNoCenter'),
+    'oversized-sweep four-arc (180° per arc) should be rejected')
+})
+
+test('drilling helical: open four-arc profile is rejected', () => {
+  const r = 5
+  const cx = 20
+  const cy = 20
+  const openSegments: Segment[] = [
+    { type: 'arc', to: { x: cx, y: cy + r }, center: { x: cx, y: cy }, clockwise: true },
+    { type: 'arc', to: { x: cx - r, y: cy }, center: { x: cx, y: cy }, clockwise: true },
+    { type: 'arc', to: { x: cx, y: cy - r }, center: { x: cx, y: cy }, clockwise: true },
+    { type: 'arc', to: { x: cx + r, y: cy }, center: { x: cx, y: cy }, clockwise: true },
+  ]
+  const openFeature: SketchFeature = {
+    id: 'c1', name: 'OpenCircle', kind: 'circle', folderId: null,
+    sketch: { profile: { start: { x: cx + r, y: cy }, segments: openSegments, closed: false },
+      origin: { x: 0, y: 0 }, orientationAngle: 0, dimensions: [], constraints: [] },
+    operation: 'subtract', z_top: 0, z_bottom: -6, visible: true, locked: false,
+  }
+  const tool = makeFlatEndmill('t1', 3)
+  const project = baseProject([tool], [openFeature])
+  const op = makePocketOp({
+    kind: 'drilling', target: { source: 'features', featureIds: ['c1'] },
+    toolRef: 't1', stepdown: 2, drillType: 'helical',
+  })
+  const result = generateDrillingToolpath(project, op)
+  assert(result.warnings.some((w) => w.code === 'drillNoValidCircles' || w.code === 'drillNoCenter'),
+    'open (non-closed) four-arc should be rejected')
+})
+
+// ── Bounded true-bore eligibility ──────────────────────────────────
+
+test('drilling helical: hole at 2× tool diameter is accepted', () => {
+  // toolDiameter=3, holeRadius=3 → holeDiameter=6 = 2× toolDiameter → accepted
+  const tool = makeFlatEndmill('t1', 3)
+  const circle = makeCircleFeature('c1', 20, 20, 3, 0, -6)
+  const project = baseProject([tool], [circle])
+  const op = makePocketOp({
+    kind: 'drilling', target: { source: 'features', featureIds: ['c1'] },
+    toolRef: 't1', stepdown: 2, drillType: 'helical', entryRampAngle: 5,
+  })
+  const result = generateDrillingToolpath(project, op)
+  assert(result.moves.length > 0, '2× boundary should produce moves')
+  const leadIns = result.moves.filter((m) => m.kind === 'lead_in')
+  assert(leadIns.length > 0, '2× boundary should emit lead_in moves')
+  // Bore radius must be H−T = 3−1.5 = 1.5
+  const cx = 20, cy = 20
+  for (const move of leadIns) {
+    for (const pt of [move.from, move.to]) {
+      const dist = Math.hypot(pt.x - cx, pt.y - cy)
+      if (dist < 0.001) continue  // centre rapids
+      assert(approx(dist, 1.5, 0.01), `2× bore radius ${dist.toFixed(4)} must equal H−T=1.5`)
+    }
+  }
+})
+
+test('drilling helical: hole at tool diameter is rejected with no moves', () => {
+  // toolDiameter=3, holeRadius=1.5 → holeDiameter=3 = tool diameter → rejected
+  const tool = makeFlatEndmill('t1', 3)
+  const circle = makeCircleFeature('c1', 20, 20, 1.5, 0, -6)
+  const project = baseProject([tool], [circle])
+  const op = makePocketOp({
+    kind: 'drilling', target: { source: 'features', featureIds: ['c1'] },
+    toolRef: 't1', stepdown: 2, drillType: 'helical', entryRampAngle: 5,
+  })
+  const result = generateDrillingToolpath(project, op)
+  // No cutting/travel moves for this target — structured warning only
+  const cutsOrLeads = result.moves.filter((m) => m.kind === 'lead_in' || m.kind === 'cut' || m.kind === 'plunge')
+  assert(cutsOrLeads.length === 0, 'equal-diameter hole must emit zero cutting moves')
+  const tooSmall = result.warnings.find((w) => w.code === 'drillHelicalBoreTooSmall')
+  assert(!!tooSmall, 'should emit drillHelicalBoreTooSmall warning')
+  // No drillNotDrillBit (flat_endmill is valid tool type)
+  assert(!result.warnings.find((w) => w.code === 'drillNotDrillBit'), 'no drillNotDrillBit for flat_endmill')
+})
+
+test('drilling helical: hole smaller than tool is rejected with no moves', () => {
+  // toolDiameter=4, holeRadius=1.25 → holeDiameter=2.5 < 4 → rejected
+  const tool = makeFlatEndmill('t1', 4)
+  const circle = makeCircleFeature('c1', 20, 20, 1.25, 0, -6)
+  const project = baseProject([tool], [circle])
+  const op = makePocketOp({
+    kind: 'drilling', target: { source: 'features', featureIds: ['c1'] },
+    toolRef: 't1', stepdown: 2, drillType: 'helical', entryRampAngle: 5,
+  })
+  const result = generateDrillingToolpath(project, op)
+  const cutsOrLeads = result.moves.filter((m) => m.kind === 'lead_in' || m.kind === 'cut' || m.kind === 'plunge')
+  assert(cutsOrLeads.length === 0, 'undersized hole must emit zero cutting moves')
+  assert(!!result.warnings.find((w) => w.code === 'drillHelicalBoreTooSmall'),
+    'should emit drillHelicalBoreTooSmall for undersized hole')
+})
+
+test('drilling helical: 12× hole (far above 2×) is rejected with Inside Edge Cut recommendation', () => {
+  // Simulate 1/4 in endmill (≈6.35 mm) and 3 in hole (≈76.2 mm) — 12×
+  const tool = makeFlatEndmill('t1', 6.35)
+  const circle = makeCircleFeature('c1', 20, 20, 38.1, 0, -6)
+  const project = baseProject([tool], [circle])
+  const op = makePocketOp({
+    kind: 'drilling', target: { source: 'features', featureIds: ['c1'] },
+    toolRef: 't1', stepdown: 2, drillType: 'helical', entryRampAngle: 5,
+  })
+  const result = generateDrillingToolpath(project, op)
+  const cutsOrLeads = result.moves.filter((m) => m.kind === 'lead_in' || m.kind === 'cut' || m.kind === 'plunge')
+  assert(cutsOrLeads.length === 0, '12× hole must produce zero cutting moves')
+  assert(!!result.warnings.find((w) => w.code === 'drillHelicalBoreTooLarge'),
+    'should emit drillHelicalBoreTooLarge')
+})
+
+test('drilling helical: rejected first target does not fabricate position for valid sibling', () => {
+  // P1 regression: a rejected first target must not set currentPosition to
+  // the hole centre. The second (valid) target must establish safe-Z from
+  // scratch — no move should originate from or be attributed to the rejected
+  // hole center.
+  const tool = makeFlatEndmill('t1', 4)
+  // First hole too small (r=2, holeDiameter=4 = toolDiameter → rejected)
+  const tooSmall = makeCircleFeature('c1', 20, 20, 2, 0, -6)
+  // Second hole is valid (r=3, toolDiameter=4 → holeDiameter=6 ≤ 8)
+  const good = makeCircleFeature('c2', 50, 50, 3, 0, -6)
+  const project = baseProject([tool], [tooSmall, good])
+  const op = makePocketOp({
+    kind: 'drilling', target: { source: 'features', featureIds: ['c1', 'c2'] },
+    toolRef: 't1', stepdown: 2, drillType: 'helical', entryRampAngle: 5,
+  })
+  const result = generateDrillingToolpath(project, op)
+  // Warning for the too-small target
+  assert(!!result.warnings.find((w) => w.code === 'drillHelicalBoreTooSmall'),
+    'should warn about the too-small first hole')
+  // The valid second target must emit lead_in moves
+  const leadIns = result.moves.filter((m) => m.kind === 'lead_in')
+  assert(leadIns.length > 0, 'eligible sibling should emit lead_in moves')
+  // No move must have a from or to at the rejected hole centre (20,20)
+  const rejectedCenter = { x: 20, y: 20 }
+  for (const move of result.moves) {
+    for (const pt of [move.from, move.to]) {
+      // Allow rapids that initiate at the rejected centre only if they are
+      // the zero-length safe-Z establishment for the valid target. But the
+      // valid target is at (50,50), so no move should be at (20,20).
+      if (Math.abs(pt.x - rejectedCenter.x) < 0.01 && Math.abs(pt.y - rejectedCenter.y) < 0.01) {
+        assert(false, `no move should reference the rejected hole centre (20,20)`)
+      }
+    }
+  }
+})
+
+test('drilling helical: rejected mid-sequence target preserves prior position for sibling', () => {
+  // P1 regression: a valid first target sets currentPosition, then a
+  // rejected second target must NOT overwrite it. The third valid target
+  // should travel from the first target's position, not the rejected one.
+  const tool = makeFlatEndmill('t1', 3)
+  const first = makeCircleFeature('c1', 20, 20, 2.5, 0, -6)  // eligible: hole=5, tool=3 → 3<5≤6
+  const rejected = makeCircleFeature('c2', 80, 80, 1.5, 0, -6) // too small: hole=3 = tool=3
+  const third = makeCircleFeature('c3', 50, 50, 2.5, 0, -6)   // eligible
+  const project = baseProject([tool], [first, rejected, third])
+  const op = makePocketOp({
+    kind: 'drilling', target: { source: 'features', featureIds: ['c1', 'c2', 'c3'] },
+    toolRef: 't1', stepdown: 2, drillType: 'helical', entryRampAngle: 5,
+  })
+  const result = generateDrillingToolpath(project, op)
+  assert(!!result.warnings.find((w) => w.code === 'drillHelicalBoreTooSmall'),
+    'should warn about the too-small middle hole')
+  const leadIns = result.moves.filter((m) => m.kind === 'lead_in')
+  assert(leadIns.length > 0, 'eligible targets should emit lead_in moves')
+  // No move should reference the rejected centre (80,80)
+  const rejectedCenter = { x: 80, y: 80 }
+  for (const move of result.moves) {
+    for (const pt of [move.from, move.to]) {
+      if (Math.abs(pt.x - rejectedCenter.x) < 0.01 && Math.abs(pt.y - rejectedCenter.y) < 0.01) {
+        assert(false, `no move should reference the rejected hole centre (80,80)`)
+      }
+    }
+  }
+})
+
+test('drilling helical: move-budget exhaustion rejects with no moves and unmachinable warning', () => {
+  // P0 regression: when a finish-bore helix exceeds MAX_ENTRY_DESCENT_MOVES
+  // the result must be zero moves and drillHelicalBoreUnmachinable, not a
+  // plunge fallback.
+  const tool = makeFlatEndmill('t1', 3)
+  // Eligible diameter (hole=5, tool=3 → 3<5≤6) but very deep with shallow
+  // ramp angle → move budget exceeded.
+  const circle = makeCircleFeature('c1', 20, 20, 2.5, 0, -500)
+  const project = baseProject([tool], [circle])
+  const op = makePocketOp({
+    kind: 'drilling', target: { source: 'features', featureIds: ['c1'] },
+    toolRef: 't1', stepdown: 2, drillType: 'helical', entryRampAngle: 0.1,
+  })
+  const result = generateDrillingToolpath(project, op)
+  // Must have the unmachinable warning
+  assert(!!result.warnings.find((w) => w.code === 'drillHelicalBoreUnmachinable'),
+    'move-budget breach should produce drillHelicalBoreUnmachinable warning')
+  // Must NOT have entryStrategyFallback warning
+  assert(!result.warnings.find((w) => w.code === 'entryStrategyFallback'),
+    'move-budget breach should not produce entryStrategyFallback for finish-bore')
+  // Zero cutting/travel moves
+  const nonRapidMoves = result.moves.filter((m) => m.kind !== 'rapid')
+  assert(nonRapidMoves.length === 0, 'rejection must emit zero non-rapid moves')
+  // Actually, zero moves total since no moves are emitted on rejection
+  assert(result.moves.length === 0, 'rejection must emit zero moves')
+  // No drill cycles
+  assert(!result.drillCycles || result.drillCycles.length === 0, 'rejection must emit no drill cycles')
+})
+
+test('drilling helical: valid sibling targets generate normally after ineligible target', () => {
+  const tool = makeFlatEndmill('t1', 3)
+  // First hole is too small (r=1, holeDiameter=2 < toolDiameter=3), second is eligible (r=2.5)
+  const small = makeCircleFeature('c1', 20, 20, 1, 0, -6)
+  const good = makeCircleFeature('c2', 50, 50, 2.5, 0, -6)
+  const project = baseProject([tool], [small, good])
+  const op = makePocketOp({
+    kind: 'drilling', target: { source: 'features', featureIds: ['c1', 'c2'] },
+    toolRef: 't1', stepdown: 2, drillType: 'helical', entryRampAngle: 5,
+  })
+  const result = generateDrillingToolpath(project, op)
+  // Should have the too-small warning + lead_in moves for the eligible hole
+  assert(!!result.warnings.find((w) => w.code === 'drillHelicalBoreTooSmall'),
+    'should warn about the too-small hole')
+  const leadIns = result.moves.filter((m) => m.kind === 'lead_in')
+  assert(leadIns.length > 0, 'eligible sibling should still emit lead_in moves')
 })
 
 // ---------------------------------------------------------------------
@@ -556,6 +1131,46 @@ test('surface_clean: generates toolpath + posts to non-empty G-code', () => {
 
   const gcode = postToolpath(project, op, result)
   assert(gcode.length > 0, 'surface_clean should produce non-empty G-code')
+})
+
+test('surface_clean helix entry: emits descending lead-in moves', () => {
+  const tool = makeFlatEndmill('t1', 4)
+  const feat: SketchFeature = {
+    ...makeRectFeature('a', 0, 0, 20, 20, 4, 0),
+    operation: 'add',
+  }
+  const project = baseProject([tool], [feat])
+  const op = makePocketOp({
+    kind: 'surface_clean',
+    target: { source: 'features', featureIds: ['a'] },
+    toolRef: 't1',
+    stepdown: 1,
+    entryStrategy: 'helix',
+  })
+
+  const result = generateSurfaceCleanToolpath(project, op)
+  assert(
+    result.moves.some((move) => move.kind === 'lead_in' && move.to.z < move.from.z - 1e-9),
+    'surface-clean helix should emit descending lead-in moves',
+  )
+})
+
+test('surface_clean default entry remains byte-identical to explicit plunge', () => {
+  const tool = makeFlatEndmill('t1', 4)
+  const feat: SketchFeature = {
+    ...makeRectFeature('a', 0, 0, 20, 20, 4, 0),
+    operation: 'add',
+  }
+  const project = baseProject([tool], [feat])
+  const base = makePocketOp({
+    kind: 'surface_clean',
+    target: { source: 'features', featureIds: ['a'] },
+    toolRef: 't1',
+    stepdown: 1,
+  })
+  const implicit = generateSurfaceCleanToolpath(project, base)
+  const explicit = generateSurfaceCleanToolpath(project, { ...base, entryStrategy: 'plunge' })
+  assert(JSON.stringify(implicit) === JSON.stringify(explicit), 'unset and explicit plunge toolpaths must match')
 })
 
 test('follow_line: generates toolpath + posts to non-empty G-code', () => {

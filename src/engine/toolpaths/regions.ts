@@ -17,8 +17,9 @@
 import ClipperLib from 'clipper-lib'
 import { isMachinable, isRegion } from '../../store/helpers/featureRoles'
 import { resolveFeatureInstances } from '../../store/helpers/resolveFeatures'
-import type { Point, Project, SketchFeature } from '../../types/project'
+import type { Operation, Point, Project, SketchFeature } from '../../types/project'
 import type { ClipperPath, ToolpathBounds, ToolpathMove, ToolpathPoint, ToolpathResult } from './types'
+import type { ToolpathWarning } from './warningCodes'
 import {
   DEFAULT_CLIPPER_SCALE,
   flattenProfile,
@@ -201,6 +202,22 @@ export function buildRegionMask(regionFeatures: SketchFeature[]): RegionMask | n
   }
 }
 
+/**
+ * Region filters are applied at different seams across clearing generators,
+ * including a post-generation clip that discards lead-ins and reconnects cut
+ * fragments with safe-Z plunges. Until every consumer exposes one continuous
+ * entry-clearance contract, masked operations retain their legacy plunge.
+ */
+export function entryDisabledByRegionMaskWarning(
+  operation: Operation,
+  mask: RegionMask | null,
+): ToolpathWarning | null {
+  const requested = operation.entryStrategy ?? 'plunge'
+  return mask && requested !== 'plunge'
+    ? { code: 'entryDisabledByRegionMask', params: { requested } }
+    : null
+}
+
 export function buildMaskFromClipperPaths(paths: ClipperPath[]): RegionMask | null {
   if (paths.length === 0) return null
   return {
@@ -354,13 +371,7 @@ function pushSafeTransition(moves: ToolpathMove[], current: ToolpathPoint | null
     return target
   }
 
-  // No prior known position — emit a positioning rapid so the post-processor
-  // has a defined position before the first cut move. Without this, the nudge
-  // rapid (or any initial rapid) that was stripped by the obstacle clipper's
-  // cut-only filter is never restored and the first cut emits G1 without a
-  // preceding G0, causing a diagonal feed move from the tool-change Z.
   const safeTo = { x: target.x, y: target.y, z: safeZ }
-  moves.push({ kind: 'rapid', from: safeTo, to: safeTo })
   if (Math.abs(safeTo.z - target.z) > 1e-9) {
     moves.push({ kind: 'plunge', from: safeTo, to: target })
   }
@@ -407,36 +418,17 @@ export function clipToolpathResultToObstaclesByLevel(
   const safeZ = getOperationSafeZ(project)
   const clippedMoves: ToolpathMove[] = []
   let current: ToolpathPoint | null = null
+  const cutMoves = result.moves.filter((move) => move.kind === 'cut')
 
-  for (const move of result.moves) {
-    // Non-cut moves (rapid, plunge) are transitions — keep them as-is so
-    // the toolpath generator's own transition strategy (same-Z nudge,
-    // ramp entry, direct-cut link, etc.) is preserved.  If we stripped
-    // them and rebuilt via pushSafeTransition we would always retract
-    // to safeZ between cuts, defeating ramp entry and feed-link
-    // optimisations.
-    if (move.kind !== 'cut') {
-      clippedMoves.push(move)
-      current = move.to
-      continue
-    }
-
+  for (const move of cutMoves) {
     const mask = maskForZ(move.to.z)
     if (!mask) {
-      // No obstacle at this Z — keep cut move as-is,
-      // but insert safe transition if our tracking position differs
-      // from the move's expected start (shouldn't happen when the
-      // preceding non-cut moves are kept above, but be defensive).
       current = pushSafeTransition(clippedMoves, current, move.from, safeZ)
       clippedMoves.push(move)
       current = move.to
       continue
     }
 
-    // Obstacle present at this Z level — clip the cut move to avoid it.
-    // The original transition (if any) is replaced by a safe transition
-    // (retract → rapid → plunge) which is necessary to clear the
-    // obstacle geometry.
     const inverseMask: RegionMask = {
       paths: mask.paths,
       hasIncludeRegions: false,

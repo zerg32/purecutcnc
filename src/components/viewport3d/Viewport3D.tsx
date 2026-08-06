@@ -16,6 +16,9 @@
 
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from 'react'
 import * as THREE from 'three'
+import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
+import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
+import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeometry.js'
 import { ToolpathVisibilityPanel } from '../ToolpathVisibilityPanel'
 import type { ToolpathVisibility } from '../toolpathVisibility'
 import type { ToolpathResult } from '../../engine/toolpaths/types'
@@ -26,7 +29,7 @@ import { applyClampHighlight, applyTabHighlight, buildOriginTriad, buildScene } 
 import { getStockBounds, rectProfile } from '../../types/project'
 import { getFeaturesWorldBounds } from '../canvas/scenePrimitives'
 import { getFeatureGeometryProfiles } from '../../text'
-import { buildToolpathLinePositionChunks, toolpathPointToWorldTuple } from './toolpathOverlay'
+import { buildToolpathLinePositionChunks, buildToolpathOverlayLayers, toolpathPointToWorldTuple } from './toolpathOverlay'
 import { useTheme } from '../../theme/themeContext'
 import type { ThreeThemePalette } from '../../theme/palette'
 import { createOrbitControls, type OrbitControls } from './orbitControls'
@@ -57,6 +60,8 @@ interface Viewport3DProps {
   onZoomWindowComplete?: () => void
   toolpathVisibility: ToolpathVisibility
   onToolpathVisibilityChange: (visibility: ToolpathVisibility) => void
+  toolpathPanelExpanded: boolean
+  onToolpathPanelExpandedChange: (expanded: boolean) => void
 }
 
 function disposeObject3D(object: THREE.Object3D) {
@@ -264,20 +269,33 @@ function buildToolpathOverlay(
   emphasized: boolean,
   visibility: ToolpathVisibility,
   palette: ThreeThemePalette,
+  resolution: THREE.Vector2,
 ): THREE.Object3D[] {
+  const schemaLayers = buildToolpathOverlayLayers(visibility)
   const layers: Array<{
     kinds: ToolpathResult['moves'][number]['kind'][]
     color: number
     opacity: number
+    linewidth: number
     visible: boolean
     horizontalOnly?: boolean
     retractOnly?: boolean
-  }> = [
-    { kinds: ['cut', 'lead_in', 'lead_out'], color: palette.toolpathCut, opacity: 0.98, visible: visibility.cuts },
-    { kinds: ['rapid'], color: palette.toolpathRapid, opacity: 0.75, visible: visibility.rapids, horizontalOnly: true },
-    { kinds: ['plunge'], color: palette.toolpathPlunge, opacity: 0.9, visible: visibility.plunges },
-    { kinds: ['rapid'], color: palette.toolpathRapid, opacity: 0.75, visible: visibility.retractions, retractOnly: true },
-  ]
+  }> = schemaLayers.map((layer) => {
+    const color =
+      layer.key === 'cuts' || layer.key === 'leadIns' ? palette.toolpathCut
+      : layer.key === 'rapids' || layer.key === 'retractions' ? palette.toolpathRapid
+      : palette.toolpathPlunge
+    const opacity =
+      layer.key === 'cuts' || layer.key === 'leadIns' ? 0.98
+      : layer.key === 'rapids' || layer.key === 'retractions' ? 0.75
+      : 0.9
+    const baseLinewidth =
+      layer.key === 'cuts' || layer.key === 'leadIns' ? 2.5
+      : layer.key === 'rapids' || layer.key === 'retractions' ? 1.8
+      : 2.0
+    const linewidth = emphasized ? baseLinewidth + 0.5 : Math.max(1.2, baseLinewidth - 0.5)
+    return { kinds: layer.kinds, color, opacity, linewidth, visible: layer.visible, horizontalOnly: layer.horizontalOnly, retractOnly: layer.retractOnly }
+  })
 
   const objects: THREE.Object3D[] = []
   for (const layer of layers) {
@@ -296,8 +314,11 @@ function buildToolpathOverlay(
       continue
     }
 
-    const material = new THREE.LineBasicMaterial({
+    const material = new LineMaterial({
       color: layer.color,
+      linewidth: layer.linewidth,
+      worldUnits: false,
+      resolution,
       transparent: true,
       opacity: emphasized ? layer.opacity : Math.max(layer.opacity * 0.55, 0.45),
       depthWrite: false,
@@ -305,11 +326,9 @@ function buildToolpathOverlay(
     })
 
     for (const chunk of buildToolpathLinePositionChunks(moves)) {
-      const geometry = new THREE.BufferGeometry()
-      geometry.setAttribute('position', new THREE.BufferAttribute(chunk.positions, 3))
-      geometry.computeBoundingSphere()
-
-      objects.push(new THREE.LineSegments(geometry, material))
+      const geometry = new LineSegmentsGeometry()
+      geometry.setPositions(chunk.positions)
+      objects.push(new LineSegments2(geometry, material))
     }
   }
 
@@ -330,6 +349,8 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
   onZoomWindowComplete,
   toolpathVisibility,
   onToolpathVisibilityChange,
+  toolpathPanelExpanded,
+  onToolpathPanelExpandedChange,
 }, ref) {
   const { palette } = useTheme()
   const threePalette = palette.three
@@ -552,7 +573,10 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
   const clearToolpathObjects = useCallback((scene: THREE.Scene) => {
     for (const object of toolpathObjectsRef.current) {
       scene.remove(object)
-      if (object instanceof THREE.LineSegments) {
+      if (object instanceof LineSegments2) {
+        object.geometry.dispose()
+        disposeObjectMaterial(object.material)
+      } else if (object instanceof THREE.LineSegments) {
         object.geometry.dispose()
         disposeObjectMaterial(object.material)
       } else if (object instanceof THREE.Mesh) {
@@ -755,8 +779,13 @@ export const Viewport3D = forwardRef<Viewport3DHandle, Viewport3DProps>(function
 
     clearToolpathObjects(scene)
 
+    const mount = mountRef.current
+    const resolution = new THREE.Vector2(
+      mount?.clientWidth || window.innerWidth,
+      mount?.clientHeight || window.innerHeight,
+    )
     const nextObjects = toolpaths.flatMap((toolpath) => (
-      toolpath.moves.length > 0 ? buildToolpathOverlay(toolpath, toolpath.operationId === selectedOperationId, toolpathVisibility, threePalette) : []
+      toolpath.moves.length > 0 ? buildToolpathOverlay(toolpath, toolpath.operationId === selectedOperationId, toolpathVisibility, threePalette, resolution) : []
     ))
     if (nextObjects.length === 0) {
       return
@@ -891,6 +920,8 @@ useImperativeHandle(ref, () => ({
         <ToolpathVisibilityPanel
           visibility={toolpathVisibility}
           onChange={onToolpathVisibilityChange}
+          expanded={toolpathPanelExpanded}
+          onExpandedChange={onToolpathPanelExpandedChange}
         />
       )}
       <div className="viewport-presets">

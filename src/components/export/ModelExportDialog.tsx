@@ -84,12 +84,8 @@ export function ModelExportDialog({ onClose }: ModelExportDialogProps) {
   useEffect(() => {
     if (is2d) return
     let cancelled = false
-    queueMicrotask(() => {
-      if (!cancelled) {
-        setAssembling(true)
-        setErrorMessage(null)
-      }
-    })
+    setAssembling(true)
+    setErrorMessage(null)
     assembleModelExportMesh(project, {
       includeImportedMeshes: stlOptions.includeImportedMeshes,
       curveQuality,

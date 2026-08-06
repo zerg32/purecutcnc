@@ -17,6 +17,13 @@
 import ClipperLib from 'clipper-lib'
 import type { ToolpathWarning } from './warningCodes'
 import type { CutDirection, Operation, Point, Project } from '../../types/project'
+import {
+  createEntryPolicy,
+  synthesizeEntry,
+  withEntryHandoffFeedScale,
+  withEntryStartZ,
+  type EntryPolicy,
+} from './entry'
 import type {
   ClipperPath,
   PocketToolpathResult,
@@ -31,18 +38,22 @@ import {
   applyContourDirection,
   checkMaxCutDepthWarning,
   fromClipperPath,
+  getOperationClearance,
   getOperationSafeZ,
   normalizeWinding,
   normalizeToolForProject,
-  pushRampOrPlunge,
   resolveFeatureZSpan,
-  retractToSafe,
   toClipperPath,
 } from './geometry'
 import { isFeatureFirst, mergePocketToolpathResults, perFeatureOperations } from './multiFeature'
 import { cornerSmoothingRadius, roundContourCorners } from './offsetSmoothing'
 import { resolvePocketRegions } from './resolver'
-import { buildRegionMask, clipToolpathResultToRegionMask, splitFeatureTargets } from './regions'
+import {
+  buildRegionMask,
+  clipToolpathResultToRegionMask,
+  entryDisabledByRegionMaskWarning,
+  splitFeatureTargets,
+} from './regions'
 import { resolveFeatureInstance } from '../../store/helpers/resolveFeatures'
 
 const MAX_ROUND_JOIN_ARC_TOLERANCE = DEFAULT_CLIPPER_SCALE * 0.01
@@ -181,27 +192,67 @@ export function toClosedCutMoves(points: Point[], z: number): ToolpathMove[] {
   return moves
 }
 
-/**
- * Optional callback for deciding whether a straight tool-center segment from
- * `from` to `to` can be cut directly at Z (skipping retract/plunge). Returns
- * true when the segment is known to lie inside already-cleared material.
- */
-/** Backward-compat wrapper — delegates to shared pushRampOrPlunge without ramp. */
-export { retractToSafe } from './geometry'
-
-/** Backward-compat wrapper — delegates to shared pushRampOrPlunge without ramp. */
 export function pushRapidAndPlunge(
   moves: ToolpathMove[],
   from: ToolpathPoint | null,
   toXY: ToolpathPoint,
   safeZ: number,
+  entryPolicy?: EntryPolicy,
 ): ToolpathPoint {
-  return pushRampOrPlunge(moves, from, toXY, safeZ)
+  if (entryPolicy) {
+    return synthesizeEntry(moves, from, toXY, safeZ, entryPolicy).end
+  }
+
+  const start = from ?? { x: toXY.x, y: toXY.y, z: safeZ }
+
+  if (!from || from.x !== toXY.x || from.y !== toXY.y || from.z !== safeZ) {
+    moves.push({
+      kind: 'rapid',
+      from: start,
+      to: { x: toXY.x, y: toXY.y, z: safeZ },
+    })
+  }
+
+  moves.push({
+    kind: 'plunge',
+    from: { x: toXY.x, y: toXY.y, z: safeZ },
+    to: toXY,
+  })
+
+  return toXY
 }
 
+export function retractToSafe(moves: ToolpathMove[], from: ToolpathPoint | null, safeZ: number): ToolpathPoint | null {
+  if (!from) {
+    return null
+  }
+
+  const safePoint = { x: from.x, y: from.y, z: safeZ }
+  if (from.z !== safeZ) {
+    moves.push({
+      kind: 'rapid',
+      from,
+      to: safePoint,
+    })
+  }
+  return safePoint
+}
+
+/**
+ * Optional callback for deciding whether a straight tool-center segment from
+ * `from` to `to` can be cut directly at Z (skipping retract/plunge). Returns
+ * true when the segment is known to lie inside already-cleared material.
+ */
 export type SafeLinkCheck = (from: ToolpathPoint, to: ToolpathPoint) => boolean
 
 type OffsetTraversalMode = 'outer-first' | 'inner-first'
+
+function appendUniqueWarning(warnings: ToolpathWarning[], warning: ToolpathWarning): void {
+  const key = `${warning.code}:${JSON.stringify(warning.params ?? {})}`
+  if (!warnings.some((entry) => `${entry.code}:${JSON.stringify(entry.params ?? {})}` === key)) {
+    warnings.push(warning)
+  }
+}
 
 const XY_ALIGN_EPS = 1e-6
 
@@ -457,9 +508,7 @@ export function transitionToCutEntry(
   safeZ: number,
   maxLinkDistance: number,
   safeLinkCheck?: SafeLinkCheck,
-  rampEntry?: boolean,
-  rampAngle?: number,
-  rampType?: 'zigzag' | 'spiral',
+  entryPolicy?: EntryPolicy,
 ): ToolpathPoint {
   if (from) {
     const dx = toXY.x - from.x
@@ -471,32 +520,26 @@ export function transitionToCutEntry(
     // straight down to the next cut start rather than retracting to safe Z
     // and re-plunging. If Z ascends, rapid up. Same Z: no-op.
     if (distance <= XY_ALIGN_EPS) {
-      if (dz < -XY_ALIGN_EPS && rampEntry) {
-        // Ramp enabled and descending — fall through to pushRampOrPlunge
-        // so the tool ramps down instead of dropping straight.
-      } else {
-        if (dz < -XY_ALIGN_EPS) {
-          moves.push({ kind: 'plunge', from, to: toXY })
-        } else if (dz > XY_ALIGN_EPS) {
-          moves.push({ kind: 'rapid', from, to: toXY })
+      if (dz < -XY_ALIGN_EPS) {
+        if (entryPolicy) {
+          const safePosition = retractToSafe(moves, from, safeZ)
+          return pushRapidAndPlunge(moves, safePosition, toXY, safeZ, entryPolicy)
         }
-        return toXY
+        moves.push({ kind: 'plunge', from, to: toXY })
+      } else if (dz > XY_ALIGN_EPS) {
+        moves.push({ kind: 'rapid', from, to: toXY })
       }
+      return toXY
     }
 
     const isStartingFromSafeZ = Math.abs(from.z - safeZ) <= XY_ALIGN_EPS
     const isDescendingToCut = toXY.z < safeZ - XY_ALIGN_EPS
     if (isStartingFromSafeZ && isDescendingToCut) {
       // After a level retract, keep XY travel at safe Z and enter the next level vertically.
-      return pushRampOrPlunge(moves, from, toXY, safeZ, rampEntry, rampAngle, rampType)
+      return pushRapidAndPlunge(moves, from, toXY, safeZ, entryPolicy)
     }
 
-    // When ramp is enabled and we fell through from the same-XY case above
-    // (dz < 0 && rampEntry), call pushRampOrPlunge directly with the
-    // original from — no retract needed since it starts from current Z.
-    if (rampEntry && dz < -XY_ALIGN_EPS && distance <= XY_ALIGN_EPS) {
-      return pushRampOrPlunge(moves, from, toXY, safeZ, rampEntry, rampAngle, rampType)
-    } else if (distance <= maxLinkDistance) {
+    if (distance <= maxLinkDistance) {
       // Direct cut link — works across Z levels (3D cut moves are valid
       // for ramping between layers in roughing/surface operations). When
       // a safe-link check is supplied it must also approve the segment;
@@ -514,11 +557,8 @@ export function transitionToCutEntry(
     }
   }
 
-  if (rampEntry && from) {
-    return pushRampOrPlunge(moves, from, toXY, safeZ, rampEntry, rampAngle, rampType)
-  }
   const safePosition = retractToSafe(moves, from, safeZ)
-  return pushRampOrPlunge(moves, safePosition, toXY, safeZ, rampEntry, rampAngle, rampType)
+  return pushRapidAndPlunge(moves, safePosition, toXY, safeZ, entryPolicy)
 }
 
 export function generateStepLevels(topZ: number, bottomZ: number, stepdown: number): number[] {
@@ -1130,9 +1170,7 @@ export function cutClosedContours(
   preserveContourRotation = false,
   direction: CutDirection = 'conventional',
   safeLinkCheck?: SafeLinkCheck,
-  rampEntry?: boolean,
-  rampAngle?: number,
-  rampType?: 'zigzag' | 'spiral',
+  entryPolicy?: EntryPolicy,
 ): ToolpathPoint | null {
   const directedContours = applyContourDirection(contours, direction)
   const start = currentPosition ? { x: currentPosition.x, y: currentPosition.y } : null
@@ -1143,7 +1181,15 @@ export function cutClosedContours(
   let nextPosition = currentPosition
   for (const contour of orderedContours) {
     const entryPoint = contourStartPoint(contour, z)
-    nextPosition = transitionToCutEntry(moves, nextPosition, entryPoint, safeZ, maxLinkDistance, safeLinkCheck, rampEntry, rampAngle, rampType)
+    nextPosition = transitionToCutEntry(
+      moves,
+      nextPosition,
+      entryPoint,
+      safeZ,
+      maxLinkDistance,
+      safeLinkCheck,
+      entryPolicy,
+    )
     const cutMoves = toClosedCutMoves(contour, z)
     moves.push(...cutMoves)
     nextPosition = cutMoves.at(-1)?.to ?? nextPosition
@@ -1194,12 +1240,10 @@ function cutOffsetRegionNode(
   direction: CutDirection,
   safeLinkCheck: SafeLinkCheck | undefined,
   traversalMode: OffsetTraversalMode,
-  rampEntry?: boolean,
-  rampAngle?: number,
-  rampType?: 'zigzag' | 'spiral',
   loops: 'all' | 'outer' = 'all',
   smoothRadius?: number,
   depth = 0,
+  entryPolicy?: EntryPolicy,
 ): ToolpathPoint | null {
   const cutCurrentRegion = (fromPosition: ToolpathPoint | null): ToolpathPoint | null => {
     const childAnchors = traversalMode === 'outer-first'
@@ -1246,9 +1290,7 @@ function cutOffsetRegionNode(
       true,
       direction,
       safeLinkCheck,
-      rampEntry,
-      rampAngle,
-      rampType,
+      entryPolicy,
     )
   }
 
@@ -1273,12 +1315,10 @@ function cutOffsetRegionNode(
       direction,
       safeLinkCheck,
       traversalMode,
-      rampEntry,
-      rampAngle,
-      rampType,
       loops,
       smoothRadius,
       depth + 1,
+      entryPolicy,
     )
   }
 
@@ -1302,6 +1342,7 @@ export function cutOffsetRegionRecursive(
   traversalMode: OffsetTraversalMode = 'outer-first',
   smoothRadius?: number,
   islandJoinType: number = ClipperLib.JoinType.jtMiter,
+  entryPolicy?: EntryPolicy,
 ): ToolpathPoint | null {
   return cutOffsetRegionNode(
     moves,
@@ -1313,11 +1354,10 @@ export function cutOffsetRegionRecursive(
     direction,
     safeLinkCheck,
     traversalMode,
-    undefined,
-    undefined,
-    undefined,
     'all',
     smoothRadius,
+    0,
+    entryPolicy,
   )
 }
 
@@ -1342,11 +1382,13 @@ function generateRoughBandMoves(
   band: ResolvedPocketBand,
   operation: Operation,
   safeZ: number,
+  entryClearance: number,
   stepdown: number,
   toolRadius: number,
   stepoverDistance: number,
   maxLinkDistance: number,
   direction: CutDirection = 'conventional',
+  entryEnabled = true,
 ): { moves: ToolpathMove[]; stepLevels: number[]; warnings: ToolpathWarning[] } {
   const moves: ToolpathMove[] = []
   const warnings: ToolpathWarning[] = []
@@ -1381,6 +1423,18 @@ function generateRoughBandMoves(
       }
     }
 
+    const entryPolicy = entryEnabled
+      ? withEntryHandoffFeedScale(
+        createEntryPolicy(
+          operation,
+          toolRadius * 2,
+          roughRegions,
+          (warning) => appendUniqueWarning(warnings, warning),
+        ),
+        slotScale,
+      )
+      : undefined
+
     const boundaryContours = applyContourDirection(buildContourLoops(roughRegions), direction)
     const segments = buildPocketParallelSegments(roughRegions, effectiveStepover, operation.pocketAngle)
     if (segments.length === 0) {
@@ -1391,11 +1445,24 @@ function generateRoughBandMoves(
       }
     }
 
-    for (const z of stepLevels) {
+    for (let levelIndex = 0; levelIndex < stepLevels.length; levelIndex += 1) {
+      const z = stepLevels[levelIndex]
+      const levelEntryPolicy = withEntryStartZ(
+        entryPolicy,
+        levelIndex === 0 ? safeZ : Math.min(safeZ, stepLevels[levelIndex - 1] + entryClearance),
+      )
       const levelStartIndex = moves.length
       for (const contour of boundaryContours) {
         const entryPoint = contourStartPoint(contour, z)
-        currentPosition = transitionToCutEntry(moves, currentPosition, entryPoint, safeZ, maxLinkDistance, undefined, operation.rampEntry, operation.rampAngle, operation.rampType)
+        currentPosition = transitionToCutEntry(
+          moves,
+          currentPosition,
+          entryPoint,
+          safeZ,
+          maxLinkDistance,
+          undefined,
+          levelEntryPolicy,
+        )
         const cutMoves = toClosedCutMoves(contour, z)
         moves.push(...cutMoves)
         currentPosition = cutMoves.at(-1)?.to ?? currentPosition
@@ -1408,7 +1475,15 @@ function generateRoughBandMoves(
 
       for (const segment of orderedSegments) {
         const entryPoint = contourStartPoint(segment, z)
-        currentPosition = transitionToCutEntry(moves, currentPosition, entryPoint, safeZ, maxLinkDistance, undefined, operation.rampEntry, operation.rampAngle, operation.rampType)
+        currentPosition = transitionToCutEntry(
+          moves,
+          currentPosition,
+          entryPoint,
+          safeZ,
+          maxLinkDistance,
+          undefined,
+          levelEntryPolicy,
+        )
         const cutMoves = toOpenCutMoves(segment, z)
         moves.push(...cutMoves)
         currentPosition = cutMoves.at(-1)?.to ?? currentPosition
@@ -1437,8 +1512,30 @@ function generateRoughBandMoves(
     .flatMap((region) => buildInsetRegions(region, initialInset, ClipperLib.JoinType.jtMiter, islandJoinType))
     .map((region) => buildOffsetRegionTree(region, effectiveStepover, islandJoinType))
   const smoothRadius = cornerSmoothingRadius(operation.roundOutsideCorners, toolRadius, effectiveStepover)
+  const entryPolicy = entryEnabled
+    ? withEntryHandoffFeedScale(
+      createEntryPolicy(
+        operation,
+        toolRadius * 2,
+        regionTrees.map((tree) => tree.region),
+        (warning) => appendUniqueWarning(warnings, warning),
+      ),
+      slotScale,
+    )
+    : undefined
 
-  for (const z of stepLevels) {
+  // Keep XY travel at the global safe Z, but start the entry just above the
+  // previous level's floor instead of at safe Z — otherwise a deep pocket
+  // spends most of its helix cutting air. Safe because the ring tree above is
+  // built once and reused, so every level clears the same XY footprint and the
+  // level above has already emptied everything down to stepLevels[i - 1]. The
+  // first level of each band has no cleared floor yet and stays at safe Z.
+  for (let levelIndex = 0; levelIndex < stepLevels.length; levelIndex += 1) {
+    const z = stepLevels[levelIndex]
+    const levelEntryPolicy = withEntryStartZ(
+      entryPolicy,
+      levelIndex === 0 ? safeZ : Math.min(safeZ, stepLevels[levelIndex - 1] + entryClearance),
+    )
     if (regionTrees.length === 0) {
       warnings.push({ code: 'surfaceNoOffsetContours', params: { topZ: band.topZ, bottomZ: band.bottomZ } })
       currentPosition = retractToSafe(moves, currentPosition, safeZ)
@@ -1462,11 +1559,10 @@ function generateRoughBandMoves(
         direction,
         undefined,
         'inner-first',
-        operation.rampEntry,
-        operation.rampAngle,
-        operation.rampType,
         'all',
         smoothRadius,
+        0,
+        levelEntryPolicy,
       )
     }
 
@@ -1489,6 +1585,7 @@ function generateFinishBandMoves(
   stepoverDistance: number,
   maxLinkDistance: number,
   direction: CutDirection = 'conventional',
+  entryEnabled = true,
 ): { moves: ToolpathMove[]; stepLevels: number[]; warnings: ToolpathWarning[] } {
   const moves: ToolpathMove[] = []
   const warnings: ToolpathWarning[] = []
@@ -1516,6 +1613,18 @@ function generateFinishBandMoves(
   const finishRegions = needsMiterFinishRegions
     ? band.regions.flatMap((region) => buildInsetRegions(region, finishDelta))
     : []
+  const slotScale = resolveSlotFeedScale(operation)
+  const entryPolicy = entryEnabled
+    ? withEntryHandoffFeedScale(
+      createEntryPolicy(
+        operation,
+        toolRadius * 2,
+        finishRegions,
+        (warning) => appendUniqueWarning(warnings, warning),
+      ),
+      slotScale,
+    )
+    : undefined
   let wallContours: Point[][] = []
   let wallOuterContours: Point[][] = []
   let wallFinalContours: Point[][] = []
@@ -1536,7 +1645,6 @@ function generateFinishBandMoves(
       wallContours = buildContourLoops(finishRegions)
     }
   }
-  const slotScale = resolveSlotFeedScale(operation)
   const isParallelPocket = operation.kind === 'pocket' && operation.pocketPattern === 'parallel'
   // Offset floors are cut through the same inner-first ring traversal as the
   // rough pass (each disjoint floor area starts at its innermost loop and
@@ -1597,11 +1705,10 @@ function generateFinishBandMoves(
         direction,
         undefined,
         'inner-first',
-        operation.rampEntry,
-        operation.rampAngle,
-        operation.rampType,
         'outer',
         floorSmoothRadius,
+        0,
+        entryPolicy,
       )
     }
 
@@ -1611,7 +1718,15 @@ function generateFinishBandMoves(
     )
     for (const segment of orderedFloorSegments) {
       const entryPoint = contourStartPoint(segment, z)
-      currentPosition = transitionToCutEntry(moves, currentPosition, entryPoint, safeZ, maxLinkDistance, undefined, operation.rampEntry, operation.rampAngle, operation.rampType)
+      currentPosition = transitionToCutEntry(
+        moves,
+        currentPosition,
+        entryPoint,
+        safeZ,
+        maxLinkDistance,
+        undefined,
+        entryPolicy,
+      )
       const cutMoves = toOpenCutMoves(segment, z)
       moves.push(...cutMoves)
       currentPosition = cutMoves.at(-1)?.to ?? currentPosition
@@ -1640,9 +1755,7 @@ function generateFinishBandMoves(
         false,
         direction,
         undefined,
-        operation.rampEntry,
-        operation.rampAngle,
-        operation.rampType,
+        entryPolicy,
       )
       const orderedCleanupSegments = orderOpenSegmentsGreedy(
         wallCleanupSegments,
@@ -1650,7 +1763,15 @@ function generateFinishBandMoves(
       )
       for (const segment of orderedCleanupSegments) {
         const entryPoint = contourStartPoint(segment, z)
-        currentPosition = transitionToCutEntry(moves, currentPosition, entryPoint, safeZ, maxLinkDistance, undefined, operation.rampEntry, operation.rampAngle, operation.rampType)
+        currentPosition = transitionToCutEntry(
+          moves,
+          currentPosition,
+          entryPoint,
+          safeZ,
+          maxLinkDistance,
+          undefined,
+          entryPolicy,
+        )
         const cutMoves = toOpenCutMoves(segment, z)
         moves.push(...cutMoves)
         currentPosition = cutMoves.at(-1)?.to ?? currentPosition
@@ -1665,12 +1786,21 @@ function generateFinishBandMoves(
         false,
         direction,
         undefined,
-        operation.rampEntry,
-        operation.rampAngle,
-        operation.rampType,
+        entryPolicy,
       )
     } else {
-      currentPosition = cutClosedContours(moves, wallContours, z, safeZ, maxLinkDistance, currentPosition, false, direction, undefined, operation.rampEntry, operation.rampAngle, operation.rampType)
+      currentPosition = cutClosedContours(
+        moves,
+        wallContours,
+        z,
+        safeZ,
+        maxLinkDistance,
+        currentPosition,
+        false,
+        direction,
+        undefined,
+        entryPolicy,
+      )
     }
 
     currentPosition = retractToSafe(moves, currentPosition, safeZ)
@@ -1744,11 +1874,17 @@ function generatePocketToolpathSingle(project: Project, operation: Operation): P
   }
 
   const safeZ = getOperationSafeZ(project)
+  const entryClearance = getOperationClearance(project)
   const stepoverDistance = tool.diameter * operation.stepover
   const maxLinkDistance = tool.diameter
   const direction = operation.cutDirection ?? 'conventional'
   const allMoves: ToolpathMove[] = []
   const warnings = [...resolved.warnings]
+  const entryGuardWarning = entryDisabledByRegionMaskWarning(operation, regionMask)
+  const entryEnabled = entryGuardWarning === null
+  if (entryGuardWarning) {
+    appendUniqueWarning(warnings, entryGuardWarning)
+  }
   const maxBandDepth = resolved.bands.reduce((max, band) => Math.max(max, Math.abs(band.topZ - band.bottomZ)), 0)
   const depthWarning = checkMaxCutDepthWarning(tool, maxBandDepth)
   if (depthWarning) {
@@ -1803,16 +1939,19 @@ function generatePocketToolpathSingle(project: Project, operation: Operation): P
         stepoverDistance,
         maxLinkDistance,
         direction,
+        entryEnabled,
       )
       : generateRoughBandMoves(
         band,
         operation,
         safeZ,
+        entryClearance,
         operation.stepdown,
         tool.radius,
         stepoverDistance,
         maxLinkDistance,
         direction,
+        entryEnabled,
       )
     const { moves, stepLevels, warnings: bandWarnings } = result
     moves.forEach((move) => allMoves.push(move))

@@ -755,7 +755,8 @@ export function FeatureTree({ onFeatureContextMenu, onTabContextMenu, onClampCon
           onMouseEnter={() => hoverFeature(null)}
           onMouseLeave={() => hoverFeature(null)}
           onAddTab={() => startAddTabPlacement()}
-          onSelectAllTabs={project.tabs.length > 0 ? () => selectAllTabs() : undefined}
+          onSelectAllFeatures={project.tabs.some((tab) => tab.visible) ? selectAllTabs : undefined}
+          selectAllLabel={t('featureTree.treeRow.selectAllTabs')}
           onShowAll={() => setAllTabsVisible(true)}
           onHideAll={() => setAllTabsVisible(false)}
         />
@@ -778,16 +779,12 @@ export function FeatureTree({ onFeatureContextMenu, onTabContextMenu, onClampCon
                 onToggleVisible={() => updateTab(tab.id, { visible: !tab.visible })}
                 onContextMenu={(event) => {
                   event.preventDefault()
-                  if (!selection.selectedTabIds.includes(tab.id)) {
-                    selectTab(tab.id)
-                  }
+                  if (!selection.selectedTabIds.includes(tab.id)) selectTab(tab.id)
                   onTabContextMenu?.(tab.id, event.clientX, event.clientY)
                 }}
                 onEditEntry={onEditTab ? () => onEditTab(tab.id) : undefined}
                 onMoreMenu={tabletShell && onTabContextMenu ? (x, y) => {
-                  if (!selection.selectedTabIds.includes(tab.id)) {
-                    selectTab(tab.id)
-                  }
+                  if (!selection.selectedTabIds.includes(tab.id)) selectTab(tab.id)
                   onTabContextMenu(tab.id, x, y)
                 } : undefined}
               />
@@ -865,10 +862,10 @@ interface TreeRowProps {
   grouped?: boolean
   onToggleGrouped?: () => void
   onSelectAllFeatures?: () => void
+  selectAllLabel?: string
   onToggleOperation?: (operation: FeatureOperation) => void
   onAddFolder?: () => void
   onAddTab?: () => void
-  onSelectAllTabs?: () => void
   onAddClamp?: () => void
   onShowAll?: () => void
   onHideAll?: () => void
@@ -907,10 +904,10 @@ function TreeRow({
   onToggleGrouped,
   onToggleVisible,
   onSelectAllFeatures,
+  selectAllLabel,
   onToggleOperation,
   onAddFolder,
   onAddTab,
-  onSelectAllTabs,
   onAddClamp,
   onShowAll,
   onHideAll,
@@ -1162,22 +1159,6 @@ function TreeRow({
             +
           </button>
         ) : null}
-        {kind === 'tabs' && onSelectAllTabs ? (
-          <button
-            type="button"
-            className="tree-action-btn"
-            onClick={(event) => {
-              event.stopPropagation()
-              onSelectAllTabs()
-            }}
-            title="Select all tabs"
-            aria-label="Select all tabs"
-          >
-            <svg viewBox="0 0 14 14" width="12" height="12" focusable="false" aria-hidden="true" style={{ display: 'block' }}>
-              <rect x="1.5" y="1.5" width="11" height="11" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeDasharray="2.5 1.5" />
-            </svg>
-          </button>
-        ) : null}
         {kind === 'clamps' && onAddClamp ? (
           <button
             type="button"
@@ -1374,8 +1355,8 @@ function TreeRow({
               event.stopPropagation()
               onSelectAllFeatures()
             }}
-            title={t('featureTree.treeRow.selectAllInFolder')}
-            aria-label={t('featureTree.treeRow.selectAllInFolder')}
+            title={selectAllLabel ?? t('featureTree.treeRow.selectAllInFolder')}
+            aria-label={selectAllLabel ?? t('featureTree.treeRow.selectAllInFolder')}
           >
             <svg viewBox="0 0 14 14" width="12" height="12" focusable="false" aria-hidden="true" style={{ display: 'block' }}>
               <rect x="1.5" y="1.5" width="11" height="11" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeDasharray="2.5 1.5" />

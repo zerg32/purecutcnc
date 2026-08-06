@@ -43,6 +43,7 @@ function makeActions(
     enterClampEdit: noop,
     deleteFeatures: noop,
     deleteTab: noop,
+    deleteTabs: noop,
     deleteClamp: noop,
     startMoveFeature: noop,
     startCopyFeature: noop,

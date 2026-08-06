@@ -29,6 +29,7 @@ import { OperationParameterReference } from './OperationParameterReference'
 import { DisclosureSection } from '../common/DisclosureSection'
 import type {
   DrillType,
+  EntryStrategy,
   Operation,
   OperationKind,
   OperationPass,
@@ -352,7 +353,7 @@ function drillTypeLabel(type: DrillType): string {
     case 'chip_breaking':
       return camT('cam.drillType.chipBreaking')
     case 'helical':
-      return 'Helical'
+      return camT('cam.drillType.helical')
   }
 }
 
@@ -712,27 +713,8 @@ export function CAMPanel({
       return
     }
 
-    let cancelled = false
-    queueMicrotask(() => {
-      if (!cancelled) setLibraryLoading(true)
-    })
-    loadBundledToolLibrary()
-      .then((library) => {
-        if (cancelled) return
-        setLibraryTools(library.tools)
-        setLibraryError(null)
-        setLibraryLoading(false)
-      })
-      .catch((error) => {
-        if (cancelled) return
-        setLibraryError(error instanceof Error ? error.message : 'Failed to load tool library.')
-        setLibraryLoading(false)
-      })
-    return () => { cancelled = true }
-    // libraryLoading omitted from deps: the microtask-delayed set would re-trigger
-    // the effect and cancel the inflight load via cancelled flag.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, libraryTools.length, libraryError])
+    void ensureBundledLibraryLoaded()
+  }, [ensureBundledLibraryLoaded, libraryError, libraryLoading, libraryTools.length, mode])
   // Close expanded section modal on Escape.
   useEffect(() => {
     if (!expandedCamSection) return
@@ -1110,6 +1092,32 @@ export function CAMPanel({
     if (!selectedOperation) {
       return <div className="panel-empty">{camT('cam.panel.emptyOperation')}</div>
     }
+    const isRoughEdgeRoute = selectedOperation.pass === 'rough'
+      && (selectedOperation.kind === 'edge_route_inside' || selectedOperation.kind === 'edge_route_outside')
+    const isTrochoidalRoughEdge = isRoughEdgeRoute && selectedOperation.edgeStrategy === 'trochoidal'
+    const trochoidalTool = selectedOperationTool && selectedOperationTool.units !== project.meta.units
+      ? convertToolUnits(selectedOperationTool, project.meta.units)
+      : selectedOperationTool
+    const trochoidalToolDiameter = trochoidalTool?.diameter ?? 0
+    const trochoidalAdvance = selectedOperation.trochoidalAdvance ?? 0.1
+    // Undefined means "follow the tool". Only an explicit edit pins the value,
+    // so swapping cutters re-derives the channel instead of leaving a width
+    // that belonged to the previous tool.
+    const trochoidalCutWidth = selectedOperation.trochoidalCutWidth ?? trochoidalToolDiameter * 1.5
+    const trochoidalCutWidthFloor = trochoidalToolDiameter * 1.15
+    // A pinned width can fall under the floor when the tool grows. The engine
+    // refuses to generate in that case, so say so at the field rather than
+    // leaving the user to find it in the warnings list.
+    const trochoidalCutWidthBelowFloor = isTrochoidalRoughEdge
+      && trochoidalToolDiameter > 0
+      && trochoidalCutWidth < trochoidalCutWidthFloor
+    const supportsEntryStrategy = selectedOperation.kind === 'pocket'
+      || selectedOperation.kind === 'surface_clean'
+      || selectedOperation.kind === 'rough_surface'
+      || isTrochoidalRoughEdge
+    const entryStrategy = isTrochoidalRoughEdge
+      ? selectedOperation.entryStrategy === 'plunge' ? 'plunge' : 'helix'
+      : selectedOperation.entryStrategy ?? 'plunge'
     return (
       <div key={`${selectedOperation.id}-${selectedOperation.toolRef ?? ''}`} className="properties-panel cam-tool-properties cam-operation-properties">
                     <div className="properties-group">
@@ -1196,9 +1204,18 @@ export function CAMPanel({
                   {(selectedOperation.kind === 'pocket' || selectedOperation.kind === 'edge_route_inside' || selectedOperation.kind === 'edge_route_outside') ? (
                     <div className="properties-field">
                       <span>{camT('cam.operation.restMachining')}</span>
-                      <button className="feat-btn" type="button" onClick={handleCreateRestOperation}>
+                      <button
+                        className="feat-btn"
+                        type="button"
+                        disabled={isTrochoidalRoughEdge}
+                        title={isTrochoidalRoughEdge ? camT('cam.operation.restTrochoidalUnavailable') : undefined}
+                        onClick={handleCreateRestOperation}
+                      >
                         {camT('cam.operation.createRestOp')}
                       </button>
+                      {isTrochoidalRoughEdge ? (
+                        <span className="cam-field-message">{camT('cam.operation.restTrochoidalUnavailable')}</span>
+                      ) : null}
                       {operationActionMessage?.operationId === selectedOperation.id ? (
                         <span className="cam-field-message">{operationActionMessage.text}</span>
                       ) : null}
@@ -1309,6 +1326,72 @@ export function CAMPanel({
                       <OperationParameterReference kind="stepdown" />
                     </label>
                   ) : null}
+                  {isRoughEdgeRoute ? (
+                    <label className="properties-field">
+                      <span>{camT('cam.operation.edgeStrategy')}</span>
+                      <Select
+                        value={selectedOperation.edgeStrategy ?? 'contour'}
+                        options={[
+                          { value: 'contour', label: camT('cam.operation.edgeStrategyContour') },
+                          { value: 'trochoidal', label: camT('cam.operation.edgeStrategyTrochoidal') },
+                        ]}
+                        // Write only the strategy. Cut width and advance stay
+                        // undefined until the user edits them so they keep
+                        // tracking the assigned tool, and machiningOrder is left
+                        // alone so switching back to Contour does not silently
+                        // discard the user's choice (trochoidal ignores it).
+                        onChange={(edgeStrategy) => updateOperation(selectedOperation.id, { edgeStrategy })}
+                      />
+                      <OperationParameterReference kind="edgeStrategy" variant={selectedOperation.edgeStrategy ?? 'contour'} />
+                    </label>
+                  ) : null}
+                  {isTrochoidalRoughEdge ? (
+                    <>
+                      <label className="properties-field">
+                        <span>{camT('cam.operation.trochoidalCutWidth')}</span>
+                        <DraftLengthInput
+                          value={trochoidalCutWidth}
+                          units={project.meta.units}
+                          min={Math.max(0.0001, trochoidalCutWidthFloor)}
+                          onCommit={(value) => updateOperation(selectedOperation.id, { trochoidalCutWidth: value })}
+                        />
+                        <OperationParameterReference kind="trochoidalCutWidth" />
+                      </label>
+                      {trochoidalCutWidthBelowFloor ? (
+                        <div className="properties-field">
+                          <span />
+                          <span className="cam-field-message">
+                            {camT('cam.operation.trochoidalCutWidthBelowFloor', {
+                              minimum: formatLength(trochoidalCutWidthFloor, project.meta.units),
+                            })}
+                          </span>
+                        </div>
+                      ) : null}
+                      <label className="properties-field">
+                        <span>{camT('cam.operation.trochoidalAdvancePercent')}</span>
+                        {/* Percent of tool diameter is the only stored form. An
+                            absolute-distance twin fought this field: each wrote
+                            the same ratio back through a rounded display, so
+                            editing either nudged the other. The distance is
+                            shown derived instead. */}
+                        <DraftNumberInput
+                          value={trochoidalAdvance * 100}
+                          min={1}
+                          max={100}
+                          onCommit={(value) => updateOperation(selectedOperation.id, {
+                            trochoidalAdvance: Math.min(1, Math.max(0.01, value / 100)),
+                          })}
+                        />
+                        <OperationParameterReference kind="trochoidalAdvance" />
+                      </label>
+                      <div className="properties-field">
+                        <span>{camT('cam.operation.trochoidalAdvanceDistance')}</span>
+                        <span className="cam-field-derived">
+                          {formatLength(trochoidalAdvance * trochoidalToolDiameter, project.meta.units)}
+                        </span>
+                      </div>
+                    </>
+                  ) : null}
                   {selectedOperation.kind !== 'follow_line'
                     && selectedOperation.kind !== 'drilling'
                     && selectedOperation.kind !== 'v_carve_medial'
@@ -1330,6 +1413,52 @@ export function CAMPanel({
                     </label>
                   ) : null}
                   <DisclosureSection title={camT('cam.operation.advanced')} storageKey="cam-operation-advanced">
+                  {supportsEntryStrategy ? (
+                    <>
+                      <span className="properties-section-title">{camT('cam.operation.entry')}</span>
+                      <label className="properties-field">
+                        <span>{camT('cam.operation.entryStrategy')}</span>
+                        <Select<EntryStrategy>
+                          value={entryStrategy}
+                          options={[
+                            { value: 'plunge', label: camT('cam.operation.entryPlunge') },
+                            { value: 'helix', label: camT('cam.operation.entryHelix') },
+                            ...(isTrochoidalRoughEdge ? [] : [{ value: 'ramp' as EntryStrategy, label: camT('cam.operation.entryRamp') }]),
+                          ]}
+                          onChange={(value) => updateOperation(selectedOperation.id, { entryStrategy: value })}
+                        />
+                        <OperationParameterReference kind="entryStrategy" variant={entryStrategy} />
+                      </label>
+                      {entryStrategy === 'helix' || entryStrategy === 'ramp' ? (
+                        <label className="properties-field">
+                          <span>{camT('cam.operation.entryRampAngle')}</span>
+                          <DraftNumberInput
+                            value={selectedOperation.entryRampAngle ?? 5}
+                            min={0.1}
+                            max={45}
+                            onCommit={(value) => updateOperation(selectedOperation.id, {
+                              entryRampAngle: Math.min(45, Math.max(0.1, value)),
+                            })}
+                          />
+                          <OperationParameterReference kind="entryRampAngle" />
+                        </label>
+                      ) : null}
+                      {entryStrategy === 'helix' ? (
+                        <label className="properties-field">
+                          <span>{camT('cam.operation.entryHelixDiameter')}</span>
+                          <DraftNumberInput
+                            value={selectedOperation.entryHelixDiameterPercent ?? 80}
+                            min={1}
+                            max={100}
+                            onCommit={(value) => updateOperation(selectedOperation.id, {
+                              entryHelixDiameterPercent: Math.min(100, Math.max(1, value)),
+                            })}
+                          />
+                          <OperationParameterReference kind="entryHelixDiameter" />
+                        </label>
+                      ) : null}
+                    </>
+                  ) : null}
                   {selectedOperation.kind === 'pocket' || selectedOperation.kind === 'surface_clean' ? (
                     <label className="properties-field">
                       <span>{camT('cam.operation.pattern')}</span>
@@ -1436,47 +1565,6 @@ export function CAMPanel({
                       <span>{camT('cam.operation.roundOutsideCorners')}</span>
                     </label>
                   ) : null}
-                  {(selectedOperation.kind === 'pocket'
-                    || selectedOperation.kind === 'edge_route_inside'
-                    || selectedOperation.kind === 'edge_route_outside') ? (
-                    <>
-                      <label className="properties-check">
-                        <input
-                          type="checkbox"
-                          checked={selectedOperation.rampEntry ?? false}
-                          onChange={(event) => updateOperation(selectedOperation.id, {
-                            rampEntry: event.target.checked,
-                            ...(event.target.checked && !selectedOperation.rampType ? { rampType: 'zigzag' } : {}),
-                          })}
-                        />
-                        <span>Ramp Entry</span>
-                      </label>
-                      {selectedOperation.rampEntry ? (
-                        <>
-                          <label className="properties-field">
-                            <span>Ramp Angle (°)</span>
-                            <DraftNumberInput
-                              value={selectedOperation.rampAngle ?? 5}
-                              min={1}
-                              max={45}
-                              onCommit={(value) => updateOperation(selectedOperation.id, { rampAngle: value })}
-                            />
-                          </label>
-                          <label className="properties-field">
-                            <span>Ramp Type</span>
-                            <Select
-                              value={selectedOperation.rampType ?? 'zigzag'}
-                              options={[
-                                { value: 'zigzag', label: 'Zigzag' },
-                                { value: 'spiral', label: 'Spiral' },
-                              ]}
-                              onChange={(value) => updateOperation(selectedOperation.id, { rampType: value })}
-                            />
-                          </label>
-                        </>
-                      ) : null}
-                    </>
-                  ) : null}
                   {selectedOperation.kind === 'drilling' ? (
                     <>
                       <label className="properties-field">
@@ -1518,26 +1606,18 @@ export function CAMPanel({
                         </label>
                       ) : null}
                       {selectedOperation.drillType === 'helical' ? (
-                        <>
-                          <label className="properties-field">
-                            <span>Helix Diameter</span>
-                            <DraftLengthInput
-                              value={selectedOperation.helixDiameter ?? 0}
-                              units={project.meta.units}
-                              min={0}
-                              onCommit={(value) => updateOperation(selectedOperation.id, { helixDiameter: value })}
-                            />
-                          </label>
-                          <label className="properties-field">
-                            <span>Helix Pitch</span>
-                            <DraftLengthInput
-                              value={selectedOperation.helixPitch ?? 0}
-                              units={project.meta.units}
-                              min={0}
-                              onCommit={(value) => updateOperation(selectedOperation.id, { helixPitch: value })}
-                            />
-                          </label>
-                        </>
+                        <label className="properties-field">
+                          <span>{camT('cam.operation.entryRampAngle')}</span>
+                          <DraftNumberInput
+                            value={selectedOperation.entryRampAngle ?? 5}
+                            min={0.1}
+                            max={45}
+                            onCommit={(value) => updateOperation(selectedOperation.id, {
+                              entryRampAngle: Math.min(45, Math.max(0.1, value)),
+                            })}
+                          />
+                          <OperationParameterReference kind="entryRampAngle" />
+                        </label>
                       ) : null}
                       <label className="properties-field">
                         <span>{camT('cam.operation.retractHeight')}</span>

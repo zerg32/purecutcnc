@@ -161,8 +161,12 @@ export function useTreeContextMenu({ project }: UseTreeContextMenuArgs): {
   }, [])
 
   const openTabContextMenu = useCallback((tabId: string, x: number, y: number) => {
+    const nextSelection = useProjectStore.getState().selection
+    const tabIds = nextSelection.selectedTabIds.includes(tabId)
+      ? nextSelection.selectedTabIds
+      : [tabId]
     setMenuPosition(null)
-    setTreeContextMenu({ entityType: 'tab', ids: [tabId], primaryId: tabId, x, y })
+    setTreeContextMenu({ entityType: 'tab', ids: tabIds, primaryId: tabId, x, y })
   }, [])
 
   const closeTreeContextMenu = useCallback(() => {

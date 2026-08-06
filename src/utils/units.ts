@@ -42,7 +42,7 @@ import type {
 
 export type Units = ProjectMeta['units']
 
-const MM_PER_INCH = 25.4
+export const MM_PER_INCH = 25.4
 
 /**
  * Geometric tolerance, in millimetres, shared by export-stage arc fitting and
@@ -323,6 +323,9 @@ function convertOperation(operation: Operation, from: Units, to: Units): Operati
     plungeFeed: convertLength(operation.plungeFeed, from, to),
     stockToLeaveRadial: convertLength(operation.stockToLeaveRadial, from, to),
     stockToLeaveAxial: convertLength(operation.stockToLeaveAxial, from, to),
+    trochoidalCutWidth: operation.trochoidalCutWidth === undefined
+      ? undefined
+      : convertLength(operation.trochoidalCutWidth, from, to),
     carveDepth: convertLength(operation.carveDepth, from, to),
     maxCarveDepth: convertLength(operation.maxCarveDepth, from, to),
     peckDepth: operation.peckDepth === undefined

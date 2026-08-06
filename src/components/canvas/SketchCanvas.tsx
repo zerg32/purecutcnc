@@ -174,6 +174,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
     onToggleDepthLegend,
     toolpathVisibility,
     onToolpathVisibilityChange,
+    toolpathPanelExpanded, onToolpathPanelExpandedChange,
     operationHighlightKind = null,
   },
   ref
@@ -286,8 +287,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
     moveFeatureControl,
     insertFeaturePoint,
     joinOpenFeatureEndpoints,
-    deleteFeaturePoint,
-    deleteFeatureSegment,
+    deleteFeaturePoint, deleteFeatureSegment,
     disconnectFeaturePoint,
     filletFeaturePoint,
     chamferFeaturePoint,
@@ -310,8 +310,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
     undoPendingPolygonPoint,
     completePendingPolygon,
     completePendingOpenPath,
-    cancelPendingAdd,
-    setPendingCompositeMode,
+    cancelPendingAdd, setPendingCompositeMode,
     addPendingCompositePoint,
     undoPendingCompositeStep,
     completePendingComposite,
@@ -328,8 +327,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
     completePendingOffset,
     cancelPendingOffset,
     completePendingShapeAction,
-    cancelPendingShapeAction,
-    confirmCutCutters,
+    cancelPendingShapeAction, confirmCutCutters,
     setPendingShapeActionKeepOriginals,
     setBackdropImageLoading,
     beginConstraint,
@@ -1161,7 +1159,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
 
     for (const toolpath of toolpaths) {
       if (toolpath.moves.length > 0) {
-        drawToolpath(ctx, toolpath, vt, toolpath.operationId === selectedOperationId, toolpathVisibility ?? { cuts: true, rapids: true, plunges: true, retractions: true, directions: true })
+        drawToolpath(ctx, toolpath, vt, toolpath.operationId === selectedOperationId, toolpathVisibility ?? { cuts: true, leadIns: true, rapids: true, plunges: true, retractions: true, directions: true })
       }
     }
 
@@ -2855,11 +2853,13 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, SketchCanvasProps>(fu
       <OverlapFeaturePicker picker={overlapFeaturePicker} />
       <CreationTargetBadge />
       {!depthLegendCollapsed ? <DepthLegend onToggleDepthLegend={onToggleDepthLegend} /> : null}
-      {(toolpaths && toolpaths.some((tp) => tp.moves.length > 0)) && toolpathVisibility && onToolpathVisibilityChange && (
+      {(toolpaths && toolpaths.some((tp) => tp.moves.length > 0)) && toolpathVisibility && onToolpathVisibilityChange && toolpathPanelExpanded !== undefined && onToolpathPanelExpandedChange && (
         <ToolpathVisibilityPanel
           visibility={toolpathVisibility}
           onChange={onToolpathVisibilityChange}
           className="sketch-toolpath-vis"
+          expanded={toolpathPanelExpanded}
+          onExpandedChange={onToolpathPanelExpandedChange}
         />
       )}
       <ConstraintEditPanel constraint={constraint} />

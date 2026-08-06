@@ -141,6 +141,7 @@ export function createBackdropSlice(
             ...s.selection,
             selectedFeatureId: null,
             selectedFeatureIds: [],
+            selectedTabIds: [],
             selectedNode: { type: 'backdrop' },
             mode: 'feature',
             activeControl: null,
@@ -225,6 +226,7 @@ export function createBackdropSlice(
                   selectedNode: null,
                   selectedFeatureId: null,
                   selectedFeatureIds: [],
+                  selectedTabIds: [],
                   mode: 'feature',
                   activeControl: null,
                 }

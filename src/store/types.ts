@@ -391,8 +391,9 @@ export interface ProjectStore {
   enterTabEdit: (id: string) => void
   moveTabControl: (tabId: string, control: SketchControlRef, point: Point) => void
   updateTab: (id: string, patch: Partial<Tab>) => void
-  updateTabs: (ids: string[], patch: Partial<Tab>) => void
+  updateTabs: (updates: Array<{ id: string; patch: Partial<Tab> }>) => void
   deleteTab: (id: string) => void
+  deleteTabs: (ids: string[]) => void
   setAllTabsVisible: (visible: boolean) => void
   startAddTabPlacement: () => void
   startMoveTab: (tabId: string) => void

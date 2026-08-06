@@ -88,8 +88,10 @@ function testVariantKindsRenderEveryOption(): void {
   const cases: Array<[OperationParamRefKind, readonly string[]]> = [
     ['pattern', ['offset', 'parallel', 'waterline']],
     ['cutDirection', ['conventional', 'climb']],
+    ['edgeStrategy', ['contour', 'trochoidal']],
     ['machiningOrder', ['level_first', 'feature_first']],
-    ['drillType', ['simple', 'peck', 'dwell', 'chip_breaking']],
+    ['entryStrategy', ['plunge', 'helix', 'ramp']],
+    ['drillType', ['simple', 'peck', 'dwell', 'chip_breaking', 'helical']],
   ]
   for (const [kind, variants] of cases) {
     for (const variant of variants) {

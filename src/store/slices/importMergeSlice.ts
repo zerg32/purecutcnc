@@ -191,6 +191,7 @@ export function createImportMergeSlice(
             ...current.selection,
             selectedFeatureId: isLargeImport ? null : primaryId,
             selectedFeatureIds: isLargeImport ? [] : createdIds,
+            selectedTabIds: [],
             selectedNode: isLargeImport && primaryFolderId
               ? { type: 'folder', folderId: primaryFolderId }
               : primaryId
@@ -233,6 +234,7 @@ export function createImportMergeSlice(
             ...current.selection,
             selectedFeatureId: primaryId,
             selectedFeatureIds: createdIds,
+            selectedTabIds: [],
             selectedNode: primaryId
               ? { type: 'feature', featureId: primaryId }
               : primaryFolderId

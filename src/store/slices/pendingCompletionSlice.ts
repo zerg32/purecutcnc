@@ -301,6 +301,7 @@ export function createPendingCompletionSlice(
                     ...s.selection,
                     selectedFeatureId: finalCreatedFeatures.at(-1)?.id ?? s.selection.selectedFeatureId,
                     selectedFeatureIds: finalCreatedFeatures.map((f) => f.id),
+                    selectedTabIds: [],
                     selectedNode: isGroupCopy
                       ? { type: 'folder', folderId: groupCopyFolder!.id }
                       : finalCreatedFeatures.at(-1)
@@ -354,7 +355,7 @@ export function createPendingCompletionSlice(
                     ...s.selection,
                     selectedFeatureId: null,
                     selectedFeatureIds: [],
-                    selectedTabIds: createdTabs.at(-1) ? [createdTabs.at(-1)!.id] : [],
+                    selectedTabIds: createdTabs.map((tab) => tab.id),
                     selectedNode: createdTabs.at(-1)
                       ? { type: 'tab', tabId: createdTabs.at(-1)!.id }
                       : s.selection.selectedNode,
@@ -404,6 +405,7 @@ export function createPendingCompletionSlice(
                   ...s.selection,
                   selectedFeatureId: null,
                   selectedFeatureIds: [],
+                  selectedTabIds: [],
                   selectedNode: createdClamps.at(-1)
                     ? { type: 'clamp', clampId: createdClamps.at(-1)!.id }
                     : s.selection.selectedNode,
@@ -517,6 +519,7 @@ export function createPendingCompletionSlice(
               ...s.selection,
               selectedFeatureId: createdFeatures.at(-1)?.id ?? s.selection.selectedFeatureId,
               selectedFeatureIds: createdFeatures.map((f) => f.id),
+              selectedTabIds: [],
               selectedNode: createdFeatures.at(-1)
                 ? { type: 'feature', featureId: createdFeatures.at(-1)!.id }
                 : s.selection.selectedNode,
@@ -561,6 +564,7 @@ export function createPendingCompletionSlice(
               ...s.selection,
               selectedFeatureId: createdFeatures.at(-1)?.id ?? s.selection.selectedFeatureId,
               selectedFeatureIds: createdFeatures.map((f) => f.id),
+              selectedTabIds: [],
               selectedNode: createdFeatures.at(-1)
                 ? { type: 'feature', featureId: createdFeatures.at(-1)!.id }
                 : s.selection.selectedNode,
@@ -680,6 +684,7 @@ export function createPendingCompletionSlice(
             ...s.selection,
             selectedFeatureId: primaryId,
             selectedFeatureIds: createdIds,
+            selectedTabIds: [],
             selectedNode: primaryId ? { type: 'feature', featureId: primaryId } : null,
             mode: 'feature',
             activeControl: null,
@@ -783,6 +788,7 @@ export function createPendingCompletionSlice(
             ...s.selection,
             selectedFeatureId: primaryId,
             selectedFeatureIds: createdIds,
+            selectedTabIds: [],
             selectedNode: primaryId ? { type: 'feature', featureId: primaryId } : null,
             mode: 'feature',
             activeControl: null,

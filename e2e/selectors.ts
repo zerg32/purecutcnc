@@ -26,6 +26,15 @@
 
 import type { Locator, Page } from '@playwright/test'
 
+export const tabEditing = {
+  rowByName: (page: Page, name: string) => page.locator('.tree-row--tab').filter({ hasText: name }),
+  field: (page: Page, label: string) => page.locator('.properties-field').filter({ hasText: label }),
+  sizeInput: (page: Page) => tabEditing.field(page, 'Size').getByRole('textbox'),
+  shapeField: (page: Page) => tabEditing.field(page, 'Shape'),
+  selectionCount: (page: Page) => tabEditing.field(page, 'Selection').getByRole('textbox'),
+  deleteSelected: (page: Page) => page.getByRole('button', { name: 'Delete Selected Tabs' }),
+}
+
 // ── Appearance ─────────────────────────────────────────────────────
 
 export const appearance = {
@@ -205,6 +214,20 @@ export const newProjectDialog = {
   root: (page: Page) => page.locator('.dialog--new-project'),
   template: (page: Page, label: string) =>
     newProjectDialog.root(page).getByRole('button', { name: new RegExp(`^${label}`) }),
+}
+
+// ── CAM operation properties ───────────────────────────────────────
+
+export const cam = {
+  /**
+   * The operation-properties row whose label is exactly `label`. Anchored on the
+   * `.properties-field` row rather than "parent of the text node", so wrapping a
+   * field in another element does not silently retarget the locator, and scoped
+   * to the operation panel so a matching word elsewhere cannot claim it.
+   */
+  operationField: (page: Page, label: string) =>
+    page.locator('.cam-operation-properties .properties-field')
+      .filter({ has: page.getByText(label, { exact: true }) }),
 }
 
 // ── Feature tree ────────────────────────────────────────────────────
@@ -534,4 +557,27 @@ export const viewMenu = {
   /** An action option (Fit to model, Reset view) in the 3D menu. */
   action3d: (page: Page, label: string) =>
     viewMenu.menu3d(page).getByRole('menuitem', { name: new RegExp(`^${label}`) }),
+}
+
+// ── Toolpath visibility panel ──────────────────────────────────────
+
+export const toolpathVis = {
+  /** The sketch-view toolpath visibility panel. */
+  sketchPanel: (page: Page) => page.locator('.sketch-toolpath-vis'),
+
+  /** The 3D-view toolpath visibility panel (no extra class). */
+  view3dPanel: (page: Page) =>
+    page.locator('#workspace-panel-preview3d .viewport-toolpath-vis'),
+
+  /** The toggle button (now the g-code icon). Scoped to the sketch panel. */
+  toggle: (page: Page) =>
+    toolpathVis.sketchPanel(page).locator('.viewport-toolpath-vis__label'),
+
+  /** All expanded items in the sketch panel. */
+  sketchItems: (page: Page) =>
+    toolpathVis.sketchPanel(page).locator('.viewport-toolpath-vis__item'),
+
+  /** All expanded items in the 3D panel. */
+  view3dItems: (page: Page) =>
+    toolpathVis.view3dPanel(page).locator('.viewport-toolpath-vis__item'),
 }

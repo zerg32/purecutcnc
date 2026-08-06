@@ -100,6 +100,7 @@ export function createPendingActionsSlice(
             ...s.selection,
             selectedFeatureId: featureId,
             selectedFeatureIds: featureIds,
+            selectedTabIds: [],
             selectedNode: { type: 'feature', featureId },
             mode: 'feature',
             hoveredFeatureId: null,
@@ -131,6 +132,7 @@ export function createPendingActionsSlice(
             ...s.selection,
             selectedFeatureId: featureId,
             selectedFeatureIds: featureIds,
+            selectedTabIds: [],
             selectedNode: { type: 'feature', featureId },
             mode: 'feature',
             hoveredFeatureId: null,
@@ -162,6 +164,7 @@ export function createPendingActionsSlice(
             ...s.selection,
             selectedFeatureId: featureId,
             selectedFeatureIds: featureIds,
+            selectedTabIds: [],
             selectedNode: { type: 'feature', featureId },
             mode: 'feature',
             hoveredFeatureId: null,
@@ -193,6 +196,7 @@ export function createPendingActionsSlice(
             ...s.selection,
             selectedFeatureId: featureId,
             selectedFeatureIds: featureIds,
+            selectedTabIds: [],
             selectedNode: { type: 'feature', featureId },
             mode: 'feature',
             hoveredFeatureId: null,
@@ -224,6 +228,7 @@ export function createPendingActionsSlice(
             ...s.selection,
             selectedFeatureId: featureId,
             selectedFeatureIds: featureIds,
+            selectedTabIds: [],
             selectedNode: { type: 'feature', featureId },
             mode: 'feature',
             hoveredFeatureId: null,
@@ -249,6 +254,7 @@ export function createPendingActionsSlice(
             ...s.selection,
             selectedFeatureId: null,
             selectedFeatureIds: [],
+            selectedTabIds: [],
             selectedNode: { type: 'backdrop' },
             mode: 'feature',
             hoveredFeatureId: null,
@@ -274,6 +280,7 @@ export function createPendingActionsSlice(
             ...s.selection,
             selectedFeatureId: null,
             selectedFeatureIds: [],
+            selectedTabIds: [],
             selectedNode: { type: 'backdrop' },
             mode: 'feature',
             hoveredFeatureId: null,
@@ -299,6 +306,7 @@ export function createPendingActionsSlice(
             ...s.selection,
             selectedFeatureId: null,
             selectedFeatureIds: [],
+            selectedTabIds: [],
             selectedNode: { type: 'backdrop' },
             mode: 'feature',
             hoveredFeatureId: null,
@@ -324,6 +332,7 @@ export function createPendingActionsSlice(
             ...s.selection,
             selectedFeatureId: featureIds.at(-1) ?? null,
             selectedFeatureIds: featureIds,
+            selectedTabIds: [],
             selectedNode: featureIds.at(-1) ? { type: 'feature', featureId: featureIds.at(-1)! } : null,
             mode: 'feature',
             hoveredFeatureId: null,
@@ -348,6 +357,7 @@ export function createPendingActionsSlice(
             ...s.selection,
             selectedFeatureId: cutterIds.at(-1) ?? null,
             selectedFeatureIds: cutterIds,
+            selectedTabIds: [],
             selectedNode: cutterIds.at(-1) ? { type: 'feature', featureId: cutterIds.at(-1)! } : null,
             mode: 'feature',
             hoveredFeatureId: null,
@@ -375,6 +385,7 @@ export function createPendingActionsSlice(
             ...s.selection,
             selectedFeatureId: featureIds.at(-1) ?? null,
             selectedFeatureIds: featureIds,
+            selectedTabIds: [],
             selectedNode: featureIds.at(-1) ? { type: 'feature', featureId: featureIds.at(-1)! } : null,
             mode: 'feature',
             hoveredFeatureId: null,
@@ -399,6 +410,7 @@ export function createPendingActionsSlice(
             ...s.selection,
             selectedFeatureId: null,
             selectedFeatureIds: [],
+            selectedTabIds: [],
             selectedNode: { type: 'clamp', clampId },
             mode: 'feature',
             hoveredFeatureId: null,
@@ -423,6 +435,7 @@ export function createPendingActionsSlice(
             ...s.selection,
             selectedFeatureId: null,
             selectedFeatureIds: [],
+            selectedTabIds: [],
             selectedNode: { type: 'clamp', clampId },
             mode: 'feature',
             hoveredFeatureId: null,
@@ -433,21 +446,24 @@ export function createPendingActionsSlice(
 
     startMoveTab: (tabId) =>
       set((s) => {
-        if (!tabById(s.project, tabId)) {
+        const tabIds = s.selection.selectedTabIds.includes(tabId)
+          ? [...s.selection.selectedTabIds.filter((id) => id !== tabId), tabId]
+          : [tabId]
+        if (tabIds.some((id) => !tabById(s.project, id))) {
           return {}
         }
 
         return {
           pendingAdd: null,
           sketchEditSession: null,
-          pendingMove: { mode: 'move', entityType: 'tab', entityIds: [tabId], fromPoint: null, toPoint: null, session: nextPlacementSession() },
+          pendingMove: { mode: 'move', entityType: 'tab', entityIds: tabIds, fromPoint: null, toPoint: null, session: nextPlacementSession() },
           pendingTransform: null,
           pendingOffset: null,
           selection: {
             ...s.selection,
             selectedFeatureId: null,
             selectedFeatureIds: [],
-            selectedTabIds: [tabId],
+            selectedTabIds: tabIds,
             selectedNode: { type: 'tab', tabId },
             mode: 'feature',
             hoveredFeatureId: null,
@@ -458,21 +474,24 @@ export function createPendingActionsSlice(
 
     startCopyTab: (tabId) =>
       set((s) => {
-        if (!tabById(s.project, tabId)) {
+        const tabIds = s.selection.selectedTabIds.includes(tabId)
+          ? [...s.selection.selectedTabIds.filter((id) => id !== tabId), tabId]
+          : [tabId]
+        if (tabIds.some((id) => !tabById(s.project, id))) {
           return {}
         }
 
         return {
           pendingAdd: null,
           sketchEditSession: null,
-          pendingMove: { mode: 'copy', entityType: 'tab', entityIds: [tabId], fromPoint: null, toPoint: null, session: nextPlacementSession() },
+          pendingMove: { mode: 'copy', entityType: 'tab', entityIds: tabIds, fromPoint: null, toPoint: null, session: nextPlacementSession() },
           pendingTransform: null,
           pendingOffset: null,
           selection: {
             ...s.selection,
             selectedFeatureId: null,
             selectedFeatureIds: [],
-            selectedTabIds: [tabId],
+            selectedTabIds: tabIds,
             selectedNode: { type: 'tab', tabId },
             mode: 'feature',
             hoveredFeatureId: null,

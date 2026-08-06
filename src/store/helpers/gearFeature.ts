@@ -218,6 +218,7 @@ export function createGroupedGearFeatureInsert(
       ...state.selection,
       selectedFeatureId: safeGear.id,
       selectedFeatureIds: createdIds,
+      selectedTabIds: [],
       selectedNode: { type: 'folder', folderId: groupFolderId },
       mode: 'feature',
       activeControl: null,

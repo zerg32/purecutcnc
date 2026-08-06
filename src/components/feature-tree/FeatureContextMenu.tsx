@@ -353,7 +353,7 @@ export function FeatureContextMenu({
         </>
       ) : menuTab ? (
         <>
-          <button className="feature-context-menu__item" type="button" onClick={() => actions.editTab(menuTab.id)}>
+          <button className="feature-context-menu__item" type="button" onClick={() => actions.editTab(menuTab.id)} disabled={menuHasMultipleSelection}>
             {t('featureTree.contextMenu.editSketch')}
           </button>
           <button className="feature-context-menu__item" type="button" onClick={() => actions.copyTab(menuTab.id)}>
@@ -365,9 +365,9 @@ export function FeatureContextMenu({
           <button
             className="feature-context-menu__item feature-context-menu__item--danger"
             type="button"
-            onClick={() => actions.deleteTab(menuTab.id)}
+            onClick={() => menuHasMultipleSelection ? actions.deleteTabs([...ids]) : actions.deleteTab(menuTab.id)}
           >
-            {t('featureTree.contextMenu.delete')}
+            {menuHasMultipleSelection ? t('featureTree.contextMenu.deleteSelected') : t('featureTree.contextMenu.delete')}
           </button>
         </>
       ) : menuClamp ? (

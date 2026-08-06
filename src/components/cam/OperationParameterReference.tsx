@@ -79,6 +79,55 @@ export function OperationParameterReference({
         </OpParamRefFrame>
       )
 
+    case 'edgeStrategy': {
+      // Both variants share the retained wall so the difference reads as the
+      // motion above it, not as two unrelated pictures.
+      if (variant === 'trochoidal') {
+        return (
+          <OpParamRefFrame label={label}>
+            <path className="gear-reference__outline" d="M6 27h46" />
+            {[13, 21, 29, 37, 45].map((cx) => (
+              <circle key={cx} className="gear-reference__guide" cx={cx} cy="15" r="6" />
+            ))}
+            <path className="gear-reference__accent" d="M10 15h34" />
+            <path className="gear-reference__accent-fill" d="M46 15l-4.5-2.7v5.4z" />
+          </OpParamRefFrame>
+        )
+      }
+      return (
+        <OpParamRefFrame label={label}>
+          <path className="gear-reference__outline" d="M6 27h46" />
+          <path className="gear-reference__guide" d="M6 15h46" />
+          <path className="gear-reference__accent" d="M10 15h34" />
+          <path className="gear-reference__accent-fill" d="M46 15l-4.5-2.7v5.4z" />
+        </OpParamRefFrame>
+      )
+    }
+
+    case 'trochoidalCutWidth':
+      // The channel the orbit sweeps, measured across — not the cutter.
+      return (
+        <OpParamRefFrame label={label}>
+          <path className="gear-reference__outline" d="M6 29h46" />
+          <path className="gear-reference__guide" d="M6 9h46" strokeDasharray="2 2" />
+          <path className="gear-reference__guide" d="M6 25h46" strokeDasharray="2 2" />
+          <circle className="gear-reference__outline" cx="21" cy="17" r="8" />
+          <path className="gear-reference__accent" d="M44 11v12" />
+          <path className="gear-reference__accent-fill" d="M44 9l-2.6 3.6h5.2zM44 25l-2.6-3.6h5.2z" />
+        </OpParamRefFrame>
+      )
+
+    case 'trochoidalAdvance':
+      // Centre-to-centre distance between one orbit and the next.
+      return (
+        <OpParamRefFrame label={label}>
+          <circle className="gear-reference__guide" cx="22" cy="17" r="9" />
+          <circle className="gear-reference__outline" cx="31" cy="17" r="9" />
+          <path className="gear-reference__accent" d="M22 17h9" />
+          <path className="gear-reference__accent-fill" d="M22 17l3.3-2.4v4.8zM31 17l-3.3-2.4v4.8z" />
+        </OpParamRefFrame>
+      )
+
     case 'maxDepth':
       return (
         <OpParamRefFrame label={label}>
@@ -129,6 +178,57 @@ export function OperationParameterReference({
           <path className="gear-reference__guide" d="M26 6v12M30 6v12" />
           <path className="gear-reference__accent" d="M44 6v15" />
           <path className="gear-reference__accent-fill" d="M44 23l-3-5h6z" />
+        </OpParamRefFrame>
+      )
+
+    case 'entryStrategy': {
+      if (variant === 'helix') {
+        return (
+          <OpParamRefFrame label={label}>
+            <path className="gear-reference__outline" d="M6 27h46" />
+            <path className="gear-reference__guide" d="M29 5v20" />
+            <path className="gear-reference__accent" d="M17 11c0-4 24-4 24 0s-24 4-24 0 24-4 24 0v10" />
+            <path className="gear-reference__accent-fill" d="M41 24l-3-5h6z" />
+          </OpParamRefFrame>
+        )
+      }
+      if (variant === 'ramp') {
+        return (
+          <OpParamRefFrame label={label}>
+            <path className="gear-reference__outline" d="M6 27h46" />
+            <path className="gear-reference__guide" d="M11 7h36" />
+            <path className="gear-reference__accent" d="M12 8l34 17" />
+            <path className="gear-reference__accent-fill" d="M48 26l-5.8.3 2.7-5.1z" />
+          </OpParamRefFrame>
+        )
+      }
+      return (
+        <OpParamRefFrame label={label}>
+          <path className="gear-reference__outline" d="M6 27h46" />
+          <path className="gear-reference__guide" d="M29 5v17" />
+          <path className="gear-reference__accent" d="M29 5v16" />
+          <path className="gear-reference__accent-fill" d="M29 25l-3.2-5.5h6.4z" />
+        </OpParamRefFrame>
+      )
+    }
+
+    case 'entryRampAngle':
+      return (
+        <OpParamRefFrame label={label}>
+          <path className="gear-reference__outline" d="M7 27h44" />
+          <path className="gear-reference__accent" d="M10 26L46 8" />
+          <path className="gear-reference__guide" d="M20 26a10 10 0 0 0-1.1-4.5" />
+          <path className="gear-reference__accent-fill" d="M48 7l-3.2 5.1-2.7-5.2z" />
+        </OpParamRefFrame>
+      )
+
+    case 'entryHelixDiameter':
+      return (
+        <OpParamRefFrame label={label}>
+          <ellipse className="gear-reference__outline" cx="29" cy="17" rx="18" ry="10" />
+          <ellipse className="gear-reference__guide" cx="29" cy="17" rx="7" ry="4" />
+          <path className="gear-reference__accent" d="M12 17h34" />
+          <path className="gear-reference__accent-fill" d="M10 17l4-2.7v5.4zM48 17l-4-2.7v5.4z" />
         </OpParamRefFrame>
       )
 
@@ -354,6 +454,15 @@ export function OperationParameterReference({
             <path className="gear-reference__accent-fill" d="M29 26l-2.6-4.5h5.2z" />
             <circle className="gear-reference__accent" cx="46" cy="10" r="4.5" />
             <path className="gear-reference__accent" d="M46 10v-3M46 10l2.2 1.3" />
+          </OpParamRefFrame>
+        )
+      }
+      if (variant === 'helical') {
+        return (
+          <OpParamRefFrame label={label}>
+            {hole}
+            <path className="gear-reference__accent" d="M29 5c0 2 6 1 6 3s-6 1-6 3 6 1 6 3-6 1-6 3" />
+            <path className="gear-reference__accent-fill" d="M29 26l-2.6-4.5h5.2z" />
           </OpParamRefFrame>
         )
       }

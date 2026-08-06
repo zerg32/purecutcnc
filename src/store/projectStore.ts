@@ -189,6 +189,7 @@ export const useProjectStore = create<ProjectStore>((rawSet, get) => {
         ...s.selection,
         selectedFeatureId: featureId,
         selectedFeatureIds: [featureId],
+        selectedTabIds: [],
         selectedNode: { type: 'feature' as const, featureId },
         activeControl: null,
       },

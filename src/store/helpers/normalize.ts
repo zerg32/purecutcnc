@@ -255,7 +255,9 @@ export function normalizeOperation(rawOperation: Operation, project: Project, in
     waterlineMaxRingsPerBand: operation.waterlineMaxRingsPerBand ?? 0,
     waterlineTipStepdown: operation.waterlineTipStepdown ?? 0,
     arcFittingEnabled: operation.arcFittingEnabled ?? true,
-    rampType: operation.rampEntry && !operation.rampType ? 'zigzag' : operation.rampType,
+    edgeStrategy: (operation.kind === 'edge_route_inside' || operation.kind === 'edge_route_outside')
+      ? operation.edgeStrategy ?? 'contour'
+      : operation.edgeStrategy,
   }
 
   if (!isOperationTargetValid(project, normalized.kind, normalized.target)) {
@@ -299,8 +301,8 @@ export function normalizeTab(tab: Tab, units: Project['meta']['units'], index: n
     h: Math.max(tab.h ?? defaultSize, convertLength(0.1, 'mm', units)),
     z_top: Math.max(zTop, zBottom),
     z_bottom: Math.min(zTop, zBottom),
+    shape: tab.shape === 'smooth' ? 'smooth' : 'rect',
     visible: tab.visible ?? true,
-    shape: tab.shape ?? 'smooth',
   }
 }
 

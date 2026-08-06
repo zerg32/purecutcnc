@@ -18,9 +18,11 @@ import type { StateCreator } from 'zustand'
 import type { Tab, Project, SketchFeature, Operation } from '../../types/project'
 import type { ProjectStore } from '../types'
 import { getProfileBounds } from '../../types/project'
+import { flattenProfile } from '../../engine/toolpaths/geometry'
+import { tabLayoutFreeFraction, toolCentreContours, type TabRect } from '../../engine/toolpaths/tabs'
 import { convertLength } from '../../utils/units'
 import { nextUniqueGeneratedId } from '../helpers/ids'
-import { emptySelection, sanitizeSelection } from './selectionSlice'
+import { sanitizeSelection } from './selectionSlice'
 import { cloneProject, projectsEqual } from '../helpers/normalize'
 import { resolveFeatureInstance } from '../helpers/resolveFeatures'
 
@@ -30,20 +32,22 @@ export type TabsSlice = Pick<
   | 'updateTab'
   | 'updateTabs'
   | 'deleteTab'
+  | 'deleteTabs'
   | 'setAllTabsVisible'
   | 'autoPlaceTabsForOperation'
 >
 
-function nextTabName(tabs: Tab[]): string {
-  if (!tabs.some((tab) => tab.name === 'Tab 1')) {
-    return 'Tab 1'
+function nextAutoTabName(baseName: string, tabs: Tab[]): string {
+  const preferred = `${baseName} Tab`
+  if (!tabs.some((tab) => tab.name === preferred)) {
+    return preferred
   }
 
   let index = 2
-  while (tabs.some((tab) => tab.name === `Tab ${index}`)) {
+  while (tabs.some((tab) => tab.name === `${preferred} ${index}`)) {
     index += 1
   }
-  return `Tab ${index}`
+  return `${preferred} ${index}`
 }
 
 function defaultAutoTabZTop(project: Project): number {
@@ -65,6 +69,41 @@ function resolveToolDiameterInProjectUnits(project: Project, operation: Operatio
     : convertLength(tool.diameter, tool.units, project.meta.units)
 }
 
+/**
+ * Share of the tool-centre path a tab layout must leave uncovered to be usable. Below
+ * this the part is barely attached — and at zero the operation never reaches final
+ * depth at all, which `tabsBlockFinalDepth` reports.
+ */
+const MIN_FREE_PATH_FRACTION = 0.15
+
+function tabRectsAt(
+  count: 2 | 4,
+  size: number,
+  bounds: { minX: number; maxX: number; minY: number; maxY: number },
+  cx: number,
+  cy: number,
+  widthIsLongest: boolean,
+): TabRect[] {
+  if (count === 2) {
+    return widthIsLongest
+      ? [
+          { x: cx - size / 2, y: bounds.minY - size / 2, w: size, h: size },
+          { x: cx - size / 2, y: bounds.maxY - size / 2, w: size, h: size },
+        ]
+      : [
+          { x: bounds.minX - size / 2, y: cy - size / 2, w: size, h: size },
+          { x: bounds.maxX - size / 2, y: cy - size / 2, w: size, h: size },
+        ]
+  }
+
+  return [
+    { x: cx - size / 2, y: bounds.minY - size / 2, w: size, h: size },
+    { x: cx - size / 2, y: bounds.maxY - size / 2, w: size, h: size },
+    { x: bounds.minX - size / 2, y: cy - size / 2, w: size, h: size },
+    { x: bounds.maxX - size / 2, y: cy - size / 2, w: size, h: size },
+  ]
+}
+
 function buildAutoTabsForFeature(
   feature: SketchFeature,
   project: Project,
@@ -83,25 +122,32 @@ function buildAutoTabsForFeature(
   const zTop = defaultAutoTabZTop(project)
   const zBottom = 0
 
-  const entries: Array<Pick<Tab, 'x' | 'y' | 'w' | 'h'>> =
-    Math.min(width, height) < size * 3
-      ? (
-          width >= height
-            ? [
-                { x: cx - size / 2, y: bounds.minY - size / 2, w: size, h: size },
-                { x: cx - size / 2, y: bounds.maxY - size / 2, w: size, h: size },
-              ]
-            : [
-                { x: bounds.minX - size / 2, y: cy - size / 2, w: size, h: size },
-                { x: bounds.maxX - size / 2, y: cy - size / 2, w: size, h: size },
-              ]
-        )
-      : [
-          { x: cx - size / 2, y: bounds.minY - size / 2, w: size, h: size },
-          { x: cx - size / 2, y: bounds.maxY - size / 2, w: size, h: size },
-          { x: bounds.minX - size / 2, y: cy - size / 2, w: size, h: size },
-          { x: bounds.maxX - size / 2, y: cy - size / 2, w: size, h: size },
-        ]
+  // Measure candidate layouts against the real tool-centre path rather than the
+  // bounding box. A circle's inside path is pi/4 of the box perimeter and each tab
+  // eats arc, not chord, so four tabs that fit a square of the same extents can
+  // swallow the circle's final pass whole.
+  const toolRadius = (toolDiameter ?? 0) / 2
+  const insideCut = operation.kind === 'edge_route_inside'
+  const contours = toolCentreContours(
+    flattenProfile(feature.sketch.profile).points,
+    insideCut ? -toolRadius : toolRadius,
+  )
+  const widthIsLongest = width >= height
+
+  const candidates: Array<{ count: 2 | 4; size: number }> = [
+    { count: 4, size },
+    { count: 2, size },
+  ]
+  if (size > minSize + 1e-9) {
+    candidates.push({ count: 4, size: minSize }, { count: 2, size: minSize })
+  }
+
+  const fallback = tabRectsAt(2, minSize, bounds, cx, cy, widthIsLongest)
+  const entries =
+    candidates
+      .map((candidate) => tabRectsAt(candidate.count, candidate.size, bounds, cx, cy, widthIsLongest))
+      .find((rects) => tabLayoutFreeFraction(contours, rects, toolRadius) >= MIN_FREE_PATH_FRACTION)
+    ?? fallback
 
   const created: Tab[] = []
   for (const entry of entries) {
@@ -113,15 +159,15 @@ function buildAutoTabsForFeature(
         },
         'tb',
       ),
-      name: nextTabName([...existingTabs, ...created]),
+      name: nextAutoTabName(feature.name, [...existingTabs, ...created]),
       x: entry.x,
       y: entry.y,
       w: entry.w,
       h: entry.h,
       z_top: zTop,
       z_bottom: zBottom,
-      visible: true,
       shape: 'smooth',
+      visible: true,
     })
   }
 
@@ -153,15 +199,19 @@ export function createTabsSlice(
         }
       }),
 
-    updateTabs: (ids, patch) =>
+    updateTabs: (updates) =>
       set((s) => {
-        if (ids.length === 0) {
+        const patches = new Map(updates.map((update) => [update.id, update.patch]))
+        const nextTabs = s.project.tabs.map((tab) => {
+          const patch = patches.get(tab.id)
+          return patch ? { ...tab, ...patch } : tab
+        })
+        if (nextTabs.some((tab) => tab.z_top < tab.z_bottom)) {
           return {}
         }
-        const idSet = new Set(ids)
         const nextProject = {
           ...s.project,
-          tabs: s.project.tabs.map((tab) => (idSet.has(tab.id) ? { ...tab, ...patch } : tab)),
+          tabs: nextTabs,
           meta: { ...s.project.meta, modified: new Date().toISOString() },
         }
         if (projectsEqual(nextProject, s.project)) {
@@ -187,13 +237,31 @@ export function createTabsSlice(
         if (projectsEqual(nextProject, s.project)) {
           return {}
         }
-        const nextSelection =
-          s.selection.selectedTabIds.includes(id) && s.selection.selectedTabIds.length <= 1
-            ? emptySelection()
-            : sanitizeSelection(nextProject, s.selection)
         return {
           project: nextProject,
-          selection: nextSelection,
+          selection: sanitizeSelection(nextProject, s.selection),
+          history: {
+            past: [...s.history.past, cloneProject(s.project)].slice(-100),
+            future: [],
+            transactionStart: null,
+          },
+        }
+      }),
+
+    deleteTabs: (ids) =>
+      set((s) => {
+        const idSet = new Set(ids)
+        const nextProject = {
+          ...s.project,
+          tabs: s.project.tabs.filter((tab) => !idSet.has(tab.id)),
+          meta: { ...s.project.meta, modified: new Date().toISOString() },
+        }
+        if (projectsEqual(nextProject, s.project)) {
+          return {}
+        }
+        return {
+          project: nextProject,
+          selection: sanitizeSelection(nextProject, s.selection),
           history: {
             past: [...s.history.past, cloneProject(s.project)].slice(-100),
             future: [],
@@ -312,7 +380,7 @@ export function createTabsSlice(
             ...s.selection,
             selectedFeatureId: null,
             selectedFeatureIds: [],
-            selectedTabIds: [],
+            selectedTabIds: createdTabs.map((tab) => tab.id),
             selectedNode: { type: 'tab', tabId: createdTabs[createdTabs.length - 1].id },
             mode: 'feature',
             hoveredFeatureId: null,

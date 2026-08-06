@@ -913,6 +913,7 @@ export function useClickPlacement(ctx: ClickPlacementCtx): UseClickPlacementRetu
       }
     }
 
+    const additive = event.metaKey || event.ctrlKey || event.shiftKey || multiSelectMode || !!pendingShapeAction
     const hitClampId = findHitClampId(world, project.clamps)
     if (hitClampId) {
       selectClamp(hitClampId)
@@ -921,15 +922,12 @@ export function useClickPlacement(ctx: ClickPlacementCtx): UseClickPlacementRetu
 
     const hitTabId = findHitTabId(world, project.tabs)
     if (hitTabId) {
-      const additive = event.metaKey || event.ctrlKey || event.shiftKey
       selectTab(hitTabId, additive)
       return
     }
 
     const resolvedFeatures = resolvedProjectFeatures(project)
     const featureHit = resolveFeatureSelectionHit(world, resolvedFeatures, vt)
-    const additive = event.metaKey || event.ctrlKey || event.shiftKey || multiSelectMode || !!pendingShapeAction
-
     if (featureHit.kind === 'direct') {
       selectFeature(featureHit.featureId, additive)
     } else if (featureHit.kind === 'ambiguous') {

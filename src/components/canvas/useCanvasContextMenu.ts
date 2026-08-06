@@ -112,9 +112,7 @@ export function useCanvasContextMenu(ctx: CanvasContextMenuCtx): UseCanvasContex
 
     const hitTabId = findHitTabId(world, project.tabs)
     if (hitTabId) {
-      if (!selection.selectedTabIds.includes(hitTabId)) {
-        selectTab(hitTabId)
-      }
+      if (!selection.selectedTabIds.includes(hitTabId)) selectTab(hitTabId)
       onTabContextMenu?.(hitTabId, clientX, clientY)
       return
     }

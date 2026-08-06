@@ -4,13 +4,13 @@ Zustand store. The single source of truth for the current `.camj` project. **All
 
 ## Files
 - `projectStore.ts` — store composition root: initial state, shared dependencies, and slice assembly
-- `types.ts` — store-internal types (state shape, action signatures)
+- `types.ts` — store-internal types (state shape, action signatures), including transient feature/tab selection
 
 ## Subfolders
 - `slices/` — focused slices of store behavior
-  - `selectionSlice.ts` — which features/segments are currently selected
+  - `selectionSlice.ts` — transient feature/tab multi-selection, primary selection, and sketch-edit selection state
   - `pendingActionsSlice.ts` — queue of deferred ops awaiting user confirmation
-  - `pendingAddSlice.ts` — in-progress feature being drawn but not yet committed, including multi-step gear placement
+  - `pendingAddSlice.ts` — in-progress feature being drawn but not yet committed, including multi-step gear placement; re-arms a fresh draft of the same shape on completion (sticky drawing, issue #415)
   - `pendingCompletionSlice.ts` — partially-completed sketches awaiting closure
   - `dimensionsSlice.ts` — persistent dimension annotations (`project.annotations`): add/update/delete + selection (history-tracked)
   - `dimensionToolSlice.ts` — transient measure tools: tape measure + in-progress permanent-dimension placement (not persisted, not in history)
@@ -54,6 +54,7 @@ Zustand store. The single source of truth for the current `.camj` project. **All
   - `polygonSplit.ts` — splits polygons (e.g. for boolean ops)
 
 ## Tests
+- `tabSelection.test.ts` — transient tab multi-selection, visible select-all, sanitization, non-tab clearing, and edit selection
 - `constructionWorkflows.test.ts` — construction geometry (issue #199): creation target, conversions construction↔feature↔region, folder/section integrity, deferred constraints, 3.0 save stamping, open-profile round trip
 - `createRestOperation.test.ts` — rest-machining operation creation
 - `creationDefinitions.test.ts` — definition minting across all creation paths (addFeature, imports, .camj merge); idempotency

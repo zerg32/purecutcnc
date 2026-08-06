@@ -362,8 +362,8 @@ function grblDefinition(): MachineDefinition {
 
 function runDrillingFixture(
   definition: MachineDefinition,
-  drillType: 'simple' | 'peck' | 'dwell' | 'chip_breaking' | 'helical',
-  overrides?: { peckDepth?: number; dwellTime?: number; helixDiameter?: number; helixPitch?: number },
+  drillType: 'simple' | 'peck' | 'dwell' | 'chip_breaking',
+  overrides?: { peckDepth?: number; dwellTime?: number },
 ): {
   gcode: string
   warnings: ToolpathWarning[]
@@ -420,8 +420,6 @@ function runDrillingFixture(
     drillType,
     peckDepth: overrides?.peckDepth,
     dwellTime: overrides?.dwellTime,
-    helixDiameter: overrides?.helixDiameter,
-    helixPitch: overrides?.helixPitch,
   }
 
   const toolpath = generateDrillingToolpath(project, operation)
@@ -449,15 +447,6 @@ function runDrillingFixture(
     stats: result.stats,
     drillCycleCount: toolpath.drillCycles.length,
   }
-}
-
-function testHelicalG1Moves(): void {
-  console.log('Testing helical drilling G1 moves (no canned cycle)...')
-  const { gcode } = runDrillingFixture(cannedCycleDefinition(), 'helical', { helixDiameter: 3, helixPitch: 2 })
-  assert(gcode.includes('G1'), 'helical G-code should contain G1 moves')
-  assert(!gcode.includes('G81'), 'helical G-code should NOT contain G81')
-  assert(!gcode.includes('G80'), 'helical G-code should NOT contain G80 (no canned cycle to cancel)')
-  assert(gcode.includes('M30'), 'helical G-code should contain program end')
 }
 
 function testCannedSimpleG81(): void {
@@ -580,13 +569,357 @@ function testLegacyCannedCycleDefaults(): void {
   assert(validated.cannedCycles!.cancelCommand === 'G80', 'cancelCommand should default to G80')
 }
 
-testHelicalG1Moves()
 testCannedSimpleG81()
 testCannedDwellG82()
 testCannedPeckG83()
 testCannedChipBreakingG73()
 testRegressionGrblNoCannedCycles()
 testLegacyCannedCycleDefaults()
+
+// ── Helical drilling postprocessor test ─────────────────────────
+
+function testHelicalDrillingG1NoCannedCycles(): void {
+  console.log('Testing helical flat-endmill drilling emits G1, no canned cycles, no G2/G3...')
+
+  const project = newProject('Helical Test', 'mm')
+  const toolRecord = { ...defaultTool('mm', 1), id: 't1', name: '4 mm Endmill', type: 'flat_endmill' as const, diameter: 4, defaultPlungeFeed: 150 }
+  project.tools = [toolRecord]
+
+  const circle: SketchFeature = {
+    id: 'c1',
+    name: 'Bore',
+    kind: 'circle',
+    folderId: null,
+    sketch: { profile: circleProfile(20, 20, 3), origin: { x: 0, y: 0 }, orientationAngle: 0, dimensions: [], constraints: [] },
+    operation: 'subtract',
+    z_top: 0,
+    z_bottom: -8,
+    visible: true,
+    locked: false,
+  }
+  replaceProjectFeatures(project, [circle])
+
+  const operation: Operation = {
+    id: 'op1',
+    name: 'Helical Bore Op',
+    kind: 'drilling',
+    pass: 'rough',
+    enabled: true,
+    showToolpath: true,
+    debugToolpath: false,
+    target: { source: 'features', featureIds: ['c1'] },
+    toolRef: 't1',
+    stepdown: 2,
+    stepover: 0.4,
+    feed: 600,
+    plungeFeed: 180,
+    rpm: 12000,
+    pocketPattern: 'offset',
+    pocketAngle: 0,
+    stockToLeaveRadial: 0,
+    stockToLeaveAxial: 0,
+    finishWalls: true,
+    finishFloor: true,
+    carveDepth: 1,
+    maxCarveDepth: 1,
+    drillType: 'helical',
+    entryRampAngle: 5,
+    entryHelixDiameterPercent: 80,
+  }
+
+  const toolpath = generateDrillingToolpath(project, operation)
+  assert(toolpath.moves.length > 0, 'helical drilling should produce moves')
+  assert(!toolpath.drillCycles || toolpath.drillCycles.length === 0, 'helical should have no drillCycles')
+
+  const result = runPostProcessor({
+    project,
+    definition: testDefinition(),
+    operations: [{ operation, tool: normalizeToolForProject(toolRecord, project), toolpath }],
+    options: { emitToolChanges: true, emitCoolant: false, programName: project.meta.name },
+  })
+  const gcode = result.gcode
+
+  // Must emit G1 linear moves for the helix
+  assert(/\bG1\b/.test(gcode), 'helical G-code should contain G1 linear moves')
+  // Must NOT contain canned cycle codes
+  assert(!/G8[123]/.test(gcode), 'helical G-code should not contain canned cycle codes (G81/G82/G83)')
+  assert(!/G73/.test(gcode), 'helical G-code should not contain G73')
+  // Must contain program end
+  assert(gcode.includes('M30'), 'helical G-code should contain M30 program end')
+}
+
+function testHelicalDrillingArcFittingNoG2G3(): void {
+  console.log('Testing helical flat-endmill drilling: no G2/G3 even with arc fitting on...')
+
+  const project = newProject('Helical Arc Test', 'mm')
+  const toolRecord = { ...defaultTool('mm', 1), id: 't1', name: '4 mm Endmill', type: 'flat_endmill' as const, diameter: 4, defaultPlungeFeed: 150 }
+  project.tools = [toolRecord]
+
+  const circle: SketchFeature = {
+    id: 'c1',
+    name: 'Bore',
+    kind: 'circle',
+    folderId: null,
+    sketch: { profile: circleProfile(20, 20, 3), origin: { x: 0, y: 0 }, orientationAngle: 0, dimensions: [], constraints: [] },
+    operation: 'subtract',
+    z_top: 0,
+    z_bottom: -8,
+    visible: true,
+    locked: false,
+  }
+  replaceProjectFeatures(project, [circle])
+
+  const operation: Operation = {
+    id: 'op1',
+    name: 'Helical Bore Op',
+    kind: 'drilling',
+    pass: 'rough',
+    enabled: true,
+    showToolpath: true,
+    debugToolpath: false,
+    target: { source: 'features', featureIds: ['c1'] },
+    toolRef: 't1',
+    stepdown: 2,
+    stepover: 0.4,
+    feed: 600,
+    plungeFeed: 180,
+    rpm: 12000,
+    pocketPattern: 'offset',
+    pocketAngle: 0,
+    stockToLeaveRadial: 0,
+    stockToLeaveAxial: 0,
+    finishWalls: true,
+    finishFloor: true,
+    carveDepth: 1,
+    maxCarveDepth: 1,
+    drillType: 'helical',
+    entryRampAngle: 5,
+    entryHelixDiameterPercent: 80,
+    arcFittingEnabled: true,
+  }
+
+  const toolpath = generateDrillingToolpath(project, operation)
+
+  // Use an arc-capable machine definition
+  const arcDef = arcTestDefinition()
+  const result = runPostProcessor({
+    project,
+    definition: arcDef,
+    operations: [{ operation, tool: normalizeToolForProject(toolRecord, project), toolpath }],
+    options: { emitToolChanges: true, emitCoolant: false, programName: project.meta.name },
+  })
+  const gcode = result.gcode
+
+  // Even with arc fitting enabled, helical drilling must NOT emit G2/G3
+  assert(!/\bG2\b/.test(gcode), 'helical G-code should not contain G2 even with arc fitting on')
+  assert(!/\bG3\b/.test(gcode), 'helical G-code should not contain G3 even with arc fitting on')
+  assert(/\bG1\b/.test(gcode), 'helical G-code should contain G1 linear moves')
+  assert(gcode.includes('M30'), 'helical G-code should contain M30 program end')
+}
+
+testHelicalDrillingG1NoCannedCycles()
+testHelicalDrillingArcFittingNoG2G3()
+
+// ── Helical safe-Z ordering (first-operation position establishment) ─
+
+/** Extract Z values from rapid (G0) lines in the G-code, in order.
+ *  Handles modal G0 where subsequent rapid moves omit the G0 word. */
+function rapidZValues(gcode: string): number[] {
+  const values: number[] = []
+  let inRapid = false
+  for (const line of gcode.split('\n')) {
+    const trimmed = line.trim()
+    // Track modal rapid state: G0 starts a rapid block, G1/G2/G3 end it
+    if (trimmed.startsWith('G0')) {
+      inRapid = true
+    } else if (/^G[123]\b/.test(trimmed)) {
+      inRapid = false
+    }
+    // Collect Z from rapid lines (both explicit G0 and modal continuations)
+    if (inRapid || trimmed.startsWith('G0')) {
+      const zMatch = trimmed.match(/Z(-?[\d.]+)/)
+      if (zMatch) {
+        inRapid = true  // a bare "Z..." line in rapid block
+        values.push(parseFloat(zMatch[1]))
+      }
+    }
+  }
+  return values
+}
+
+function testHelicalSafeZBeforeRetractDescent(): void {
+  console.log('Testing helical drilling G-code: safeZ established before retractZ descent...')
+
+  const project = newProject('SafeZ Test', 'mm')
+  const toolRecord = { ...defaultTool('mm', 1), id: 't1', name: '4 mm Endmill', type: 'flat_endmill' as const, diameter: 4, defaultPlungeFeed: 150 }
+  project.tools = [toolRecord]
+
+  const circle: SketchFeature = {
+    id: 'c1',
+    name: 'Bore',
+    kind: 'circle',
+    folderId: null,
+    sketch: { profile: circleProfile(20, 20, 3), origin: { x: 0, y: 0 }, orientationAngle: 0, dimensions: [], constraints: [] },
+    operation: 'subtract',
+    z_top: 0,
+    z_bottom: -8,
+    visible: true,
+    locked: false,
+  }
+  replaceProjectFeatures(project, [circle])
+
+  const operation: Operation = {
+    id: 'op1',
+    name: 'Helical Bore Op',
+    kind: 'drilling',
+    pass: 'rough',
+    enabled: true,
+    showToolpath: true,
+    debugToolpath: false,
+    target: { source: 'features', featureIds: ['c1'] },
+    toolRef: 't1',
+    stepdown: 2,
+    stepover: 0.4,
+    feed: 600,
+    plungeFeed: 180,
+    rpm: 12000,
+    pocketPattern: 'offset',
+    pocketAngle: 0,
+    stockToLeaveRadial: 0,
+    stockToLeaveAxial: 0,
+    finishWalls: true,
+    finishFloor: true,
+    carveDepth: 1,
+    maxCarveDepth: 1,
+    drillType: 'helical',
+    entryRampAngle: 5,
+    entryHelixDiameterPercent: 80,
+  }
+
+  const toolpath = generateDrillingToolpath(project, operation)
+  assert(toolpath.moves.length > 0, 'helical drilling should produce moves')
+
+  const result = runPostProcessor({
+    project,
+    definition: testDefinition(),
+    operations: [{ operation, tool: normalizeToolForProject(toolRecord, project), toolpath }],
+    options: { emitToolChanges: true, emitCoolant: false, programName: project.meta.name },
+  })
+  const gcode = result.gcode
+
+  // The rapid block must establish safeZ first, then XY, then descend.
+  // In the emitted G-code the postprocessor uses modal G0, so the first
+  // Z-bearing line has the initial safeZ, followed by an XY line, followed
+  // by a lower Z line for the retract descent.
+  const zValues = rapidZValues(gcode)
+  assert(zValues.length >= 2, `expected at least 2 rapid Z values, got ${zValues.length}`)
+  const firstZ = zValues[0]
+  assert(
+    zValues.slice(1).some((z) => z < firstZ),
+    `expected a Z descent below first Z ${firstZ} in ${JSON.stringify(zValues)}`,
+  )
+
+  // XY must be established before Z descends below the initial safeZ level.
+  // Modal G0 lines like "X20 Y60" (no G0 prefix) carry XY positioning.
+  const lines = gcode.split('\n')
+  let xyEstablished = false
+  let inRapid = false
+  let firstZSeen: number | null = null
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (trimmed.startsWith('G0')) inRapid = true
+    else if (/^G[123]\b/.test(trimmed)) inRapid = false
+
+    // Track XY establishment from all rapid lines
+    if (inRapid && /X-?[\d.]/.test(trimmed) && /Y-?[\d.]/.test(trimmed)) {
+      xyEstablished = true
+    }
+
+    // Check Z descent ordering
+    if (inRapid) {
+      const zMatch = trimmed.match(/Z(-?[\d.]+)/)
+      if (zMatch) {
+        const z = parseFloat(zMatch[1])
+        if (firstZSeen === null) {
+          firstZSeen = z
+        } else if (z < firstZSeen && !xyEstablished) {
+          assert(false, `rapid Z descent to ${z} before XY was established (first Z was ${firstZSeen})`)
+        }
+      }
+    }
+  }
+  assert(xyEstablished, 'XY position must be established in G-code')
+
+  // Existing assertions: G1, no canned cycles, no G2/G3
+  assert(/\bG1\b/.test(gcode), 'helical G-code should contain G1 linear moves')
+  assert(!/G8[123]/.test(gcode), 'helical G-code should not contain canned cycles')
+  assert(!/G73/.test(gcode), 'helical G-code should not contain G73')
+  assert(gcode.includes('M30'), 'helical G-code should contain M30')
+}
+
+function testHelicalMoveBudgetRejection(): void {
+  console.log('Testing helical move-budget exhaustion rejects with no moves and unmachinable warning...')
+
+  const project = newProject('Rejection Test', 'mm')
+  // Eligible diameter (hole=6, tool=4 → 4<6≤8) but very deep + shallow
+  // ramp angle → exceeds MAX_ENTRY_DESCENT_MOVES → rejection
+  const toolRecord = { ...defaultTool('mm', 1), id: 't1', name: '4 mm Endmill', type: 'flat_endmill' as const, diameter: 4, defaultPlungeFeed: 150 }
+  project.tools = [toolRecord]
+
+  const circle: SketchFeature = {
+    id: 'c1',
+    name: 'DeepBore',
+    kind: 'circle',
+    folderId: null,
+    sketch: { profile: circleProfile(20, 20, 3), origin: { x: 0, y: 0 }, orientationAngle: 0, dimensions: [], constraints: [] },
+    operation: 'subtract',
+    z_top: 0,
+    z_bottom: -500,
+    visible: true,
+    locked: false,
+  }
+  replaceProjectFeatures(project, [circle])
+
+  const operation: Operation = {
+    id: 'op1',
+    name: 'Rejected Bore',
+    kind: 'drilling',
+    pass: 'rough',
+    enabled: true,
+    showToolpath: true,
+    debugToolpath: false,
+    target: { source: 'features', featureIds: ['c1'] },
+    toolRef: 't1',
+    stepdown: 2,
+    stepover: 0.4,
+    feed: 600,
+    plungeFeed: 180,
+    rpm: 12000,
+    pocketPattern: 'offset',
+    pocketAngle: 0,
+    stockToLeaveRadial: 0,
+    stockToLeaveAxial: 0,
+    finishWalls: true,
+    finishFloor: true,
+    carveDepth: 1,
+    maxCarveDepth: 1,
+    drillType: 'helical',
+    entryRampAngle: 0.1,
+    entryHelixDiameterPercent: 80,
+  }
+
+  const toolpath = generateDrillingToolpath(project, operation)
+  // Move-budget exhausted in finish-bore mode → rejection, zero moves
+  assert(toolpath.moves.length === 0, 'move-budget rejection must produce zero moves')
+  assert(!toolpath.drillCycles || toolpath.drillCycles.length === 0, 'rejection must have no drillCycles')
+  assert(!!toolpath.warnings.find((w) => w.code === 'drillHelicalBoreUnmachinable'),
+    'rejection must produce drillHelicalBoreUnmachinable warning')
+  assert(!toolpath.warnings.find((w) => w.code === 'entryStrategyFallback'),
+    'rejection must not produce entryStrategyFallback')
+}
+
+testHelicalSafeZBeforeRetractDescent()
+testHelicalMoveBudgetRejection()
 
 // ── Arc fitting tests ──────────────────────────────────────────
 
@@ -670,6 +1003,7 @@ function circularCutMoves(): ToolpathMove[] {
 function runArcFixture(
   definition: MachineDefinition,
   operationOverrides?: Partial<Operation>,
+  movesOverride?: ToolpathMove[],
 ): { gcode: string; warnings: ToolpathWarning[]; stats: { moveCount: number } } {
   const project = newProject('Arc Test', 'mm')
   const toolRecord = { ...defaultTool('mm', 1), id: 't1', name: '6 mm Endmill' }
@@ -704,7 +1038,7 @@ function runArcFixture(
     operationId: operation.id,
     warnings: [],
     bounds: null,
-    moves: circularCutMoves(),
+    moves: movesOverride ?? circularCutMoves(),
   }
   return runPostProcessor({
     project,
@@ -765,6 +1099,125 @@ function testArcDisabledLinearFallback(): void {
   const arcWarnings = warnings.filter((w) => w.code === 'postArcNoCapability')
   assert(arcWarnings.length === 0, `expected no arc capability warning when disabled, got ${arcWarnings.length}`)
   assert(stats.moveCount === 8, `linear fallback should emit all 8 source moves, got ${stats.moveCount}`)
+}
+
+// ── issue #447: emitted arcs must satisfy the controller ───────
+
+/** The 14 contiguous cut moves from the issue #447 report. */
+function issue447CutMoves(): ToolpathMove[] {
+  const xy: Array<[number, number]> = [
+    [122.3941767939508, 167.17278330912177],
+    [122.37556680190744, 167.10332987328752],
+    [122.36930000002496, 167.0317],
+    [122.36677898139465, 166.96007012671248],
+    [122.37660115292522, 166.89061669087823],
+    [122.3982010594255, 166.82545000000005],
+    [122.43065538518721, 166.76655011100434],
+    [122.4727110084653, 166.71570666721345],
+    [122.52282307694827, 166.67446452093895],
+    [122.57920194731366, 166.6440767939257],
+    [122.63986756263506, 166.62546680188257],
+    [122.7027096154099, 166.6192000000001],
+    [122.76555166818474, 166.62546680188257],
+    [122.82621728350614, 166.6440767939257],
+    [122.88259615387153, 166.67446452093895],
+  ]
+  const points = xy.map(([x, y]) => ({ x, y, z: -1 }))
+  // Lead in with a rapid, as any real toolpath does: the arc chain is only
+  // meaningful relative to a position the controller has actually been given.
+  const moves: ToolpathMove[] = [
+    { kind: 'rapid', from: { x: 0, y: 0, z: 5 }, to: { ...points[0], z: 5 } },
+    { kind: 'plunge', from: { ...points[0], z: 5 }, to: { ...points[0] } },
+  ]
+  for (let i = 0; i < points.length - 1; i++) {
+    moves.push({ kind: 'cut', from: { ...points[i] }, to: { ...points[i + 1] } })
+  }
+  return moves
+}
+
+/**
+ * Re-derive GRBL's arc check from the emitted text alone — modal motion,
+ * modal position, formatted words. Deliberately independent of the exporter's
+ * own parser so the assertion tests the file, not our model of it.
+ */
+function assertEmittedArcsAreValid(gcode: string): number {
+  let modal = ''
+  let x = 0
+  let y = 0
+  let checked = 0
+
+  for (const raw of gcode.split('\n')) {
+    const line = raw.trim()
+    const motion = line.match(/\bG(0|1|2|3)\b/)
+    if (motion) modal = motion[1]
+
+    const wordX = line.match(/X(-?[\d.]+)/)
+    const wordY = line.match(/Y(-?[\d.]+)/)
+    const wordI = line.match(/I(-?[\d.]+)/)
+    const wordJ = line.match(/J(-?[\d.]+)/)
+
+    if ((modal === '2' || modal === '3') && wordX && wordY && wordI && wordJ) {
+      const i = parseFloat(wordI[1])
+      const j = parseFloat(wordJ[1])
+      const targetX = parseFloat(wordX[1])
+      const targetY = parseFloat(wordY[1])
+      const startRadius = Math.hypot(i, j)
+      const endRadius = Math.hypot(targetX - (x + i), targetY - (y + j))
+      const delta = Math.abs(endRadius - startRadius)
+      // GRBL: pass under 0.005 mm, else fail past 0.5 mm or 0.1 % of radius.
+      const accepted = delta <= 0.005
+        || (delta <= 0.5 && delta <= 0.001 * startRadius)
+      assert(accepted,
+        `controller would reject "${line}" from ${x},${y}: radius delta ${delta.toFixed(6)} mm`)
+      checked += 1
+    }
+
+    if (wordX) x = parseFloat(wordX[1])
+    if (wordY) y = parseFloat(wordY[1])
+  }
+
+  return checked
+}
+
+function testIssue447EmittedArcsPassControllerCheck(): void {
+  console.log('Testing issue #447 span exports arcs the controller accepts...')
+
+  const def = arcTestDefinition({ motion: { ...arcTestDefinition().motion, arcFormat: 'ij' } })
+  const { gcode, warnings } = runArcFixture(def, undefined, issue447CutMoves())
+
+  const checked = assertEmittedArcsAreValid(gcode)
+  assert(checked > 0, 'fixture must emit at least one I/J arc to be meaningful')
+  const fallbacks = warnings.filter((w) => w.code === 'postArcFallbackLinear')
+  assert(fallbacks.length === 0,
+    `span should export as arcs without falling back, got ${JSON.stringify(fallbacks)}`)
+}
+
+function testIssue447RFormatExport(): void {
+  console.log('Testing issue #447 span in R format...')
+
+  const def = arcTestDefinition({ motion: { ...arcTestDefinition().motion, arcFormat: 'r' } })
+  const { gcode, warnings } = runArcFixture(def, undefined, issue447CutMoves())
+
+  assert(/\bG[23]\b/.test(gcode), 'R-format export should still emit arcs')
+  assert(!/\bI-?[\d.]/.test(gcode), 'should not contain I when using R format')
+  const fallbacks = warnings.filter((w) => w.code === 'postArcFallbackLinear')
+  assert(fallbacks.length === 0,
+    `R-format span should not fall back, got ${JSON.stringify(fallbacks)}`)
+}
+
+function testArcOutputPassesControllerCheck(): void {
+  console.log('Testing that the standard arc fixture also satisfies the controller...')
+  const def = arcTestDefinition({ motion: { ...arcTestDefinition().motion, arcFormat: 'ij' } })
+  // Same circle as the other arc tests, led into by a rapid so the emitted
+  // arcs can be checked against a position the controller actually holds.
+  const circle = circularCutMoves()
+  const { gcode } = runArcFixture(def, undefined, [
+    { kind: 'rapid', from: { x: 0, y: 0, z: 5 }, to: { ...circle[0].from, z: 5 } },
+    { kind: 'plunge', from: { ...circle[0].from, z: 5 }, to: { ...circle[0].from } },
+    ...circle,
+  ])
+  const checked = assertEmittedArcsAreValid(gcode)
+  assert(checked > 0, 'standard fixture must emit I/J arcs')
 }
 
 // ── Unsupported machine fallback + warning ─────────────────────
@@ -983,6 +1436,9 @@ testArcOutputIJ()
 testArcOutputR()
 testArcDisabledLinearFallback()
 testArcUnsupportedMachineWarning()
+testIssue447EmittedArcsPassControllerCheck()
+testIssue447RFormatExport()
+testArcOutputPassesControllerCheck()
 testArcNoRegressionLinear()
 testArcMixedRapidAndCut()
 testArcMoveCountReflectsFittedOutput()

@@ -41,6 +41,7 @@ type FeatureTreeActionStore = Pick<
   | 'enterClampEdit'
   | 'deleteFeatures'
   | 'deleteTab'
+  | 'deleteTabs'
   | 'deleteClamp'
   | 'startMoveFeature'
   | 'startCopyFeature'
@@ -91,6 +92,7 @@ export interface FeatureTreeActions {
   copyTab: (tabId: string) => void
   moveTab: (tabId: string) => void
   deleteTab: (tabId: string) => void
+  deleteTabs: (tabIds: string[]) => void
   editClamp: (clampId: string) => void
   copyClamp: (clampId: string) => void
   moveClamp: (clampId: string) => void
@@ -112,6 +114,7 @@ export function createFeatureTreeActions({
     enterClampEdit,
     deleteFeatures,
     deleteTab,
+    deleteTabs,
     deleteClamp,
     startMoveFeature,
     startCopyFeature,
@@ -244,6 +247,10 @@ export function createFeatureTreeActions({
       deleteTab(tabId)
       closeTreeContextMenu()
     },
+    deleteTabs: (tabIds: string[]) => {
+      deleteTabs(tabIds)
+      closeTreeContextMenu()
+    },
     editClamp: (clampId: string) => {
       enterClampEdit(clampId)
       setCenterTab('sketch')
@@ -276,6 +283,7 @@ export function useFeatureTreeActions({
     enterClampEdit,
     deleteFeatures,
     deleteTab,
+    deleteTabs,
     deleteClamp,
     startMoveFeature,
     startCopyFeature,
@@ -312,6 +320,7 @@ export function useFeatureTreeActions({
       enterClampEdit,
       deleteFeatures,
       deleteTab,
+      deleteTabs,
       deleteClamp,
       startMoveFeature,
       startCopyFeature,
@@ -343,6 +352,7 @@ export function useFeatureTreeActions({
     deleteClamp,
     deleteFeatures,
     deleteTab,
+    deleteTabs,
     enterClampEdit,
     enterSketchEdit,
     enterTabEdit,

@@ -26,6 +26,13 @@ import {
 interface OperationSnapshot {
   kind?: unknown
   pass?: unknown
+  edgeStrategy?: unknown
+  trochoidalCutWidth?: unknown
+  trochoidalAdvance?: unknown
+  machiningOrder?: unknown
+  entryStrategy?: unknown
+  entryRampAngle?: unknown
+  entryHelixDiameterPercent?: unknown
   target?: {
     source?: unknown
     featureIds?: unknown
@@ -78,12 +85,50 @@ test.describe('CAM operation browser smoke', () => {
     await expect(operationRow).toBeVisible()
     await expect(app.page.getByText('Stepdown', { exact: true })).toBeVisible()
     await expect(app.page.getByText('Stepover Ratio', { exact: true })).not.toBeVisible()
+    const contourProject = await getProject(app.page)
+    const contourOperations = contourProject.operations as OperationSnapshot[]
+    expect(contourOperations[0]?.pass).toBe('rough')
+    expect(contourOperations[0]?.kind).toBe('edge_route_outside')
+
+    const strategyField = ui.cam.operationField(app.page, 'Strategy')
+    await expect(strategyField.locator('.ui-select__label')).toHaveText('Contour')
+    await strategyField.locator('.ui-select__trigger').click()
+    await app.page.getByRole('option', { name: 'Trochoidal', exact: true }).click()
+
+    await expect(app.page.getByText('Trochoidal Cut Width', { exact: true })).toBeVisible()
+    await expect(app.page.getByText('Advance per Loop (% of tool diameter)', { exact: true })).toBeVisible()
+    await expect(app.page.getByText('Advance per Loop (distance)', { exact: true })).toBeVisible()
+    await expect(app.page.getByRole('button', { name: 'Create rest operation', exact: true })).toBeDisabled()
+    await expect(app.page.getByText('Rest machining is unavailable for trochoidal edge routing.', { exact: true })).toBeVisible()
+
+    await app.page.getByRole('button', { name: 'Advanced', exact: true }).click()
+    await expect(app.page.getByText('Entry', { exact: true })).toBeVisible()
+    // Trochoidal honours both machining orders, so the control stays available.
+    await expect(app.page.getByText('Machining Order', { exact: true })).toBeVisible()
+    const entryField = ui.cam.operationField(app.page, 'Entry Strategy')
+    await expect(entryField.locator('.ui-select__label')).toHaveText('Helix')
+    await entryField.locator('.ui-select__trigger').click()
+    await expect(app.page.getByRole('option', { name: 'Ramp', exact: true })).toHaveCount(0)
+    await app.page.keyboard.press('Escape')
 
     const project = await getProject(app.page)
     const operations = project.operations as OperationSnapshot[]
     expect(operations).toHaveLength(1)
     expect(operations[0].kind).toBe('edge_route_outside')
     expect(operations[0].pass).toBe('rough')
+    expect(operations[0].edgeStrategy).toBe('trochoidal')
+    // Selecting the strategy must NOT pin the tool-derived settings. They stay
+    // undefined so the displayed 1.5 x D width and 10% advance keep following
+    // whichever tool the operation is assigned; only an explicit edit stores a
+    // value. The panel above already asserted both fields render.
+    expect(operations[0].trochoidalCutWidth).toBeUndefined()
+    expect(operations[0].trochoidalAdvance).toBeUndefined()
+    expect(operations[0].entryStrategy).toBe('helix')
+    // Selecting Trochoidal must not rewrite machiningOrder. Generation is
+    // level-first for trochoidal regardless (the engine skips the feature-first
+    // block reordering) and the control is hidden above, so forcing the stored
+    // value would only discard the user's choice for when they switch back.
+    expect(operations[0].machiningOrder).toBe(contourOperations[0]?.machiningOrder)
     expect(operations[0].target?.source).toBe('features')
     expect(operations[0].target?.featureIds).toEqual(['f-machinable-add'])
   })
@@ -109,10 +154,33 @@ test.describe('CAM operation browser smoke', () => {
     // for the operation to land in the UI before reading project state.
     await expect(ui.operations.countBadge(app.page)).toHaveText('1')
 
+    await app.page.getByRole('button', { name: 'Advanced', exact: true }).click()
+    await expect(app.page.getByText('Entry', { exact: true })).toBeVisible()
+
+    const strategyField = app.page.getByText('Entry Strategy', { exact: true }).locator('..')
+    await expect(strategyField.locator('.ui-select__label')).toHaveText('Plunge')
+    await expect(app.page.getByText('Ramp Angle (°)', { exact: true })).toHaveCount(0)
+    await expect(app.page.getByText('Helix Diameter (%)', { exact: true })).toHaveCount(0)
+
+    await strategyField.locator('.ui-select__trigger').click()
+    await app.page.getByRole('option', { name: 'Helix', exact: true }).click()
+
+    const rampAngleField = app.page.getByText('Ramp Angle (°)', { exact: true }).locator('..')
+    const helixDiameterField = app.page.getByText('Helix Diameter (%)', { exact: true }).locator('..')
+    await expect(rampAngleField.locator('input')).toHaveValue('5')
+    await expect(helixDiameterField.locator('input')).toHaveValue('80')
+    await rampAngleField.locator('input').fill('8')
+    await rampAngleField.locator('input').blur()
+    await helixDiameterField.locator('input').fill('65')
+    await helixDiameterField.locator('input').blur()
+
     const project = await getProject(app.page)
     const operations = project.operations as OperationSnapshot[]
     expect(operations).toHaveLength(1)
     expect(operations[0].kind).toBe('rough_surface')
+    expect(operations[0].entryStrategy).toBe('helix')
+    expect(operations[0].entryRampAngle).toBe(8)
+    expect(operations[0].entryHelixDiameterPercent).toBe(65)
     expect(operations[0].target?.featureIds).toEqual(['f-imported-model'])
   })
 
@@ -155,5 +223,58 @@ test.describe('CAM operation browser smoke', () => {
     expect(operations[0].toolRef).toBeTruthy()
     const tools = project.tools as Array<{ id?: unknown; type?: unknown }>
     expect(tools.some((tool) => tool.id === operations[0].toolRef && tool.type === 'v_bit')).toBe(true)
+  })
+
+  test('helical drilling: select Helical, assert ramp angle visible, Helix Diameter absent, change and persist', async ({ app, ui }) => {
+    await seedCamQuickOperationProject(app.page)
+
+    // Create a drilling operation on the circle feature
+    const menu = await openRowContextMenu(app.page, rowByName(app.page, 'Drill Target'))
+    await ui.contextMenu.item(menu, 'Create operation').hover()
+    const submenu = ui.contextMenu.submenu(app.page)
+    await expect(submenu).toBeVisible()
+    await clickMenuItem(submenu, 'Create Drilling')
+
+    // Wait for the operation row to appear
+    await expect(ui.operations.countBadge(app.page)).toHaveText('1')
+    await expect(ui.operations.rowByName(app.page, 'Drill')).toBeVisible()
+
+    // Expand the advanced section to reveal the Drill Type selector
+    await app.page.getByRole('button', { name: 'Advanced', exact: true }).click()
+
+    // The Drill Type selector should show the default (Simple (G81))
+    const drillTypeField = app.page.getByText('Drill Type', { exact: true }).locator('..')
+    await expect(drillTypeField.locator('.ui-select__label')).toHaveText('Simple (G81)')
+
+    // Ramp Angle and Helix Diameter should NOT be visible yet (default is Simple)
+    await expect(app.page.getByText('Ramp Angle (°)', { exact: true })).toHaveCount(0)
+    await expect(app.page.getByText('Helix Diameter (%)', { exact: true })).toHaveCount(0)
+
+    // Select Helical from the drill type dropdown
+    await drillTypeField.locator('.ui-select__trigger').click()
+    await app.page.getByRole('option', { name: 'Helical', exact: true }).click()
+
+    // Wait for the selector label to update
+    await expect(drillTypeField.locator('.ui-select__label')).toHaveText('Helical')
+
+    // Ramp Angle should now be visible with default value
+    const rampAngleField = app.page.getByText('Ramp Angle (°)', { exact: true }).locator('..')
+    await expect(rampAngleField.locator('input')).toHaveValue('5')
+
+    // Helix Diameter must remain absent — the selected circle defines the bore
+    // diameter, not the shared #412 entry-helix-diameter setting
+    await expect(app.page.getByText('Helix Diameter (%)', { exact: true })).toHaveCount(0)
+
+    // Change the ramp angle
+    await rampAngleField.locator('input').fill('8')
+    await rampAngleField.locator('input').blur()
+
+    // Verify persisted operation state
+    const project = await getProject(app.page)
+    const operations = project.operations as OperationSnapshot[]
+    expect(operations).toHaveLength(1)
+    expect(operations[0].kind).toBe('drilling')
+    expect((operations[0] as Record<string, unknown>).drillType).toBe('helical')
+    expect(operations[0].entryRampAngle).toBe(8)
   })
 })
