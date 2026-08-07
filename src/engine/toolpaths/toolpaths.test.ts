@@ -23,7 +23,7 @@
  * Run with: npx tsx src/engine/toolpaths/toolpaths.test.ts
  */
 
-import type { Operation, Project, RegionMaskMode, SketchFeature, Tool } from '../../types/project'
+import type { Operation, Project, RegionMaskMode, SketchFeature, Tab, Tool } from '../../types/project'
 import { circleProfile, defaultTool, newProject, polygonProfile, rectProfile } from '../../types/project'
 import { projectWithFeatures } from '../../test/projectFixtures'
 import { buildGearProfile, defaultGearCreationParams } from '../../sketch/gearProfile'
@@ -1746,6 +1746,150 @@ function testTrochoidalTabsFragmentBeforeMotionAndHelixReenter() {
   console.log('trochoidal tab fragmentation and helix re-entry: PASSED')
 }
 
+function testTrochoidalSmoothTabsKeepContinuousMotion() {
+  console.log('Testing trochoidal smooth tabs keep continuous variable-Z motion...')
+
+  const tool = makeFlatEndmill('t1', 4)
+  const target = makeAddFeature('target', 0, 0, 40, 20, 0, -4)
+  const project = baseProject([tool], [target])
+  project.tabs = [{
+    id: 'smooth-tab',
+    name: 'smooth tab',
+    x: 16,
+    y: -2,
+    w: 8,
+    h: 4,
+    z_top: -1,
+    z_bottom: -4,
+    shape: 'smooth',
+    visible: true,
+  }]
+  const operation = {
+    ...makeTrochoidalEdgeOperation('target', 'edge_route_outside'),
+    stepdown: 4,
+  }
+  const result = generateEdgeRouteToolpath(project, operation)
+
+  assert(result.warnings.length === 0, `unexpected smooth-tab warnings: ${result.warnings.map((warning) => warning.code).join(', ')}`)
+  assert(cutMoveGroups(result.moves).length === 1, 'a smooth tab must not split or retract the one-level trochoidal path')
+  const cuts = cutMoves(result.moves)
+  assert(cuts.some((move) => Math.abs(move.from.z - move.to.z) > 1e-9), 'smooth tab must emit sloped cut moves')
+  const cutZs = cuts.flatMap((move) => [move.from.z, move.to.z])
+  assert(approx(Math.min(...cutZs), -4), 'smooth tab path must return to the requested depth')
+  assert(approx(Math.max(...cutZs), -1), 'smooth tab path must reach the exact tab top')
+
+  for (const move of cuts) {
+    const dz = Math.abs(move.to.z - move.from.z)
+    if (dz <= 1e-9) continue
+    const distance = Math.hypot(move.to.x - move.from.x, move.to.y - move.from.y, dz)
+    const verticalFeed = operation.feed * (move.feedScale ?? 1) * dz / distance
+    assert(
+      verticalFeed <= operation.plungeFeed + 1e-6,
+      `smooth-tab vertical feed ${verticalFeed} exceeds plunge feed ${operation.plungeFeed}`,
+    )
+  }
+
+  const plungeResult = generateEdgeRouteToolpath(project, { ...operation, entryStrategy: 'plunge' })
+  assert(plungeResult.moves.length > 0, 'a smooth-only tab layout must not require fragmented helix re-entry')
+  assert(
+    plungeResult.warnings.every((warning) => warning.code !== 'edgeTrochoidalTabsRequireHelix'),
+    'smooth-only tabs must not raise the rectangular-tab helix requirement',
+  )
+
+  console.log('trochoidal smooth continuous motion: PASSED')
+}
+
+function testTrochoidalSmoothTabsHandleSeamsAndOverlap() {
+  console.log('Testing trochoidal smooth tabs handle seam spans and overlapping heights...')
+
+  const tool = makeFlatEndmill('t1', 4)
+  const target = makeAddFeature('target', 0, 0, 40, 20, 0, -4)
+  const project = baseProject([tool], [target])
+  project.tabs = [
+    {
+      id: 'seam-low',
+      name: 'seam low',
+      x: -4,
+      y: -4,
+      w: 8,
+      h: 8,
+      z_top: -2,
+      z_bottom: -4,
+      shape: 'smooth',
+      visible: true,
+    },
+    {
+      id: 'seam-high',
+      name: 'seam high',
+      x: -4,
+      y: -4,
+      w: 8,
+      h: 8,
+      z_top: -1,
+      z_bottom: -4,
+      shape: 'smooth',
+      visible: true,
+    },
+  ]
+  const result = generateEdgeRouteToolpath(project, {
+    ...makeTrochoidalEdgeOperation('target', 'edge_route_outside'),
+    stepdown: 4,
+  })
+
+  assert(result.warnings.length === 0, `unexpected seam-tab warnings: ${result.warnings.map((warning) => warning.code).join(', ')}`)
+  assert(cutMoveGroups(result.moves).length === 1, 'a smooth span crossing the closed-guide seam must remain continuous')
+  const zValues = cutMoves(result.moves).flatMap((move) => [move.from.z, move.to.z])
+  assert(approx(Math.min(...zValues), -4), 'seam profile must return to base Z')
+  assert(approx(Math.max(...zValues), -1), 'overlapping seam profiles must use the higher tab top')
+
+  console.log('trochoidal smooth seam and overlap handling: PASSED')
+}
+
+function testTrochoidalMixedTabsPreserveFragmentSafety() {
+  console.log('Testing mixed smooth and rectangular trochoidal tabs preserve fragment safety...')
+
+  const tool = makeFlatEndmill('t1', 4)
+  const target = makeAddFeature('target', 0, 0, 40, 20, 0, -4)
+  const project = baseProject([tool], [target])
+  const rectTab: Tab = {
+    id: 'rect-tab', name: 'rect tab', x: 19, y: -2, w: 2, h: 4,
+    z_top: -2, z_bottom: -4, shape: 'rect', visible: true,
+  }
+  project.tabs = [
+    {
+      id: 'smooth-tab', name: 'smooth tab', x: 16, y: -2, w: 8, h: 4,
+      z_top: -1, z_bottom: -4, shape: 'smooth', visible: true,
+    },
+    rectTab,
+  ]
+  const result = generateEdgeRouteToolpath(
+    project,
+    makeTrochoidalEdgeOperation('target', 'edge_route_outside'),
+  )
+
+  assert(result.moves.length > 0, 'mixed tabs must retain safe routable fragments')
+  assert(
+    result.warnings.every((warning) => warning.code === 'edgeTrochoidalSkippedSpan'),
+    `unexpected mixed-tab warnings: ${result.warnings.map((warning) => warning.code).join(', ')}`,
+  )
+  assert(cutMoveGroups(result.moves).length > 1, 'the rectangular tab must still fragment the route')
+  assert(
+    cutMoves(result.moves).some((move) => Math.abs(move.from.z - move.to.z) > 1e-9),
+    'retained open fragments must keep the Smooth-tab variable-Z profile',
+  )
+  const distanceToRect = (point: { x: number; y: number }) => Math.hypot(
+    Math.max(rectTab.x - point.x, 0, point.x - (rectTab.x + rectTab.w)),
+    Math.max(rectTab.y - point.y, 0, point.y - (rectTab.y + rectTab.h)),
+  )
+  const rectViolations = cutMoves(result.moves).filter((move) => (
+    Math.min(move.from.z, move.to.z) < rectTab.z_top - 1e-6
+      && Math.min(distanceToRect(move.from), distanceToRect(move.to)) < tool.diameter / 2 - 1e-6
+  ))
+  assert(rectViolations.length === 0, 'Smooth slopes must not weaken rectangular-tab cutter clearance')
+
+  console.log('trochoidal mixed-tab fragment safety: PASSED')
+}
+
 function testTrochoidalOutsideFragmentsAroundTightObstacle() {
   console.log('Testing trochoidal outside fragments around a tight obstacle...')
 
@@ -3334,6 +3478,9 @@ try {
   testEdgeOutsideCombinedRoundCorners()
   testTrochoidalOutsideTracksDifferentTargetSizes()
   testTrochoidalTabsFragmentBeforeMotionAndHelixReenter()
+  testTrochoidalSmoothTabsKeepContinuousMotion()
+  testTrochoidalSmoothTabsHandleSeamsAndOverlap()
+  testTrochoidalMixedTabsPreserveFragmentSafety()
   testTrochoidalOutsideFragmentsAroundTightObstacle()
   testTrochoidalRejectsRegionMasksAndUnsafeWidths()
   testTrochoidalEngagementMatchesContourDirection()

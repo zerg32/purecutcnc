@@ -30,13 +30,17 @@ import { projectWithFeatures } from '../../test/projectFixtures'
 import { normalizeTab } from '../../store/helpers/normalize'
 import { flattenProfile } from './geometry'
 import { generateEdgeRouteToolpath } from './edge'
-import { applyEdgeRouteTabs, applyTabsToEdgeRoute, applyTabWarnings, tabLayoutFreeFraction, toolCentreContours } from './tabs'
+import { applyEdgeRouteTabs, applyTabsToEdgeRoute, applyTabWarnings, smoothTabBellProfile, tabLayoutFreeFraction, toolCentreContours } from './tabs'
 import type { ToolpathResult } from './types'
 
 // ── Harness ──────────────────────────────────────────────────────────
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(`Assertion failed: ${message}`)
+}
+
+function approx(left: number, right: number, epsilon = 1e-9): boolean {
+  return Math.abs(left - right) <= epsilon
 }
 
 let passed = 0
@@ -188,6 +192,18 @@ console.log('\nSmooth and rectangular tab profiles')
 test('normalization defaults legacy tabs to rect and preserves smooth', () => {
   assert(normalizeTab(straightTab(), 'mm', 0).shape === 'rect', 'missing shape normalizes to rect')
   assert(normalizeTab(straightTab('smooth'), 'mm', 0).shape === 'smooth', 'explicit smooth shape survives')
+})
+
+test('smooth tab profile is bounded and piecewise linear with an exact peak', () => {
+  assert(smoothTabBellProfile(-1) === 0, 'profile clamps before its start')
+  assert(smoothTabBellProfile(0) === 0, 'profile starts at zero')
+  assert(smoothTabBellProfile(0.5) === 1, 'profile reaches an exact midpoint peak')
+  assert(approx(smoothTabBellProfile(1), 0), 'profile ends at zero')
+  assert(approx(smoothTabBellProfile(2), 0), 'profile clamps after its end')
+  const left = smoothTabBellProfile(3 / 16)
+  const right = smoothTabBellProfile(4 / 16)
+  assert(approx(smoothTabBellProfile(3.5 / 16), (left + right) / 2), 'profile interpolates linearly between samples')
+  assert(Array.from({ length: 101 }, (_, index) => smoothTabBellProfile(index / 100)).every((value) => value >= 0 && value <= 1), 'profile stays bounded')
 })
 
 test('legacy and explicit rect tabs emit identical stepped motion', () => {

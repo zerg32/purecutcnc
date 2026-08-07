@@ -24,6 +24,9 @@ const EPSILON = XY_EPSILON
 export interface ClosedGuideFragment {
   points: Point[]
   closed: boolean
+  startDistance: number
+  endDistance: number
+  guideLength: number
 }
 
 export type GuideFragmentKeep = 'outside' | 'inside'
@@ -143,6 +146,12 @@ function pointAt(from: Point, to: Point, t: number): Point {
   }
 }
 
+interface OpenGuideFragment {
+  points: Point[]
+  startDistance: number
+  endDistance: number
+}
+
 /**
  * Split a closed ordered guide against already-unioned forbidden Clipper paths.
  *
@@ -160,21 +169,36 @@ export function splitClosedGuideByForbiddenPaths(
   const normalizedGuide = normalizeClosedGuide(guide)
   if (normalizedGuide.length < 3 || !(clipperScale > 0)) return []
 
+  const segmentLengths = normalizedGuide.map((from, index) => {
+    const to = normalizedGuide[(index + 1) % normalizedGuide.length]
+    return Math.hypot(to.x - from.x, to.y - from.y)
+  })
+  const guideLength = segmentLengths.reduce((total, length) => total + length, 0)
+
   const forbidden = forbiddenPaths
     .map((path) => normalizeClipperPath(path, clipperScale))
     .filter((path) => path.length >= 3)
   if (forbidden.length === 0) {
-    return keep === 'outside' ? [{ points: normalizedGuide, closed: true }] : []
+    return keep === 'outside'
+      ? [{ points: normalizedGuide, closed: true, startDistance: 0, endDistance: guideLength, guideLength }]
+      : []
   }
 
-  const fragments: Point[][] = []
+  const fragments: OpenGuideFragment[] = []
   let current: Point[] | null = null
+  let currentStartDistance = 0
+  let currentEndDistance = 0
+  let segmentStartDistance = 0
   let hasRetainedInterval = false
   let hasDiscardedInterval = false
 
   const finishCurrent = () => {
     if (current !== null && current.length >= 2) {
-      fragments.push(current)
+      fragments.push({
+        points: current,
+        startDistance: currentStartDistance,
+        endDistance: currentEndDistance,
+      })
     }
     current = null
   }
@@ -182,6 +206,7 @@ export function splitClosedGuideByForbiddenPaths(
   for (let index = 0; index < normalizedGuide.length; index += 1) {
     const from = normalizedGuide[index]
     const to = normalizedGuide[(index + 1) % normalizedGuide.length]
+    const segmentLength = segmentLengths[index]
     const parameters = [0, 1]
     for (const path of forbidden) {
       for (let edgeIndex = 0; edgeIndex < path.length; edgeIndex += 1) {
@@ -211,32 +236,45 @@ export function splitClosedGuideByForbiddenPaths(
         continue
       }
       hasRetainedInterval = true
+      const startDistance = segmentStartDistance + start * segmentLength
+      const endDistance = segmentStartDistance + end * segmentLength
 
       if (current === null) {
         current = [startPoint, endPoint]
+        currentStartDistance = startDistance
+        currentEndDistance = endDistance
       } else if (samePoint(current.at(-1)!, startPoint)) {
         current.push(endPoint)
+        currentEndDistance = endDistance
       } else {
         finishCurrent()
         current = [startPoint, endPoint]
+        currentStartDistance = startDistance
+        currentEndDistance = endDistance
       }
     }
+    segmentStartDistance += segmentLength
   }
   finishCurrent()
 
   if (!hasRetainedInterval) return []
   if (!hasDiscardedInterval) {
-    return [{ points: normalizedGuide, closed: true }]
+    return [{ points: normalizedGuide, closed: true, startDistance: 0, endDistance: guideLength, guideLength }]
   }
   if (fragments.length <= 1) {
-    return fragments.map((points) => ({ points, closed: false }))
+    return fragments.map((fragment) => ({ ...fragment, closed: false, guideLength }))
   }
 
   const first = fragments[0]
   const last = fragments.at(-1)!
-  if (samePoint(last.at(-1)!, first[0])) {
-    const seamMerged = [...last, ...first.slice(1)]
-    return [seamMerged, ...fragments.slice(1, -1)].map((points) => ({ points, closed: false }))
+  if (samePoint(last.points.at(-1)!, first.points[0])) {
+    const seamMerged: OpenGuideFragment = {
+      points: [...last.points, ...first.points.slice(1)],
+      startDistance: last.startDistance,
+      endDistance: first.endDistance + guideLength,
+    }
+    return [seamMerged, ...fragments.slice(1, -1)]
+      .map((fragment) => ({ ...fragment, closed: false, guideLength }))
   }
-  return fragments.map((points) => ({ points, closed: false }))
+  return fragments.map((fragment) => ({ ...fragment, closed: false, guideLength }))
 }

@@ -35,6 +35,18 @@ function assertPoint(point: Point, expected: Point, message: string): void {
   assert(samePoint(point, expected), `${message}: expected (${expected.x}, ${expected.y}), got (${point.x}, ${point.y})`)
 }
 
+function assertDistances(
+  fragment: { startDistance: number; endDistance: number; guideLength: number },
+  startDistance: number,
+  endDistance: number,
+  guideLength: number,
+  message: string,
+): void {
+  assert(approx(fragment.startDistance, startDistance), `${message} start distance`)
+  assert(approx(fragment.endDistance, endDistance), `${message} end distance`)
+  assert(approx(fragment.guideLength, guideLength), `${message} guide length`)
+}
+
 function clippedPath(points: Point[]): ClipperPath {
   return points.map((point) => ({
     X: Math.round(point.x * DEFAULT_CLIPPER_SCALE),
@@ -56,6 +68,7 @@ function testNoForbiddenPathPassesThroughAsClosedGuide(): void {
   assert(fragments[0].points.length === 4, 'closed guide does not duplicate the seam')
   assertPoint(fragments[0].points[0], square[0], 'closed guide preserves its start')
   assertPoint(fragments[0].points.at(-1)!, square.at(-1)!, 'closed guide preserves its order')
+  assertDistances(fragments[0], 0, 40, 40, 'uninterrupted guide covers the normalized source')
 }
 
 function testRepeatedClosingVertexAndOneForbiddenInterval(): void {
@@ -91,6 +104,7 @@ function testInsideRetainsExactForbiddenInterval(): void {
   assert(!fragments[0].closed, 'partial inside interval is open')
   assertPoint(fragments[0].points[0], { x: 4, y: 0 }, 'inside span starts at the exact entry')
   assertPoint(fragments[0].points.at(-1)!, { x: 6, y: 0 }, 'inside span ends at the exact exit')
+  assertDistances(fragments[0], 4, 6, 40, 'inside span preserves source arc distances')
 }
 
 function testDisjointUnionIntervalsRemainSeparate(): void {
@@ -113,6 +127,7 @@ function testDisjointUnionIntervalsRemainSeparate(): void {
   assertPoint(fragments[0].points.at(-1)!, { x: 2, y: 0 }, 'first cyclic span ends before the first interval')
   assertPoint(fragments[1].points[0], { x: 3, y: 0 }, 'second span starts after the first interval')
   assertPoint(fragments[1].points.at(-1)!, { x: 7, y: 0 }, 'second span ends before the second interval')
+  assertDistances(fragments[1], 3, 7, 40, 'ordinary split span preserves source arc distances')
 }
 
 function testSeamCutReordersIntoOneContinuousSpan(): void {
@@ -149,6 +164,7 @@ function testInsideSeamCutReordersIntoOneContinuousSpan(): void {
     fragments[0].points.some((point) => samePoint(point, { x: 0, y: 0 })),
     'inside seam retains the original guide seam point',
   )
+  assertDistances(fragments[0], 39, 41, 40, 'inside seam unwraps across the guide length')
 }
 
 function testInsideRetainsAlreadyUnionedOverlappingKeepOut(): void {

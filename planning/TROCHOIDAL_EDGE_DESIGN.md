@@ -142,18 +142,29 @@ channel. That is the honest consequence of the ordering the user picked.
 
 ## Tabs
 
-- Footprints expand by cutter radius plus the orbit's requirements, and protect
-  for every level below `tab.z_top`.
-- The first level crossing a tab top cuts that tab's local interval inline at
-  `z_top` — never a full contour at that height.
-- Deeper levels retract, rapid across the already-cleared area, and helically
-  re-enter after the tab.
+- Rectangular footprints expand by cutter radius plus the orbit's requirements,
+  and protect for every level below `tab.z_top`.
+- The first level crossing a rectangular tab top cuts that tab's local interval
+  inline at `z_top` — never a full contour at that height. Deeper levels retract,
+  rapid across the already-cleared area, and helically re-enter after the tab.
+- Smooth tabs do not fragment the guide. Each affected depth stays one
+  continuous trochoidal path whose Z follows the shared 16-segment bell profile
+  from `tabs.ts`. The profile is evaluated against monotonically increasing
+  distance on the original closed guide, not orbital XY distance, so seam spans
+  and spans truncated by another keep-out keep the same ramp.
+- Every smooth-profile knot is inserted as a sampler guide breakpoint. This
+  makes the midpoint hit `z_top` exactly and includes profile resolution in the
+  same operation-wide point budget as ordinary orbit samples.
+- Sloped smooth-tab cuts carry a feed scale that keeps their vertical feed
+  component at or below Plunge Feed. Smooth-only layouts therefore do not need
+  Helix entry; rectangular fragmentation still does.
 - Overlapping tabs use the **highest** covering top. Where a short tab overlaps
   a taller one, taking the short tab's own top would machine the taller tab
   away across the overlap. If raising the span to the tallest covering top still
   leaves part of it inside a tab that is a keep-out at that height (staggered
   overlaps), the span is skipped with its location rather than cut unsafely.
-- Tabbed trochoidal operations require Helix entry; Plunge fails closed.
+- Trochoidal operations fragmented by rectangular tabs require Helix entry;
+  Plunge fails closed.
 - Reversed or malformed tab Z ranges fail closed.
 
 Tab footprint geometry lives in `tabs.ts` (`expandedTabFootprints`), not beside

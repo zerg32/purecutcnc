@@ -32,10 +32,13 @@ export interface TrochoidalContourOptions {
   angularDirection: 1 | -1
   closed?: boolean
   maxPoints?: number
+  guideBreakpoints?: number[]
 }
 
 export interface TrochoidalContourResult {
   points: Point[]
+  guideDistances: number[]
+  guideLength: number
   entryCenter: Point | null
   loopCount: number
   actualAdvance: number
@@ -75,7 +78,7 @@ function buildArcLengthPath(contour: Point[], closed: boolean): ArcLengthPath | 
     const from = points[index]
     const to = points[(index + 1) % points.length]
     const segmentLength = Math.hypot(to.x - from.x, to.y - from.y)
-    if (segmentLength <= GEOMETRY_EPSILON) return null
+    if (!Number.isFinite(segmentLength) || segmentLength <= GEOMETRY_EPSILON) return null
     length += segmentLength
     cumulative.push(length)
   }
@@ -144,7 +147,15 @@ export function buildTrochoidalContour(
   const closed = options.closed ?? true
   const path = buildArcLengthPath(contour, closed)
   if (!path || !(options.orbitRadius > 0) || !(options.advance > 0) || !(options.toolDiameter > 0)) {
-    return { points: [], entryCenter: null, loopCount: 0, actualAdvance: 0, error: 'invalid-guide' }
+    return {
+      points: [],
+      guideDistances: [],
+      guideLength: path?.length ?? 0,
+      entryCenter: null,
+      loopCount: 0,
+      actualAdvance: 0,
+      error: 'invalid-guide',
+    }
   }
 
   const loopCount = Math.max(1, Math.ceil(path.length / options.advance))
@@ -155,10 +166,25 @@ export function buildTrochoidalContour(
     Math.ceil(2 * Math.PI * options.orbitRadius / maxChord),
   )
   const movingSteps = loopCount * stepsPerLoop
+  const movingDistances = Array.from(new Set([
+    ...Array.from({ length: movingSteps }, (_, index) => path.length * (index + 1) / movingSteps),
+    ...(options.guideBreakpoints ?? [])
+      .filter(Number.isFinite)
+      .map((distance) => Math.max(0, Math.min(path.length, distance)))
+      .filter((distance) => distance > 0 && distance < path.length),
+  ])).sort((left, right) => left - right)
   const maxPoints = Math.min(DEFAULT_TROCHOIDAL_POINT_BUDGET, options.maxPoints ?? DEFAULT_TROCHOIDAL_POINT_BUDGET)
   const stationarySteps = stepsPerLoop * (closed ? 1 : 2)
-  if (movingSteps + stationarySteps + 1 > maxPoints) {
-    return { points: [], entryCenter: null, loopCount, actualAdvance, error: 'move-budget' }
+  if (movingDistances.length + stationarySteps + 1 > maxPoints) {
+    return {
+      points: [],
+      guideDistances: [],
+      guideLength: path.length,
+      entryCenter: null,
+      loopCount,
+      actualAdvance,
+      error: 'move-budget',
+    }
   }
 
   const frameLookaround = Math.min(
@@ -168,34 +194,65 @@ export function buildTrochoidalContour(
   const entryCenter = samplePosition(path, 0)
   const entryFrame = sampleFrame(path, 0, frameLookaround)
   if (!entryFrame) {
-    return { points: [], entryCenter: null, loopCount, actualAdvance, error: 'invalid-guide' }
+    return {
+      points: [],
+      guideDistances: [],
+      guideLength: path.length,
+      entryCenter: null,
+      loopCount,
+      actualAdvance,
+      error: 'invalid-guide',
+    }
   }
 
   const points: Point[] = [orbitPoint(entryCenter, entryFrame.tangent, entryFrame.normal, options.orbitRadius, 0)]
+  const guideDistances = [0]
   for (let step = 1; step <= stepsPerLoop; step += 1) {
     const phase = options.angularDirection * 2 * Math.PI * step / stepsPerLoop
     points.push(orbitPoint(entryCenter, entryFrame.tangent, entryFrame.normal, options.orbitRadius, phase))
+    guideDistances.push(0)
   }
 
-  for (let step = 1; step <= movingSteps; step += 1) {
-    const distance = path.length * step / movingSteps
+  for (const distance of movingDistances) {
     const center = samplePosition(path, distance)
     const frame = sampleFrame(path, distance, frameLookaround)
-    if (!frame) return { points: [], entryCenter: null, loopCount, actualAdvance, error: 'invalid-guide' }
-    const phase = options.angularDirection * 2 * Math.PI * step / stepsPerLoop
+    if (!frame) {
+      return {
+        points: [],
+        guideDistances: [],
+        guideLength: path.length,
+        entryCenter: null,
+        loopCount,
+        actualAdvance,
+        error: 'invalid-guide',
+      }
+    }
+    const phase = options.angularDirection * 2 * Math.PI * distance / actualAdvance
     points.push(orbitPoint(center, frame.tangent, frame.normal, options.orbitRadius, phase))
+    guideDistances.push(distance)
   }
 
   if (!closed) {
     const exitCenter = samplePosition(path, path.length)
     const exitFrame = sampleFrame(path, path.length, frameLookaround)
-    if (!exitFrame) return { points: [], entryCenter: null, loopCount, actualAdvance, error: 'invalid-guide' }
+    if (!exitFrame) {
+      return {
+        points: [],
+        guideDistances: [],
+        guideLength: path.length,
+        entryCenter: null,
+        loopCount,
+        actualAdvance,
+        error: 'invalid-guide',
+      }
+    }
     for (let step = 1; step <= stepsPerLoop; step += 1) {
       const phase = options.angularDirection * 2 * Math.PI * step / stepsPerLoop
       points.push(orbitPoint(exitCenter, exitFrame.tangent, exitFrame.normal, options.orbitRadius, phase))
+      guideDistances.push(path.length)
     }
   }
 
   if (closed) points[points.length - 1] = { ...points[0] }
-  return { points, entryCenter, loopCount, actualAdvance }
+  return { points, guideDistances, guideLength: path.length, entryCenter, loopCount, actualAdvance }
 }

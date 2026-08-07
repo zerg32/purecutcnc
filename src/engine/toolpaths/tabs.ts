@@ -43,7 +43,17 @@ interface PreservedObstacle {
 // overshooting each corner by up to (sqrt(2)-1)*radius and raising the toolpath
 // where the cutter would never have reached the tab.
 const TAB_FOOTPRINT_JOIN_TYPE = ClipperLib.JoinType.jtRound
-const SMOOTH_TAB_SEGMENTS = 16
+export const SMOOTH_TAB_SEGMENTS = 16
+
+export function smoothTabBellProfile(progress: number): number {
+  const clamped = Math.max(0, Math.min(1, progress))
+  const scaled = clamped * SMOOTH_TAB_SEGMENTS
+  const index = Math.min(SMOOTH_TAB_SEGMENTS - 1, Math.floor(scaled))
+  const local = scaled - index
+  const from = Math.sin(Math.PI * index / SMOOTH_TAB_SEGMENTS) ** 2
+  const to = Math.sin(Math.PI * (index + 1) / SMOOTH_TAB_SEGMENTS) ** 2
+  return from + (to - from) * local
+}
 
 function offsetObstaclePoints(points: Point[], delta: number): Point[] {
   if (!(delta > 1e-9) || points.length < 3) {
@@ -440,7 +450,7 @@ function splitCutRunAcrossTabs(
             ? Math.cos(Math.PI * progress / 2) ** 2
             : span.endsInside
               ? Math.sin(Math.PI * progress / 2) ** 2
-              : Math.sin(Math.PI * progress) ** 2
+            : smoothTabBellProfile(progress)
         return Math.max(highest, baseZ + (span.obstacle.zTop - baseZ) * profile)
       }, rectZ)
       const segmentStart = pointAt(move, (start - offset) / length, requiredZ(start))

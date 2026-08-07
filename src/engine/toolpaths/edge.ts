@@ -43,7 +43,7 @@ import { resolvedProjectFeatures } from '../../store/helpers/resolveFeatures'
 import { helixAngularDirection, plungeLimitedFeedScale } from './entry'
 import { splitClosedGuideByForbiddenPaths } from './guideFragments'
 import { buildTrochoidalContour, DEFAULT_TROCHOIDAL_POINT_BUDGET } from './trochoidalEdge'
-import { expandedTabFootprints } from './tabs'
+import { expandedTabFootprints, SMOOTH_TAB_SEGMENTS, smoothTabBellProfile } from './tabs'
 
 const TROCHOIDAL_ENTRY_STEPS_PER_REVOLUTION = 36
 const MAX_TROCHOIDAL_ENTRY_MOVES = 20_000
@@ -95,15 +95,6 @@ function toClosedCutMoves(points: Point[], z: number): ToolpathMove[] {
   }
 
   return moves
-}
-
-function toOpenCutMoves(points: Point[], z: number): ToolpathMove[] {
-  if (points.length < 2) return []
-  return points.slice(1).map((point, index) => ({
-    kind: 'cut' as const,
-    from: { x: points[index].x, y: points[index].y, z },
-    to: { x: point.x, y: point.y, z },
-  }))
 }
 
 function pushRapidAndPlunge(
@@ -361,10 +352,6 @@ function segmentOutsideForbiddenPaths(from: Point, to: Point, paths: ClipperPath
     && paths.every((path) => !segmentIntersectsPath(from, to, path))
 }
 
-function trochoidalPathIsSafe(points: Point[], isSegmentSafe: (from: Point, to: Point) => boolean): boolean {
-  return points.length > 1 && points.slice(1).every((point, index) => isSegmentSafe(points[index], point))
-}
-
 // Tab footprint geometry lives in tabs.ts so the shared tab pass and trochoidal
 // guide fragmentation cannot drift apart on shape or offset tolerance.
 const expandedTabPaths = expandedTabFootprints
@@ -386,6 +373,18 @@ interface TrochoidalGuideFragment {
   z: number
   closed: boolean
   entryStartZ: number
+  startDistance: number
+  endDistance: number
+  guideLength: number
+  smoothTabSpans: TrochoidalSmoothTabSpan[]
+}
+
+interface TrochoidalSmoothTabSpan {
+  startDistance: number
+  endDistance: number
+  guideLength: number
+  zTop: number
+  zBottom: number
 }
 
 type TrochoidalFragmentPlanner = (
@@ -433,6 +432,14 @@ function activeTabsAtZ(tabs: Tab[], z: number): Tab[] {
   return tabs.filter((tab) => z < tab.z_top - TROCHOIDAL_TAB_EPSILON)
 }
 
+function rectangularTabs(tabs: Tab[]): Tab[] {
+  return tabs.filter((tab) => tab.shape !== 'smooth')
+}
+
+function smoothTabs(tabs: Tab[]): Tab[] {
+  return tabs.filter((tab) => tab.shape === 'smooth')
+}
+
 function tabCutterPathsAtZ(tabs: Tab[], z: number, cutterClearance: number): ClipperPath[] {
   return expandedTabPaths(activeTabsAtZ(tabs, z), cutterClearance)
 }
@@ -458,6 +465,65 @@ function tabTopForGuideFragment(fragment: Point[], tabs: Tab[], tabGuideClearanc
   return covered.length > 0 ? Math.max(...covered.map((tab) => tab.z_top)) : null
 }
 
+function smoothTabSpansForGuide(
+  contour: Point[],
+  tabs: Tab[],
+  tabGuideClearance: number,
+): TrochoidalSmoothTabSpan[] {
+  return tabs.flatMap((tab) => splitClosedGuideByForbiddenPaths(
+    contour,
+    expandedTabPaths([tab], tabGuideClearance),
+    'inside',
+  ).map((fragment) => ({
+    startDistance: fragment.startDistance,
+    endDistance: fragment.endDistance,
+    guideLength: fragment.guideLength,
+    zTop: tab.z_top,
+    zBottom: tab.z_bottom,
+  })))
+}
+
+function distanceWithinSmoothSpan(distance: number, span: TrochoidalSmoothTabSpan): number | null {
+  const candidates = [distance - span.guideLength, distance, distance + span.guideLength]
+  const matched = candidates.find((candidate) => (
+    candidate >= span.startDistance - TROCHOIDAL_TAB_EPSILON
+      && candidate <= span.endDistance + TROCHOIDAL_TAB_EPSILON
+  ))
+  return matched ?? null
+}
+
+function smoothTabZAtDistance(baseZ: number, distance: number, spans: TrochoidalSmoothTabSpan[]): number {
+  return spans.reduce((highest, span) => {
+    if (baseZ >= span.zTop - TROCHOIDAL_TAB_EPSILON || baseZ < span.zBottom - TROCHOIDAL_TAB_EPSILON) {
+      return highest
+    }
+    const spanDistance = distanceWithinSmoothSpan(distance, span)
+    const length = span.endDistance - span.startDistance
+    if (spanDistance === null || !(length > TROCHOIDAL_TAB_EPSILON)) return highest
+    const progress = (spanDistance - span.startDistance) / length
+    return Math.max(highest, baseZ + (span.zTop - baseZ) * smoothTabBellProfile(progress))
+  }, baseZ)
+}
+
+function smoothTabBreakpointsForFragment(fragment: TrochoidalGuideFragment): number[] {
+  const breakpoints: number[] = []
+  for (const span of fragment.smoothTabSpans) {
+    for (let index = 0; index <= SMOOTH_TAB_SEGMENTS; index += 1) {
+      const distance = span.startDistance
+        + (span.endDistance - span.startDistance) * index / SMOOTH_TAB_SEGMENTS
+      for (const candidate of [distance - span.guideLength, distance, distance + span.guideLength]) {
+        if (
+          candidate >= fragment.startDistance - TROCHOIDAL_TAB_EPSILON
+          && candidate <= fragment.endDistance + TROCHOIDAL_TAB_EPSILON
+        ) {
+          breakpoints.push(candidate - fragment.startDistance)
+        }
+      }
+    }
+  }
+  return breakpoints
+}
+
 /**
  * Every interruption is planned against the guide itself before trochoids are
  * emitted. Post-clipping a generated orbit would manufacture an unproven
@@ -472,10 +538,12 @@ function createTrochoidalFragmentPlanner(
   warnings: ToolpathWarning[],
 ): TrochoidalFragmentPlanner {
   return (contour, z, previousZ, orbitRadius) => {
-    const activeTabs = activeTabsAtZ(tabs, z)
+    const rectTabs = rectangularTabs(tabs)
+    const activeTabs = activeTabsAtZ(rectTabs, z)
     const tabPaths = expandedTabPaths(activeTabs, tabGuideClearance)
     const forbidden = unionPaths([...staticForbiddenPaths, ...tabPaths])
     const depthFragments = splitClosedGuideByForbiddenPaths(contour, forbidden)
+    const guideSmoothTabSpans = smoothTabSpansForGuide(contour, smoothTabs(tabs), tabGuideClearance)
     const hasOpenDepthFragment = depthFragments.some((fragment) => !fragment.closed)
     if (hasOpenDepthFragment && trochoidalEntryStrategy(operation) !== 'helix') {
       appendUniqueTrochoidalWarning(warnings, {
@@ -499,6 +567,10 @@ function createTrochoidalFragmentPlanner(
         z,
         closed: fragment.closed,
         entryStartZ: previousZ,
+        startDistance: fragment.startDistance,
+        endDistance: fragment.endDistance,
+        guideLength: fragment.guideLength,
+        smoothTabSpans: guideSmoothTabSpans,
       })
     }
 
@@ -513,7 +585,7 @@ function createTrochoidalFragmentPlanner(
     // A tab is crossed only once: when this descending level first passes its
     // top. The pass at z_top is deliberately local, while every lower level
     // stays in the outside fragments above.
-    const crossingTabs = tabs.filter((tab) => (
+    const crossingTabs = rectTabs.filter((tab) => (
       previousZ >= tab.z_top - TROCHOIDAL_TAB_EPSILON
         && z < tab.z_top - TROCHOIDAL_TAB_EPSILON
     ))
@@ -529,7 +601,7 @@ function createTrochoidalFragmentPlanner(
       // ones. Where a short tab overlaps a taller one, the taller top wins —
       // taking the crossing tab's own top would machine the taller tab away
       // across the overlap.
-      const tabTop = tabTopForGuideFragment(fragment.points, tabs, tabGuideClearance)
+      const tabTop = tabTopForGuideFragment(fragment.points, rectTabs, tabGuideClearance)
       if (tabTop === null || polylineLength(fragment.points) < minimumSpanLength) {
         appendUniqueTrochoidalWarning(warnings, {
           code: 'edgeTrochoidalSkippedSpan',
@@ -542,7 +614,7 @@ function createTrochoidalFragmentPlanner(
       // tabs). Skip those spans with their location rather than emitting a cut
       // that the verification backstop would then fail the whole operation on:
       // a tight spot interrupts the cut, it does not cancel the job.
-      const blocking = expandedTabPaths(activeTabsAtZ(tabs, tabTop), tabGuideClearance)
+      const blocking = expandedTabPaths(activeTabsAtZ(rectTabs, tabTop), tabGuideClearance)
       if (!polylineOutsideForbiddenPaths(fragment.points, blocking)) {
         appendUniqueTrochoidalWarning(warnings, {
           code: 'edgeTrochoidalSkippedSpan',
@@ -555,6 +627,10 @@ function createTrochoidalFragmentPlanner(
         z: tabTop,
         closed: false,
         entryStartZ: tabTop,
+        startDistance: fragment.startDistance,
+        endDistance: fragment.endDistance,
+        guideLength: fragment.guideLength,
+        smoothTabSpans: guideSmoothTabSpans,
       })
     }
     return planned
@@ -689,9 +765,32 @@ function trochoidalEntryMoveCount(
 
 interface PreparedTrochoidalPath {
   built: ReturnType<typeof buildTrochoidalContour>
-  z: number
+  zValues: number[]
   entryStartZ: number
   closed: boolean
+}
+
+function trochoidalCutMoves(
+  points: Point[],
+  zValues: number[],
+  operation: Operation,
+): ToolpathMove[] {
+  return points.slice(1).map((point, index) => {
+    const from = { x: points[index].x, y: points[index].y, z: zValues[index] }
+    const to = { x: point.x, y: point.y, z: zValues[index + 1] }
+    const dz = Math.abs(to.z - from.z)
+    if (dz <= TROCHOIDAL_TAB_EPSILON) return { kind: 'cut' as const, from, to }
+
+    const distance = Math.hypot(to.x - from.x, to.y - from.y, dz)
+    const angle = Math.asin(Math.min(1, dz / distance)) * 180 / Math.PI
+    const feedScale = plungeLimitedFeedScale(operation.feed, operation.plungeFeed, angle)
+    return {
+      kind: 'cut' as const,
+      from,
+      to,
+      ...(feedScale < 1 ? { feedScale } : {}),
+    }
+  })
 }
 
 /**
@@ -728,10 +827,30 @@ function appendTrochoidalContoursAtLevels(
         if (planned === null) return currentPosition
         fragments = planned
       } else {
-        fragments = [{ points: contour, z, closed: true, entryStartZ: previousZ }]
+        const guideLength = polylineLength([...contour, contour[0]])
+        fragments = [{
+          points: contour,
+          z,
+          closed: true,
+          entryStartZ: previousZ,
+          startDistance: 0,
+          endDistance: guideLength,
+          guideLength,
+          smoothTabSpans: [],
+        }]
       }
       for (const fragment of fragments) {
-        const entryMoves = trochoidalEntryMoveCount(fragment.entryStartZ, fragment.z, orbitRadius, operation)
+        const entryStartZ = smoothTabZAtDistance(
+          fragment.entryStartZ,
+          fragment.startDistance,
+          fragment.smoothTabSpans,
+        )
+        const entryTargetZ = smoothTabZAtDistance(
+          fragment.z,
+          fragment.startDistance,
+          fragment.smoothTabSpans,
+        )
+        const entryMoves = trochoidalEntryMoveCount(entryStartZ, entryTargetZ, orbitRadius, operation)
         if (entryMoves > MAX_TROCHOIDAL_ENTRY_MOVES || entryMoves + 3 >= remainingPoints) {
           warnings.push({ code: 'edgeTrochoidalEntryBudget', params: { x: fragment.points[0]?.x ?? 0, y: fragment.points[0]?.y ?? 0 } })
           return currentPosition
@@ -743,6 +862,7 @@ function appendTrochoidalContoursAtLevels(
           angularDirection,
           closed: fragment.closed,
           maxPoints: remainingPoints - entryMoves - 3,
+          guideBreakpoints: smoothTabBreakpointsForFragment(fragment),
         })
         if (built.error || built.points.length < 2 || !built.entryCenter) {
           warnings.push({
@@ -751,23 +871,33 @@ function appendTrochoidalContoursAtLevels(
           })
           return currentPosition
         }
-        if (!trochoidalPathIsSafe(built.points, (from, to) => isSegmentSafe(from, to, fragment.z))) {
+        const zValues = built.guideDistances.map((distance) => smoothTabZAtDistance(
+          fragment.z,
+          fragment.startDistance + distance,
+          fragment.smoothTabSpans,
+        ))
+        const pathIsSafe = built.points.slice(1).every((point, index) => isSegmentSafe(
+          built.points[index],
+          point,
+          Math.min(zValues[index], zValues[index + 1]),
+        ))
+        if (!pathIsSafe) {
           warnings.push({ code: 'edgeTrochoidalSafetyCheck', params: { x: fragment.points[0]?.x ?? 0, y: fragment.points[0]?.y ?? 0 } })
           return currentPosition
         }
-        const entryAtStart = { x: built.points[0].x, y: built.points[0].y, z: fragment.entryStartZ }
+        const entryAtStart = { x: built.points[0].x, y: built.points[0].y, z: entryStartZ }
         const entryPoints = trochoidalEntryPoints(
           entryAtStart,
           built.points[0],
           built.entryCenter,
-          fragment.z,
+          entryTargetZ,
           orbitRadius,
           operation,
           angularDirection,
         )
         let previousEntryPoint = entryAtStart
         for (const entryPoint of entryPoints) {
-          if (!isSegmentSafe(previousEntryPoint, entryPoint, fragment.z)) {
+          if (!isSegmentSafe(previousEntryPoint, entryPoint, Math.min(previousEntryPoint.z, entryPoint.z))) {
             warnings.push({
               code: 'edgeTrochoidalSafetyCheck',
               params: { x: fragment.points[0]?.x ?? 0, y: fragment.points[0]?.y ?? 0 },
@@ -782,7 +912,7 @@ function appendTrochoidalContoursAtLevels(
           return currentPosition
         }
         remainingPoints -= consumedPoints
-        prepared.push({ built, z: fragment.z, entryStartZ: fragment.entryStartZ, closed: fragment.closed })
+        prepared.push({ built, zValues, entryStartZ, closed: fragment.closed })
       }
       previousZ = z
     }
@@ -791,8 +921,9 @@ function appendTrochoidalContoursAtLevels(
 
   let nextPosition = currentPosition
   for (const path of prepared) {
-    const { built, z, entryStartZ, closed } = path
+    const { built, zValues, entryStartZ, closed } = path
     const entry = built.points[0]
+    const entryZ = zValues[0]
     const sameEntry = closed && nextPosition
       && Math.abs(nextPosition.x - entry.x) <= 1e-9
       && Math.abs(nextPosition.y - entry.y) <= 1e-9
@@ -810,19 +941,19 @@ function appendTrochoidalContoursAtLevels(
         nextPosition = surfacePoint
       }
     }
-    if (Math.abs((nextPosition as ToolpathPoint).z - z) > 1e-9) {
+    if (Math.abs((nextPosition as ToolpathPoint).z - entryZ) > 1e-9) {
       nextPosition = appendTrochoidalEntry(
         moves,
         nextPosition as ToolpathPoint,
         entry,
         built.entryCenter as Point,
-        z,
+        entryZ,
         orbitRadius,
         operation,
         angularDirection,
       )
     }
-    const cutMoves = closed ? toClosedCutMoves(built.points, z) : toOpenCutMoves(built.points, z)
+    const cutMoves = trochoidalCutMoves(built.points, zValues, operation)
     moves.push(...cutMoves)
     nextPosition = cutMoves.at(-1)?.to ?? nextPosition
   }
@@ -1118,7 +1249,7 @@ function generateEdgeRouteToolpathSingle(
             && segmentOutsideForbiddenPaths(
               from,
               to,
-              tabCutterPathsAtZ(trochoidalTabs, z, trochoidalTabCutterClearance),
+              tabCutterPathsAtZ(rectangularTabs(trochoidalTabs), z, trochoidalTabCutterClearance),
             ),
           trochoidalBudget,
           createTrochoidalFragmentPlanner(
@@ -1296,7 +1427,7 @@ function generateEdgeRouteToolpathSingle(
               && segmentOutsideForbiddenPaths(
                 from,
                 to,
-                tabCutterPathsAtZ(trochoidalTabs, z, trochoidalTabCutterClearance),
+                tabCutterPathsAtZ(rectangularTabs(trochoidalTabs), z, trochoidalTabCutterClearance),
               ),
             trochoidalBudget,
             createTrochoidalFragmentPlanner(
@@ -1365,7 +1496,7 @@ function generateEdgeRouteToolpathSingle(
             && segmentOutsideForbiddenPaths(
               from,
               to,
-              tabCutterPathsAtZ(trochoidalTabs, z, trochoidalTabCutterClearance),
+              tabCutterPathsAtZ(rectangularTabs(trochoidalTabs), z, trochoidalTabCutterClearance),
             ),
           trochoidalBudget,
           createTrochoidalFragmentPlanner(
