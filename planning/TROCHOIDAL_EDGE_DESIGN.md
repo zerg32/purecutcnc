@@ -156,8 +156,10 @@ channel. That is the honest consequence of the ordering the user picked.
   makes the midpoint hit `z_top` exactly and includes profile resolution in the
   same operation-wide point budget as ordinary orbit samples.
 - Sloped smooth-tab cuts carry a feed scale that keeps their vertical feed
-  component at or below Plunge Feed. Smooth-only layouts therefore do not need
-  Helix entry; rectangular fragmentation still does.
+  component at or below the helix-entry vertical feed — the smaller of Plunge
+  Feed and `feed × sin(entryRampAngle)` — so the tab flank never descends or
+  climbs faster than the configured entry ramp. Smooth-only layouts therefore
+  do not need Helix entry; rectangular fragmentation still does.
 - Overlapping tabs use the **highest** covering top. Where a short tab overlaps
   a taller one, taking the short tab's own top would machine the taller tab
   away across the overlap. If raising the span to the tallest covering top still

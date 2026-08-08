@@ -46,6 +46,7 @@ import {
 } from './regions'
 import { DEFAULT_CLIPPER_SCALE } from './geometry'
 import type { ClipperPath } from './types'
+import { DEFAULT_ENTRY_RAMP_ANGLE } from './entry'
 
 function assert(condition: boolean, message: string): asserts condition {
   if (!condition) throw new Error(`Assertion failed: ${message}`)
@@ -1778,14 +1779,16 @@ function testTrochoidalSmoothTabsKeepContinuousMotion() {
   assert(approx(Math.min(...cutZs), -4), 'smooth tab path must return to the requested depth')
   assert(approx(Math.max(...cutZs), -1), 'smooth tab path must reach the exact tab top')
 
+  const rampVerticalCap = operation.feed * Math.sin((operation.entryRampAngle ?? DEFAULT_ENTRY_RAMP_ANGLE) * Math.PI / 180)
+  const maxVerticalCap = Math.min(operation.plungeFeed, rampVerticalCap)
   for (const move of cuts) {
     const dz = Math.abs(move.to.z - move.from.z)
     if (dz <= 1e-9) continue
     const distance = Math.hypot(move.to.x - move.from.x, move.to.y - move.from.y, dz)
     const verticalFeed = operation.feed * (move.feedScale ?? 1) * dz / distance
     assert(
-      verticalFeed <= operation.plungeFeed + 1e-6,
-      `smooth-tab vertical feed ${verticalFeed} exceeds plunge feed ${operation.plungeFeed}`,
+      verticalFeed <= maxVerticalCap + 1e-6,
+      `smooth-tab vertical feed ${verticalFeed} exceeds the gentler of plunge feed ${operation.plungeFeed} and helix-ramp vertical feed ${rampVerticalCap}`,
     )
   }
 
@@ -1797,6 +1800,50 @@ function testTrochoidalSmoothTabsKeepContinuousMotion() {
   )
 
   console.log('trochoidal smooth continuous motion: PASSED')
+}
+
+function testTrochoidalSmoothTabFlankMatchesHelixRate() {
+  console.log('Testing trochoidal smooth-tab flank descends no faster than the helix entry...')
+
+  const tool = makeFlatEndmill('t1', 4)
+  const target = makeAddFeature('target', 0, 0, 40, 20, 0, -4)
+  const project = baseProject([tool], [target])
+  project.tabs = [{
+    id: 'smooth-tab',
+    name: 'smooth tab',
+    x: 16,
+    y: -2,
+    w: 8,
+    h: 4,
+    z_top: -1,
+    z_bottom: -4,
+    shape: 'smooth',
+    visible: true,
+  }]
+  const operation = {
+    ...makeTrochoidalEdgeOperation('target', 'edge_route_outside'),
+    stepdown: 4,
+    entryRampAngle: 1.5,
+  }
+  const result = generateEdgeRouteToolpath(project, operation)
+  assert(result.warnings.length === 0, `unexpected smooth-tab warnings: ${result.warnings.map((warning) => warning.code).join(', ')}`)
+  const cuts = cutMoves(result.moves)
+  const rampVerticalCap = operation.feed * Math.sin(1.5 * Math.PI / 180)
+  let scaledFlankMoves = 0
+  for (const move of cuts) {
+    const dz = Math.abs(move.to.z - move.from.z)
+    if (dz <= 1e-9) continue
+    const distance = Math.hypot(move.to.x - move.from.x, move.to.y - move.from.y, dz)
+    const verticalFeed = operation.feed * (move.feedScale ?? 1) * dz / distance
+    assert(
+      verticalFeed <= rampVerticalCap + 1e-6,
+      `smooth-tab flank vertical feed ${verticalFeed} exceeds helix-entry rate ${rampVerticalCap}`,
+    )
+    if ((move.feedScale ?? 1) < 1 - 1e-9) scaledFlankMoves += 1
+  }
+  assert(scaledFlankMoves > 0, 'the helix-rate cap must bind on the steepest flank moves')
+
+  console.log('trochoidal smooth-tab flank matches helix rate: PASSED')
 }
 
 function testTrochoidalSmoothTabsHandleSeamsAndOverlap() {
@@ -3479,6 +3526,7 @@ try {
   testTrochoidalOutsideTracksDifferentTargetSizes()
   testTrochoidalTabsFragmentBeforeMotionAndHelixReenter()
   testTrochoidalSmoothTabsKeepContinuousMotion()
+  testTrochoidalSmoothTabFlankMatchesHelixRate()
   testTrochoidalSmoothTabsHandleSeamsAndOverlap()
   testTrochoidalMixedTabsPreserveFragmentSafety()
   testTrochoidalOutsideFragmentsAroundTightObstacle()

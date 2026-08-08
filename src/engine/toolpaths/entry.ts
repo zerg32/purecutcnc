@@ -159,11 +159,12 @@ export function plungeLimitedFeedScale(
   cutFeed: number,
   plungeFeed: number,
   rampAngleDegrees: number,
+  maxVerticalFeed = plungeFeed,
 ): number {
-  if (!(cutFeed > 0) || !(plungeFeed > 0)) return 1
+  if (!(cutFeed > 0) || !(plungeFeed > 0) || !(maxVerticalFeed > 0)) return 1
   const verticalRatio = Math.sin(toRadians(rampAngleDegrees))
   if (!(verticalRatio > 0)) return 1
-  return Math.min(1, plungeFeed / (cutFeed * verticalRatio))
+  return Math.min(1, maxVerticalFeed / (cutFeed * verticalRatio))
 }
 
 export function helixAngularDirection(cutDirection: CutDirection, cutSide: EntryCutSide): 1 | -1 {

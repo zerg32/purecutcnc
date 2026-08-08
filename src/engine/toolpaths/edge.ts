@@ -40,7 +40,7 @@ import { buildMaskFromClipperPaths, buildRegionMask, clipToolpathResultToObstacl
 import { resolveInsideEdgeRegions } from './resolver'
 import { significantSilhouettePaths } from './silhouette'
 import { resolvedProjectFeatures } from '../../store/helpers/resolveFeatures'
-import { helixAngularDirection, plungeLimitedFeedScale } from './entry'
+import { DEFAULT_ENTRY_RAMP_ANGLE, helixAngularDirection, plungeLimitedFeedScale } from './entry'
 import { splitClosedGuideByForbiddenPaths } from './guideFragments'
 import { buildTrochoidalContour, DEFAULT_TROCHOIDAL_POINT_BUDGET } from './trochoidalEdge'
 import { expandedTabFootprints, SMOOTH_TAB_SEGMENTS, smoothTabBellProfile } from './tabs'
@@ -775,6 +775,8 @@ function trochoidalCutMoves(
   zValues: number[],
   operation: Operation,
 ): ToolpathMove[] {
+  const rampAngle = Math.min(45, Math.max(0.1, operation.entryRampAngle ?? DEFAULT_ENTRY_RAMP_ANGLE))
+  const maxVerticalFeed = Math.min(operation.plungeFeed, operation.feed * Math.sin(rampAngle * Math.PI / 180))
   return points.slice(1).map((point, index) => {
     const from = { x: points[index].x, y: points[index].y, z: zValues[index] }
     const to = { x: point.x, y: point.y, z: zValues[index + 1] }
@@ -783,7 +785,7 @@ function trochoidalCutMoves(
 
     const distance = Math.hypot(to.x - from.x, to.y - from.y, dz)
     const angle = Math.asin(Math.min(1, dz / distance)) * 180 / Math.PI
-    const feedScale = plungeLimitedFeedScale(operation.feed, operation.plungeFeed, angle)
+    const feedScale = plungeLimitedFeedScale(operation.feed, operation.plungeFeed, angle, maxVerticalFeed)
     return {
       kind: 'cut' as const,
       from,
