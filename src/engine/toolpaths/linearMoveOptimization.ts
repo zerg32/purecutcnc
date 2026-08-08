@@ -19,8 +19,14 @@ import type { ToolpathBounds, ToolpathMove, ToolpathResult } from './types'
 const EPSILON = 1e-9
 
 /**
- * Pure finalizer that removes zero-length duplicate moves and merges
- * contiguous, direction-preserving, collinear XY moves.
+ * Pure finalizer that removes zero-length duplicate non-rapid moves and
+ * merges contiguous, direction-preserving, collinear XY moves.
+ *
+ * Zero-length `rapid` moves are preserved: they are load-bearing positioning
+ * markers (see entry.ts) that tell the postprocessor to establish XY and Z at
+ * safeZ before the following plunge. Deleting one turns the plunge's travel
+ * into a diagonal cut at plunge feed. `emitRapid` in the postprocessor already
+ * skips axes the machine is positioned at, so a redundant marker is harmless.
  *
  * Applied after tab transformations but before clamp warnings so collision
  * move indices refer to the final (optimized) move array.
@@ -37,7 +43,9 @@ export function optimizeLinearMoves(result: ToolpathResult): ToolpathResult {
 
   for (const move of result.moves) {
     if (isZeroLength(move)) {
-      continue
+      if (move.kind !== 'rapid') {
+        continue
+      }
     }
 
     if (optimized.length === 0) {

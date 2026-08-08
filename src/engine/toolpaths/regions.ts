@@ -372,6 +372,11 @@ function pushSafeTransition(moves: ToolpathMove[], current: ToolpathPoint | null
   }
 
   const safeTo = { x: target.x, y: target.y, z: safeZ }
+  // Zero-length positioning marker for the operation-start case: the
+  // postprocessor turns it into a G0 against its tracked machine position
+  // (see entry.ts). Without it the plunge below travels diagonally from the
+  // previous operation's end at plunge feed, cutting the stock off-contour.
+  moves.push({ kind: 'rapid', from: safeTo, to: safeTo })
   if (Math.abs(safeTo.z - target.z) > 1e-9) {
     moves.push({ kind: 'plunge', from: safeTo, to: target })
   }

@@ -29,9 +29,9 @@ Toolpath generators. Each file owns one strategy. `index.ts` re-exports everythi
 - `guideFragments.ts` — cyclic closed-guide fragmentation against pre-unioned keep-outs; preserves every safe span and its original unwrapped guide-distance range before entry-bearing motion is generated
 - `tabs.ts` also owns the shared tab footprint geometry (`expandedTabFootprints`) and `applyEdgeRouteTabs`, the edge-route tab pass that deliberately returns trochoidal results untouched — see `planning/TROCHOIDAL_EDGE_DESIGN.md`
 - `offsetSmoothing.ts` — emit-time corner fillet for the outer/wall clearing rings (`roundContourCorners`, `smoothClosedContours`, `cornerSmoothingRadius`); shared by pocket + surface clearing when `roundOutsideCorners` is enabled. Bounds the setback so acute corners leave no crescent; the offset-tree emitter keeps each region's wall-adjacent (root) outer ring sharp so no corner stock stacks into a chip (interior rings self-clean). Islands are rounded the opposite way — via `jtRound` Clipper offsets (see `buildInsetRegions` island join), so the tool wraps convex island corners smoothly without gouging.
-- `linearMoveOptimization.ts` — pure generation-stage finalizer that removes zero-length duplicate moves and merges contiguous, direction-preserving, collinear XY moves; applied after tabs but before clamp warnings
+- `linearMoveOptimization.ts` — pure generation-stage finalizer that removes zero-length duplicate non-rapid moves and merges contiguous, direction-preserving, collinear XY moves; zero-length `rapid` moves are load-bearing positioning markers (see entry.ts) and are preserved so the first plunge stays vertical; applied after tabs but before clamp warnings
 - `arcReconstruction.ts` — recovers arcs/circles/beziers from flattened Clipper output: known-circle reconstruction, segment-preserving boolean reconstruction (annotation map), and the Clipper-offset simplification pipeline (Kasa fit + RDP)
-- `regions.ts` — region computation (which area belongs to which op)
+- `regions.ts` — region computation (which area belongs to which op); the obstacle/region clippers re-link cut fragments via safe transitions that emit a zero-length positioning rapid when the tool has no established position, so operation-start plunges never cut diagonally
 - `resolver.ts` — resolves features+operations into clipper input regions; V-carve accepts closed Subtract and Line features (S2), Pocket remains Subtract-only; Line paths use even-odd fill semantics for nested contour holes
 - `restRegions.ts` — rest-machining region computation (what a prior tool missed)
 - `silhouette.ts` — extracts 2D silhouette from 3D mesh for sketch projection
@@ -40,7 +40,8 @@ Toolpath generators. Each file owns one strategy. `index.ts` re-exports everythi
 - `clamps.ts` — clamp clearance / avoidance regions
 
 ## Tests
-- `linearMoveOptimization.test.ts` — zero-length removal, collinear merge, and boundary preservation
+- `linearMoveOptimization.test.ts` — zero-length removal, positioning-rapid preservation, collinear merge, and boundary preservation
+- `regions.test.ts` — obstacle/region clipping transitions (issue #467): operation-start transitions emit a zero-length positioning rapid before the first plunge; mid-path transitions keep real non-zero rapids
 - `trochoidalEdge.test.ts` — deterministic closed/open orbit sampling, seam closure, direction, aligned guide distances, exact breakpoints, normalized duplicate vertices, and fail-closed budgets. Integrated cut-direction parity (trochoidal vs contour, inside and outside), circular/multi-target guides, rectangular/smooth tabs, and overlapping tabs live in `toolpaths.test.ts`
 - `feed.test.ts` — shared effectiveFeed helper: cut/plunge/lead-in/lead-out move kinds, feedScale present/absent, and plunge ignores-feedScale invariance
 - `entry.test.ts` — helix pitch/direction, region/island clearance, no-core diameter bounds, bottom flattening, ramp fallback, and plunge-feed limiting
