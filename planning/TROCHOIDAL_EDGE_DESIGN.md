@@ -1,10 +1,10 @@
 ---
 status: current
-authoritative-for: trochoidal Edge Route roughing — guide-domain fragmentation, clearance budget, and the pipeline stages it must bypass
-last-verified: 2026-08-05
+authoritative-for: trochoidal Edge Route roughing and trochoidal Engrave — guide-domain fragmentation, clearance budget, and the pipeline stages they must bypass
+last-verified: 2026-08-07
 ---
 
-# Trochoidal Edge Routing
+# Trochoidal Routing
 
 ## Purpose
 
@@ -23,7 +23,13 @@ this first.
 
 - Rough pass only. A finish pass is always a contour, on both edge kinds.
 - Closed guides only.
-- Region masks refuse (`edgeTrochoidalRegionUnsupported`); see #452.
+- Region masks participate in guide-domain fragmentation via
+  `resolveRegionDomainCurve` before any orbit exists.  Include regions are
+  eroded by the orbit radius `(cutWidth − D)/2` so the tool centre lands on
+  the region boundary; exclude regions are dilated by `cutWidth / 2` so the
+  tool body clears the region.  Obstacles, tabs, and the retained wall use
+  the separate `trochoidalGuideOffset` clearance.  Both follow ordered mask
+  composition from `buildRegionMask`.
 
 Both machining orders are supported — see below. The plan originally scoped
 `feature_first` out; it was enabled once the two things it actually needed were
@@ -173,16 +179,51 @@ Tab footprint geometry lives in `tabs.ts` (`expandedTabFootprints`), not beside
 it. Callers pass their own clearance because they answer different questions,
 but the footprint shape and the offset tolerance come from one place.
 
+## Engrave (follow_line) slot
+
+Engrave gains a trochoidal strategy under the same geometry model, but the guide
+**is** the unmodified feature centreline — there is no `guideOffset` derivation
+and no `0.01 × D` allowance, because no wall is retained and there is nothing to
+gouge.
+
+Regions bound the guide with **zero** clearance in both polarities and in both
+strategies, exactly as they do for the edge route: the span runs until the tool
+centre reaches the region boundary, and the cutter then sweeps its half-width
+past that line — `tool.radius` under direct, `cutWidth / 2` under trochoidal —
+the same way a pocket's tool sweeps past the line it was clipped to.
+
+Engrave originally dilated the region by the swept half-width, on the theory that
+the cut surface should fully cover the region. That put the cut a whole cut width
+past an include boundary under trochoidal, and a whole tool diameter under direct;
+both were visibly wrong against the region outline on screen. The dilation was
+removed in the #455 follow-up, which changed direct Engrave's region-masked output
+too.
+
+Open guides are supported here and only here — the stationary entry orbit **and**
+stationary exit orbit in `buildTrochoidalContour`'s `closed: false` branch exist
+for this operation. An open engrave guide gets no Clipper CCW winding
+normalisation, so the cut-direction inversion logic is not the same as the edge
+case and is pinned by its own test in `carving.test.ts`.
+
+Trochoidal cannot keep the groove at tool width: `R = (W − D) / 2` requires
+`W > D`, so the feature necessarily widens the groove and is really slotting.
+That is why the option is labelled `Trochoidal (slot)` and carries a
+channel-width readout in the CAM panel.
+
+No tabs, no retained wall, no rest machining. The cut-width bounds, budget
+rules, and the geometry contract in § Geometry apply unchanged.
+
 ## Load-bearing constraints
 
 Each has a comment at its site pointing here.
 
-1. **Trochoidal output must never reach `clipToolpathResultToObstaclesByLevel`
-   or `clipToolpathResultToRegionMask`.** Both drop every non-`cut` move and
-   re-link the survivors with vertical plunges, silently deleting the helical
-   entries. Contour edge routes have no entry strategies, so that defect is
-   latent for them; routing trochoidal through it is what would make it live.
-   Tracked in #452.
+1. **Interruptions are planned in the guide domain before any orbit exists.** The
+   closed guide is split against the forbidden set (tabs, obstacles — each expanded
+   by the single `trochoidalGuideOffset` clearance), region excludes (dilated by
+   `cutWidth / 2` in `resolveRegionDomainCurve`), and region includes (eroded by
+   `−orbitRadius` in `resolveRegionDomainCurve`). A generated orbit must never be
+   clipped, and every fragment is independently helix-entered. Region masks no
+   longer refuse; they participate in guide-domain fragmentation.
 2. **Trochoidal must bypass the shared tab pass.** `useToolpathGeneration` calls
    `applyEdgeRouteTabs`, which returns trochoidal results untouched. The shared
    pass expands tab footprints by `toolRadius + stockToLeaveRadial` while the
@@ -234,7 +275,9 @@ it.
 ## Related
 
 - `src/engine/toolpaths/trochoidalEdge.ts` — the pure sampler
+- `src/engine/toolpaths/trochoidalPath.ts` — shared entry synthesis and point budget; both integrations consume it rather than re-deriving the clearance
 - `src/engine/toolpaths/guideFragments.ts` — cyclic guide splitting
 - `src/engine/toolpaths/edge.ts` — integration, clearances, safety backstop
+- `src/engine/toolpaths/carving.ts` — engrave integration
 - #447 — arc fitting; without it this exports as raw G1
 - #452 — region redesign; restores region support here

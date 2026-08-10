@@ -195,6 +195,143 @@ function testReportIncludesTrochoidalSettings(): void {
   assert(report.settingRows.some((row) => row.label === translate('booklet.label.machiningOrder') && row.value === translate('booklet.machiningOrder.featureFirst')), 'trochoidal routing honours machining order, so the booklet must report it')
 }
 
+function testReportIncludesTrochoidalEdgeSettingsResolvedFromTool(): void {
+  console.log('Testing operation booklet resolves unset trochoidal edge settings from the tool...')
+  const { project, operation, toolpath } = fixture()
+  const tool = normalizeToolForProject(project.tools[0], project)
+  const trochoidalEdge: Operation = {
+    ...operation,
+    kind: 'edge_route_inside',
+    pass: 'rough',
+    edgeStrategy: 'trochoidal',
+  }
+
+  // Both fields deliberately left unset — the common case, since the derived
+  // defaults are good. They track the tool until edited, and the printout must
+  // show the channel that will actually be cut.
+  const derived = buildOperationBookletReport({
+    project,
+    operation: trochoidalEdge,
+    tool,
+    toolpath,
+    generatedAt: new Date('2026-06-04T12:00:00Z'),
+  })
+
+  const expectedWidth = `${tool.diameter * 1.5} mm`
+  assert(
+    derived.settingRows.some((row) => row.label === translate('booklet.label.trochoidalCutWidth') && row.value === expectedWidth),
+    `unset cut width must resolve against the tool (expected ${expectedWidth})`,
+  )
+  assert(
+    derived.settingRows.some((row) => row.label === translate('booklet.label.trochoidalAdvance') && row.value === '0.1 × D'),
+    'unset advance must resolve to the 0.1 x D default rather than reporting zero',
+  )
+  assert(
+    !derived.settingRows.some((row) => row.label === translate('booklet.label.trochoidalCutWidth') && row.value === '0 mm'),
+    'a zero cut width contradicts the toolpath on the shop-floor document',
+  )
+  assert(
+    !derived.settingRows.some((row) => row.label === translate('booklet.label.trochoidalAdvance') && row.value === '0 × D'),
+    'a zero advance contradicts the toolpath on the shop-floor document',
+  )
+
+  // The counterpart direction: an explicit edit pins the value, so it must win
+  // over the derived one. Both values are chosen to differ from what the 6 mm
+  // fixture tool would derive (9 mm and 0.1), or the assertions prove nothing.
+  const pinned = buildOperationBookletReport({
+    project,
+    operation: { ...trochoidalEdge, trochoidalCutWidth: 11, trochoidalAdvance: 0.25 },
+    tool,
+    toolpath,
+    generatedAt: new Date('2026-06-04T12:00:00Z'),
+  })
+
+  assert(
+    pinned.settingRows.some((row) => row.label === translate('booklet.label.trochoidalCutWidth') && row.value === '11 mm'),
+    'an explicitly edited cut width must be reported as edited, not re-derived from the tool',
+  )
+  assert(
+    pinned.settingRows.some((row) => row.label === translate('booklet.label.trochoidalAdvance') && row.value === '0.25 × D'),
+    'an explicitly edited advance must be reported as edited, not replaced by the default',
+  )
+
+  // No tool to derive from. There is nothing honest to print, but the booklet
+  // still has to build: the report already carries the no-tool warning that
+  // explains the zero, and it cannot be the thing that throws.
+  const toolless = buildOperationBookletReport({
+    project,
+    operation: trochoidalEdge,
+    tool: null,
+    toolpath,
+    generatedAt: new Date('2026-06-04T12:00:00Z'),
+  })
+
+  assert(
+    toolless.settingRows.some((row) => row.label === translate('booklet.label.trochoidalCutWidth') && row.value === '0 mm'),
+    'with no tool there is no width to derive, so the row falls back to zero',
+  )
+  assert(
+    toolless.warnings.includes(translate('warnings.bookletNoTool')),
+    'the zero width is only honest because the no-tool warning explains it',
+  )
+}
+
+function testReportIncludesTrochoidalCarveSettings(): void {
+  console.log('Testing operation booklet reports trochoidal Engrave settings...')
+  const { project, operation, toolpath } = fixture()
+  const tool = normalizeToolForProject(project.tools[0], project)
+
+  // Cut width deliberately left unset — it tracks the tool until edited, and the
+  // printout must show the width that will actually be cut, not a placeholder.
+  const report = buildOperationBookletReport({
+    project,
+    operation: {
+      ...operation,
+      kind: 'follow_line',
+      carveStrategy: 'trochoidal',
+      cutDirection: 'climb',
+    },
+    tool,
+    toolpath,
+    generatedAt: new Date('2026-06-04T12:00:00Z'),
+  })
+
+  assert(
+    report.settingRows.some((row) => row.label === translate('booklet.label.edgeStrategy') && row.value === translate('booklet.carveStrategy.trochoidal')),
+    'trochoidal Engrave must name the slot strategy, so the printout cannot be read as a tool-width groove',
+  )
+  const expectedWidth = `${tool.diameter * 1.5} mm`
+  assert(
+    report.settingRows.some((row) => row.label === translate('booklet.label.trochoidalCutWidth') && row.value === expectedWidth),
+    `unset cut width must resolve against the tool (expected ${expectedWidth})`,
+  )
+  assert(
+    report.settingRows.some((row) => row.label === translate('booklet.label.trochoidalAdvance') && row.value === '0.1 × D'),
+    'unset advance must resolve to the 0.1 x D default rather than reporting zero',
+  )
+  assert(
+    report.settingRows.some((row) => row.label === translate('booklet.label.cutDirection') && row.value === translate('booklet.cutDirection.climb')),
+    'trochoidal Engrave derives its orbit sense from cutDirection, so the booklet must report it',
+  )
+
+  // A direct Engrave must be unchanged: no strategy, width, or direction rows.
+  const direct = buildOperationBookletReport({
+    project,
+    operation: { ...operation, kind: 'follow_line', carveStrategy: 'direct' },
+    tool,
+    toolpath,
+    generatedAt: new Date('2026-06-04T12:00:00Z'),
+  })
+  assert(
+    !direct.settingRows.some((row) => row.label === translate('booklet.label.trochoidalCutWidth')),
+    'direct Engrave must not report a trochoidal cut width',
+  )
+  assert(
+    !direct.settingRows.some((row) => row.label === translate('booklet.label.cutDirection')),
+    'direct Engrave has no cut-direction setting, so the booklet must not invent one',
+  )
+}
+
 async function testPdfSmoke(): Promise<void> {
   console.log('Testing operation booklet PDF smoke output...')
   const { project, operation, toolpath } = fixture()
@@ -424,6 +561,8 @@ testFeedTimeFallsBackToToolDefaultFeed()
 testFeedTimeUsesScaledSlotFeed()
 testReportIncludesEnabledRoundOutsideCorners()
 testReportIncludesTrochoidalSettings()
+testReportIncludesTrochoidalEdgeSettingsResolvedFromTool()
+testReportIncludesTrochoidalCarveSettings()
 testLocalizedReportContent()
 await testGermanLabelLayout()
 await testPdfSmoke()

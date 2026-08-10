@@ -4,7 +4,7 @@ Toolpath generators. Each file owns one strategy. `index.ts` re-exports everythi
 
 ## Operations (per-strategy files)
 - `pocket.ts` — pocket clearing (offset-based clearing of an enclosed area)
-- `carving.ts` — engrave / carve along a path
+- `carving.ts` — engrave / carve along a path (`'direct'` centreline or `'trochoidal'` overlapping-orbit slot)
 - `drilling.ts` — drill-cycle generation
 - `edge.ts` — edge / profile-following cuts (outside/inside contour)
 - `vcarve.ts` — V-bit carving via inset-contour offset stepping (`v_carve`, "V-Carve offset")
@@ -26,12 +26,13 @@ Toolpath generators. Each file owns one strategy. `index.ts` re-exports everythi
 - `feed.ts` — shared `effectiveFeed` helper: applies a move's `feedScale` (for slot-feed pocket cuts) to the cut feed, and returns the plunge feed unmodified for plunge moves; used by the postprocessor, booklet time estimator, simulation playback, and the live-feed readout
 - `entry.ts` — clearance-aware plunge, helical, and zig-zag ramp entry synthesis for pocket, surface-clean, and rough-surface clearing operations, including deterministic fallback warnings and plunge-feed limiting
 - `geometry.ts` — toolpath-specific geometric helpers; owns the shared `DEFAULT_FLATTEN_*` sampling constants
+- `trochoidalPath.ts` — shared trochoidal entry synthesis (helix/plunge points, move-count budgeting, and the per-operation point budget type) used by both Edge Route and Engrave
 - `guideFragments.ts` — cyclic closed-guide fragmentation against pre-unioned keep-outs; preserves every safe span and its original unwrapped guide-distance range before entry-bearing motion is generated
 - `tabs.ts` also owns the shared tab footprint geometry (`expandedTabFootprints`) and `applyEdgeRouteTabs`, the edge-route tab pass that deliberately returns trochoidal results untouched — see `planning/TROCHOIDAL_EDGE_DESIGN.md`
 - `offsetSmoothing.ts` — emit-time corner fillet for the outer/wall clearing rings (`roundContourCorners`, `smoothClosedContours`, `cornerSmoothingRadius`); shared by pocket + surface clearing when `roundOutsideCorners` is enabled. Bounds the setback so acute corners leave no crescent; the offset-tree emitter keeps each region's wall-adjacent (root) outer ring sharp so no corner stock stacks into a chip (interior rings self-clean). Islands are rounded the opposite way — via `jtRound` Clipper offsets (see `buildInsetRegions` island join), so the tool wraps convex island corners smoothly without gouging.
-- `linearMoveOptimization.ts` — pure generation-stage finalizer that removes zero-length duplicate non-rapid moves and merges contiguous, direction-preserving, collinear XY moves; zero-length `rapid` moves are load-bearing positioning markers (see entry.ts) and are preserved so the first plunge stays vertical; applied after tabs but before clamp warnings
+- `linearMoveOptimization.ts` — pure generation-stage finalizer that removes zero-length duplicate moves and merges contiguous, direction-preserving, collinear XY moves; applied after tabs but before clamp warnings. Zero-length **rapids** are kept: they are each operation's entry-positioning marker for the postprocessor (see entry.ts), not noise — deleting one turns the first plunge into a diagonal cut across the stock at plunge feed (issue #467)
 - `arcReconstruction.ts` — recovers arcs/circles/beziers from flattened Clipper output: known-circle reconstruction, segment-preserving boolean reconstruction (annotation map), and the Clipper-offset simplification pipeline (Kasa fit + RDP)
-- `regions.ts` — region computation (which area belongs to which op); the obstacle/region clippers re-link cut fragments via safe transitions that emit a zero-length positioning rapid when the tool has no established position, so operation-start plunges never cut diagonally
+- `regions.ts` — region computation (which area belongs to which op); region mask domain resolution for Edge Route runs through `resolveRegionDomainCurve`
 - `resolver.ts` — resolves features+operations into clipper input regions; V-carve accepts closed Subtract and Line features (S2), Pocket remains Subtract-only; Line paths use even-odd fill semantics for nested contour holes
 - `restRegions.ts` — rest-machining region computation (what a prior tool missed)
 - `silhouette.ts` — extracts 2D silhouette from 3D mesh for sketch projection
@@ -40,9 +41,8 @@ Toolpath generators. Each file owns one strategy. `index.ts` re-exports everythi
 - `clamps.ts` — clamp clearance / avoidance regions
 
 ## Tests
-- `linearMoveOptimization.test.ts` — zero-length removal, positioning-rapid preservation, collinear merge, and boundary preservation
-- `regions.test.ts` — obstacle/region clipping transitions (issue #467): operation-start transitions emit a zero-length positioning rapid before the first plunge; mid-path transitions keep real non-zero rapids
-- `trochoidalEdge.test.ts` — deterministic closed/open orbit sampling, seam closure, direction, aligned guide distances, exact breakpoints, normalized duplicate vertices, and fail-closed budgets. Integrated cut-direction parity (trochoidal vs contour, inside and outside), circular/multi-target guides, rectangular/smooth tabs, and overlapping tabs live in `toolpaths.test.ts`
+- `linearMoveOptimization.test.ts` — zero-length removal, entry-marker (zero-length rapid) preservation, collinear merge, and boundary preservation
+- `trochoidalEdge.test.ts` — deterministic closed/open orbit sampling, seam closure, direction, normalized duplicate vertices, and fail-closed budgets. Integrated cut-direction parity (trochoidal vs contour, inside and outside), circular/multi-target guides, and overlapping tabs live in `toolpaths.test.ts`
 - `feed.test.ts` — shared effectiveFeed helper: cut/plunge/lead-in/lead-out move kinds, feedScale present/absent, and plunge ignores-feedScale invariance
 - `entry.test.ts` — helix pitch/direction, region/island clearance, no-core diameter bounds, bottom flattening, ramp fallback, and plunge-feed limiting
 - `geometry.test.ts` — shared nearest-neighbour ordering and squared-XY-distance behavior
@@ -52,7 +52,8 @@ Toolpath generators. Each file owns one strategy. `index.ts` re-exports everythi
 - `resolverReadPath.test.ts` — resolved instance geometry and missing-definition behavior in toolpath resolution
 - `vcarveLineResolver.test.ts` — S2 closed-Line V-carve resolver tests: single Line, open-Line rejection, nested even-odd holes, disjoint Lines, mixed Subtract + Line, Subtract-only regression
 - `clamps.test.ts` — clamp collision warnings, rapid auto-lift, per-move collision tagging
-	- `camOperationSmoke.test.ts` --- per-operation-kind smoke: pocket parallel/waterline patterns, drill-type differentiation (simple/peck/dwell/chip_breaking), post smoke for thin ops (v_carve, surface_clean, follow_line, v_carve_medial; closed-Line V-carve smoke); also documents the stock-target resolver gap
+- `carving.test.ts` — direct-mode regression, open/closed guide orbits, swept envelope, region polarity, fail-closed width/V-bit/budget guards, and open-guide cut-direction parity
+- `camOperationSmoke.test.ts` --- per-operation-kind smoke covering every kind: pocket parallel/waterline patterns, drill-type differentiation (simple/peck/dwell/chip_breaking), thin ops (v_carve, surface_clean, follow_line, v_carve_medial; closed-Line V-carve smoke), edge route inside/outside, and the three 3D surface kinds via the `test-fixtures/*.camj` meshes; also documents the stock-target resolver gap. Its shared `postToolpath` helper runs `optimizeLinearMoves` before posting — matching the real `useToolpathGeneration` pipeline — and asserts the #467 entry invariant on the emitted G-code, so every present and future smoke test gets that check for free (issue #470)
 - `roughSurface.test.ts` / `finishSurface.test.ts` / `finishSurfaceCleanup.test.ts` / `meshSlicing.test.ts` / `vcarveMedial/vcarveMedial.test.ts` — strategy-specific
 - `surfaceOperationValidation.test.ts` — real cone and hard-edge fixture matrix across Rough, Parallel, Waterline, and Cleanup, using an independently rasterized target surface plus swept-cutter simulation to validate stock, peak coverage, projected passes, determinism, and stable-interior gouging
 - `pocketTessellationConsistency.test.ts` — regression for circle/arc sampling consistency (issue #359): full-circle and broken-circle pockets must have identical chord sagitta

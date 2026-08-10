@@ -166,6 +166,20 @@ export function buildTrochoidalContour(
     Math.ceil(2 * Math.PI * options.orbitRadius / maxChord),
   )
   const movingSteps = loopCount * stepsPerLoop
+  const maxPoints = Math.min(DEFAULT_TROCHOIDAL_POINT_BUDGET, options.maxPoints ?? DEFAULT_TROCHOIDAL_POINT_BUDGET)
+  const stationarySteps = stepsPerLoop * (closed ? 1 : 2)
+  if (movingSteps + stationarySteps + 1 > maxPoints) {
+    return {
+      points: [],
+      guideDistances: [],
+      guideLength: path.length,
+      entryCenter: null,
+      loopCount,
+      actualAdvance,
+      error: 'move-budget',
+    }
+  }
+
   const movingDistances = Array.from(new Set([
     ...Array.from({ length: movingSteps }, (_, index) => path.length * (index + 1) / movingSteps),
     ...(options.guideBreakpoints ?? [])
@@ -173,8 +187,6 @@ export function buildTrochoidalContour(
       .map((distance) => Math.max(0, Math.min(path.length, distance)))
       .filter((distance) => distance > 0 && distance < path.length),
   ])).sort((left, right) => left - right)
-  const maxPoints = Math.min(DEFAULT_TROCHOIDAL_POINT_BUDGET, options.maxPoints ?? DEFAULT_TROCHOIDAL_POINT_BUDGET)
-  const stationarySteps = stepsPerLoop * (closed ? 1 : 2)
   if (movingDistances.length + stationarySteps + 1 > maxPoints) {
     return {
       points: [],
